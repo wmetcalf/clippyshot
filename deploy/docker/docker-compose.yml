@@ -67,15 +67,18 @@ services:
       - CLIPPYSHOT_JOB_RETENTION_SECONDS=${CLIPPYSHOT_JOB_RETENTION_SECONDS:-0}
       - CLIPPYSHOT_WORKER_IMAGE=${CLIPPYSHOT_WORKER_IMAGE:-clippyshot:dev}
       - CLIPPYSHOT_DISPATCH_INTERVAL=${CLIPPYSHOT_DISPATCH_INTERVAL:-5}
-      - CLIPPYSHOT_DISPATCH_CONCURRENCY=${CLIPPYSHOT_DISPATCH_CONCURRENCY:-4}
+      # Concurrency + worker caps: empty = auto-size to host at dispatcher
+      # startup (see clippyshot.runtime.host_limits). Set explicitly to
+      # override.
+      - CLIPPYSHOT_DISPATCH_CONCURRENCY=${CLIPPYSHOT_DISPATCH_CONCURRENCY:-}
       # Force the worker runtime (empty = auto-detect, prefer runsc). Set
       # to `runc` or `runsc` to override.
       - CLIPPYSHOT_WORKER_RUNTIME=${CLIPPYSHOT_WORKER_RUNTIME:-}
-      # Per-worker resource caps applied when the dispatcher launches
-      # each soffice worker container. Leave unset to use defaults.
-      - CLIPPYSHOT_WORKER_MEMORY=${CLIPPYSHOT_WORKER_MEMORY:-4g}
-      - CLIPPYSHOT_WORKER_PIDS_LIMIT=${CLIPPYSHOT_WORKER_PIDS_LIMIT:-256}
-      - CLIPPYSHOT_WORKER_CPUS=${CLIPPYSHOT_WORKER_CPUS:-1.0}
+      # Per-worker resource caps. Leave empty to auto-size based on host
+      # CPU + memory at startup. Set explicitly to pin.
+      - CLIPPYSHOT_WORKER_MEMORY=${CLIPPYSHOT_WORKER_MEMORY:-}
+      - CLIPPYSHOT_WORKER_PIDS_LIMIT=${CLIPPYSHOT_WORKER_PIDS_LIMIT:-}
+      - CLIPPYSHOT_WORKER_CPUS=${CLIPPYSHOT_WORKER_CPUS:-}
       - CLIPPYSHOT_WORKER_NOFILE=${CLIPPYSHOT_WORKER_NOFILE:-4096}
       # When set, attached to each worker via `--security-opt=seccomp=`.
       # Must be a path on the HOST filesystem (not inside the dispatcher).
@@ -93,8 +96,8 @@ services:
       - CLIPPYSHOT_ENABLE_QR=${CLIPPYSHOT_ENABLE_QR:-1}
       - CLIPPYSHOT_ENABLE_OCR=${CLIPPYSHOT_ENABLE_OCR:-0}
       - CLIPPYSHOT_OCR_ALL=${CLIPPYSHOT_OCR_ALL:-0}
-      - CLIPPYSHOT_OCR_LANG=${CLIPPYSHOT_OCR_LANG:-eng}
-      - CLIPPYSHOT_OCR_PSM=${CLIPPYSHOT_OCR_PSM:-6}
+      - CLIPPYSHOT_OCR_LANG=${CLIPPYSHOT_OCR_LANG:-eng+Latin}
+      - CLIPPYSHOT_OCR_PSM=${CLIPPYSHOT_OCR_PSM:-3}
       - CLIPPYSHOT_OCR_TIMEOUT_S=${CLIPPYSHOT_OCR_TIMEOUT_S:-60}
       - CLIPPYSHOT_QR_FORMATS=${CLIPPYSHOT_QR_FORMATS:-qr_code,micro_qr_code,rmqr_code}
       - CLIPPYSHOT_ZXING_TIMEOUT_S=${CLIPPYSHOT_ZXING_TIMEOUT_S:-10}
@@ -122,10 +125,12 @@ services:
       - /opt/clippyshot/bin/python
       - -c
       - >-
-        import os; from clippyshot.dispatcher import Dispatcher; from clippyshot.jobs import SqlJobStore;
+        import logging, os; logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s");
+        from clippyshot.runtime import apply_host_defaults; apply_host_defaults();
+        from clippyshot.dispatcher import Dispatcher; from clippyshot.jobs import SqlJobStore;
         dispatcher = Dispatcher(job_store=SqlJobStore(os.environ["CLIPPYSHOT_DATABASE_URL"]),
         image_name=os.environ.get("CLIPPYSHOT_WORKER_IMAGE", "clippyshot:dev"),
-        max_parallel_jobs=int(os.environ.get("CLIPPYSHOT_DISPATCH_CONCURRENCY", "4")));
+        max_parallel_jobs=int(os.environ["CLIPPYSHOT_DISPATCH_CONCURRENCY"]));
         dispatcher.run_forever(float(os.environ.get("CLIPPYSHOT_DISPATCH_INTERVAL", "5")))
     networks:
       - backend
