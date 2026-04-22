@@ -17,17 +17,7 @@ The intended use case is taking untrusted user-uploaded documents from a
 web service, rendering them safely on a worker, and serving the result as
 images.
 
-> 🎶 **Theme song**: ["ClippyShot"](https://suno.com/s/2PVm6rdBfu3ooG9K) —
-> a 70s blues-soul funk cop-show theme about a sandboxed screenshot tool
-> that locks malicious office files in an isolated darkroom and renders
-> them safely through LibreOffice. Written on a whim; stuck around because
-> it captures the vibe.
-
-## Status
-
-31 commits, 83 tests passing locally (10 skipped — sandbox/integration tests
-that require AppArmor user-namespace profiles loaded on the host, or are gated
-to run inside the Docker image).
+🎶 [Theme song](https://suno.com/s/2PVm6rdBfu3ooG9K)
 
 ## Quick start
 
