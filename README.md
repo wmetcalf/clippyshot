@@ -154,6 +154,110 @@ Five shipping shapes, trading setup effort for isolation depth:
 
 **Pick Compose + gVisor** unless you have a specific reason not to — it has the lowest host-assumption count, the best blast-radius story (gVisor intercepts syscalls at the VM-like boundary), and works on RHEL/SUSE/etc. where AppArmor isn't a thing. Host-native bwrap/nsjail are fallbacks for bare-metal installs where running Docker isn't acceptable; nsjail specifically adds KAFEL-expressed seccomp and `--cgroup-pids` ergonomics at the cost of needing a from-source build.
 
+### Compose + gVisor (runsc) — recommended
+
+```mermaid
+flowchart TB
+    client[👤 Client<br/>upload doc]
+    subgraph host["Host (Linux)"]
+        subgraph apic["🛡️ API container<br/>read-only, cap-drop=ALL, no-new-privs"]
+            api[FastAPI<br/>Postgres URL only]
+        end
+        subgraph dispc["🛡️ Dispatcher container<br/>read-only, cap-drop=ALL, docker.sock access"]
+            disp[Dispatcher loop<br/>claim jobs, launch workers]
+        end
+        subgraph pg["Postgres container"]
+            pgd[(Job store)]
+        end
+        subgraph runsc["⚔️ gVisor / runsc per-job worker"]
+            subgraph worker["🛡️ Worker container<br/>read-only, cap-drop=ALL, no-new-privs,<br/>--network=none, seccomp=clippyshot.json,<br/>apparmor=clippyshot-soffice"]
+                subgraph cs["ContainerSandbox (in-process)"]
+                    soff[LibreOffice<br/>MacroSecurity=4, no Java/net/OLE]
+                    pdftoppm[pdftoppm]
+                    zxing[ZXingReader]
+                    tess[tesseract]
+                end
+            end
+        end
+    end
+    client -->|HTTPS + auth| api
+    api -->|enqueue| pgd
+    disp -->|poll| pgd
+    disp -->|docker run --runtime=runsc| worker
+    worker -->|metadata + pages| disp
+    disp -->|result| pgd
+    client -->|GET artifacts| api
+```
+
+Layers, outside→in: host kernel → Docker container hardening → gVisor syscall interception → inner `ContainerSandbox` assertions → hardened LibreOffice profile.
+
+### Compose + runc (no gVisor)
+
+```mermaid
+flowchart TB
+    client[👤 Client]
+    subgraph host["Host (Linux)"]
+        api2[API container]
+        disp2[Dispatcher container]
+        pg2[(Postgres)]
+        subgraph worker2["🛡️ Worker container (runc)<br/>read-only, cap-drop=ALL, no-new-privs,<br/>--network=none, seccomp=clippyshot.json,<br/>apparmor=clippyshot-soffice"]
+            subgraph cs2["ContainerSandbox<br/>(requires WARN_ON_INSECURE=1)"]
+                soff2[LibreOffice]
+                pdftoppm2[pdftoppm]
+                zxing2[ZXingReader]
+                tess2[tesseract]
+            end
+        end
+    end
+    client -->|HTTPS + auth| api2
+    api2 --> pg2
+    disp2 --> pg2
+    disp2 -->|docker run --runtime=runc| worker2
+```
+
+Same as gVisor mode minus the syscall-interception layer. Operator must opt into the insecure path via `CLIPPYSHOT_WARN_ON_INSECURE=1`; the ContainerSandbox's hardening checks read `/proc/self/status`, which gVisor virtualises (so runsc needs the opt-in automatically; runc doesn't and the dispatcher refuses until asked).
+
+### Host-native bwrap / nsjail
+
+```mermaid
+flowchart TB
+    client[👤 Client]
+    subgraph host["Host (Linux) — AppArmor profiles loaded"]
+        api3[clippyshot serve<br/>FastAPI process]
+        subgraph bwrap["⚔️ bwrap OR nsjail sandbox (per-job subprocess)<br/>user+mount+PID+IPC+UTS+cgroup+net namespaces,<br/>cap-drop=ALL, seccomp-BPF / KAFEL, rlimits,<br/>aa-exec clippyshot-soffice"]
+            soff3[LibreOffice]
+            pdftoppm3[pdftoppm]
+            zxing3[ZXingReader]
+            tess3[tesseract]
+        end
+    end
+    client -->|HTTP or HTTPS| api3
+    api3 -->|fork + sandbox| bwrap
+    bwrap -->|stdout / files| api3
+```
+
+No Docker dependency; the FastAPI process spawns a fresh `bwrap` (or `nsjail`) subprocess per job with its own namespaces and seccomp filter. Needs the shipped `clippyshot-{bwrap,nsjail,soffice}` AppArmor profiles loaded on Ubuntu 24.04+ for userns.
+
+### Shared pipeline (all modes)
+
+```mermaid
+flowchart LR
+    upload[📄 upload] --> detect[Magika<br/>+ libmagic<br/>content-type]
+    detect --> soffice[LibreOffice<br/>hardened profile]
+    soffice --> pdf[PDF]
+    pdf --> pdftoppm[pdftoppm<br/>150 DPI]
+    pdftoppm --> pages[per-page PNGs]
+    pages --> fanout[parallel fan-out]
+    fanout --> hash[pHash + colorhash<br/>+ SHA-256]
+    fanout --> trim[trim bottom<br/>focus derivative]
+    fanout --> qr[ZXingReader<br/>QR scan]
+    fanout --> ocr[tesseract<br/>OCR gating: images<br/>+ drawings + empty TL]
+    hash --> out[metadata.json<br/>+ encrypted zip<br/>+ PDF]
+    trim --> out
+    qr --> out
+    ocr --> out
+```
+
 Notes that matter in practice:
 - On **Ubuntu 24.04+**, unprivileged user namespaces are restricted by default (`kernel.apparmor_restrict_unprivileged_userns=1`). bwrap/nsjail won't work until the shipped `deploy/apparmor/clippyshot-{bwrap,nsjail}` profiles are loaded. See `deploy/apparmor/README.md`.
 - AppArmor-specific — on **RHEL/Fedora/Arch**, the `aa-exec` wrapper is a no-op (not installed), so the `clippyshot-soffice` MAC layer drops off; namespace + seccomp + caps still apply.
