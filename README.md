@@ -27,6 +27,18 @@ Only requires Docker 20.10+ with Compose v2. Nothing to install on the
 host beyond that.
 
 ```sh
+./deploy/docker/clippyshot-compose up --build -d
+```
+
+The wrapper auto-detects your host's docker-socket GID (varies across
+distros — 110 on Ubuntu, 999 on Debian, 984 on RHEL) and writes it to
+`deploy/docker/.env` so the dispatcher container can read the socket.
+Every other argument is passed straight through to `docker compose`,
+so `./deploy/docker/clippyshot-compose logs -f dispatcher`,
+`./deploy/docker/clippyshot-compose down`, etc. all work as expected.
+
+If you'd rather not use the wrapper:
+```sh
 export DOCKER_GID=$(stat -c %g /var/run/docker.sock)
 docker compose -f deploy/docker/docker-compose.yml up --build -d
 ```
