@@ -19,6 +19,8 @@ header img.logo{width:320px;height:auto;border-radius:12px;box-shadow:0 12px 32p
 header img.logo:hover{transform:scale(1.02)}
 header h1{font-size:2.8rem;font-weight:900;letter-spacing:-1.5px;background:linear-gradient(135deg, #fff, #8b949e);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:12px;font-family:'Outfit',system-ui,sans-serif}
 header .ver{font-size:.85rem;color:#58a6ff;background:rgba(88,166,255,.1);padding:4px 14px;border-radius:20px;border:1px solid rgba(88,166,255,.2);font-family:monospace;letter-spacing:1px}
+header .theme-song{margin-left:8px;color:#d29922;background:rgba(210,153,34,.08);border-color:rgba(210,153,34,.25);text-decoration:none;letter-spacing:0;font-family:inherit}
+header .theme-song:hover{background:rgba(210,153,34,.18)}
 
 /* Upload area */
 .upload{border:2px dashed #30363d;border-radius:12px;padding:48px 24px;text-align:center;cursor:pointer;transition:all .2s}
@@ -40,6 +42,8 @@ header .ver{font-size:.85rem;color:#58a6ff;background:rgba(88,166,255,.1);paddin
 /* Results */
 .result{margin-top:24px;display:none}
 .result.show{display:block}
+.back-btn{display:inline-block;margin-bottom:18px;padding:6px 14px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;font-size:.85rem;cursor:pointer;transition:background .2s}
+.back-btn:hover{background:#30363d;border-color:#58a6ff}
 .meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px}
 @media(max-width:768px){.meta-grid{grid-template-columns:1fr}}
 .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px}
@@ -66,6 +70,8 @@ header .ver{font-size:.85rem;color:#58a6ff;background:rgba(88,166,255,.1);paddin
 .job-table{width:100%;border-collapse:collapse;font-size:.82rem}
 .job-table th{text-align:left;padding:8px;border-bottom:1px solid #30363d;color:#8b949e}
 .job-table td{padding:8px;border-bottom:1px solid #21262d}
+.id-cell{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.72rem;color:#58a6ff;white-space:nowrap}
+.sha-cell{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.72rem;color:#8b949e;white-space:nowrap}
 .badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:.75rem}
 .badge.queued{background:#1f6feb22;color:#58a6ff}
 .badge.running{background:#d2992222;color:#d29922}
@@ -99,6 +105,7 @@ header .ver{font-size:.85rem;color:#58a6ff;background:rgba(88,166,255,.1);paddin
   <header>
     <img src="/assets/logo.png" alt="ClippyShot" class="logo">
     <span class="ver" id="ver">loading...</span>
+    <a class="ver theme-song" href="https://suno.com/s/2PVm6rdBfu3ooG9K" target="_blank" rel="noopener" title="70s blues-soul funk theme for ClippyShot">🎶 theme song</a>
   </header>
 
   <div class="upload" id="dropzone">
@@ -107,7 +114,7 @@ header .ver{font-size:.85rem;color:#58a6ff;background:rgba(88,166,255,.1);paddin
     <button class="btn" onclick="document.getElementById('fileinput').click()">Browse files</button>
     <input type="file" id="fileinput" multiple>
   </div>
-  <div style="display:flex;gap:16px;margin:10px 0 20px;font-size:.85rem;color:#8b949e;align-items:center;flex-wrap:wrap">
+  <div id="scan-opts" style="display:flex;gap:16px;margin:10px 0 20px;font-size:.85rem;color:#8b949e;align-items:center;flex-wrap:wrap">
     <label><input type="checkbox" id="opt-qr" checked> QR scan</label>
     <label><input type="checkbox" id="opt-ocr"> OCR</label>
     <label><input type="checkbox" id="opt-ocr-all"> OCR all pages (not just image-bearing)</label>
@@ -116,6 +123,7 @@ header .ver{font-size:.85rem;color:#58a6ff;background:rgba(88,166,255,.1);paddin
   <div class="status" id="status"></div>
 
   <div class="result" id="result">
+    <button class="back-btn" onclick="showJobList()" title="Back to job list">← Back to jobs</button>
     <div class="meta-grid">
       <div class="card" id="input-card">
         <h3>Input</h3>
@@ -159,6 +167,7 @@ header .ver{font-size:.85rem;color:#58a6ff;background:rgba(88,166,255,.1);paddin
         <th>ID</th>
         <th style="cursor:pointer" onclick="sortJobs('filename')">File <span id="sort-filename"></span></th>
         <th style="cursor:pointer" onclick="sortJobs('ext')">Ext <span id="sort-ext"></span></th>
+        <th>SHA-256</th>
         <th style="cursor:pointer" onclick="sortJobs('status')">Status <span id="sort-status"></span></th>
         <th style="cursor:pointer" onclick="sortJobs('pages')">Pages <span id="sort-pages"></span></th>
         <th>Detail</th>
@@ -219,7 +228,7 @@ async function submitFile(file) {
     const job = await r.json();
     lastJobId = job.job_id;
     st.className='status info';
-    st.innerHTML='<span class="prog"></span> Job <b>'+job.job_id.slice(0,8)+'</b> queued...';
+    st.innerHTML='<span class="prog"></span> Job <b>'+job.job_id+'</b> queued...';
     pollJob(job.job_id, file.name);
   } catch(e) {
     st.className='status err';
@@ -294,7 +303,25 @@ function showFailure(job) {
     '<div style="padding:24px;color:#f85149;text-align:center">Conversion failed. No pages rendered.</div>';
   document.getElementById('dl-link').style.display = 'none';
   document.getElementById('dl-pdf').style.display = 'none';
-  res.classList.add('show');
+  _showJobDetail();
+}
+
+function _showJobDetail() {
+  document.getElementById('result').classList.add('show');
+  document.querySelector('header').style.display = 'none';
+  document.querySelector('.upload').style.display = 'none';
+  document.getElementById('scan-opts').style.display = 'none';
+  document.querySelector('.recent').style.display = 'none';
+  window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+function showJobList() {
+  document.getElementById('result').classList.remove('show');
+  document.querySelector('header').style.display = '';
+  document.querySelector('.upload').style.display = '';
+  // scan-opts uses flex layout; restore explicitly so we don't fall back to block.
+  document.getElementById('scan-opts').style.display = 'flex';
+  document.querySelector('.recent').style.display = '';
 }
 
 async function loadResult(jobId) {
@@ -312,7 +339,7 @@ async function loadResult(jobId) {
     setTable('input-table', [
       ['Filename', inp.filename],
       ['Size', fmtSize(inp.size_bytes)],
-      ['SHA-256', inp.sha256 ? '<code>'+inp.sha256.slice(0,16)+'...</code>' : ''],
+      ['SHA-256', inp.sha256 ? '<code style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.75rem;word-break:break-all">'+esc(inp.sha256)+'</code>' : ''],
       ['Detected', det.label+' ('+det.source+', '+Math.round((det.confidence||0)*100)+'%)'+magikaNote],
       ['MIME', det.mime],
       ['Magika', (det.magika_label||'-')+' / '+(det.magika_mime||'-')],
@@ -468,7 +495,7 @@ async function loadResult(jobId) {
       grid.appendChild(card);
     }
 
-    res.classList.add('show');
+    _showJobDetail();
   } catch(e) {
     console.error('loadResult error:', e);
   }
@@ -493,7 +520,12 @@ let _currentJobIds = [];  // populated by refreshJobs
 let _currentJobIdx = -1;
 
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') closeLightbox();
+  if (e.key === 'Escape') {
+    // Lightbox (page image) closes first; if it wasn't open, exit job detail.
+    const lb = document.getElementById('lightbox');
+    if (lb && lb.classList.contains('show')) { closeLightbox(); return; }
+    if (document.getElementById('result').classList.contains('show')) { showJobList(); return; }
+  }
   if (e.key === 'ArrowLeft' && _currentJobIds.length > 0) {
     _currentJobIdx = Math.max(0, _currentJobIdx - 1);
     _navigateToJob(_currentJobIdx);
@@ -562,7 +594,7 @@ async function refreshJobs() {
     _currentJobIds = jobs.map(j => ({id: j.job_id, status: j.status}));
     const tbody = document.getElementById('job-tbody');
     tbody.innerHTML = jobs.map(j => {
-      const id = j.job_id.slice(0,8);
+      const id = j.job_id;
       const errorTitle = j.error ? ' title="'+esc(j.error)+'"' : '';
       const badge = '<span class="badge '+j.status+'"'+errorTitle+'>'+j.status+'</span>';
       const pages = (j.pages_done && j.pages_total) ? j.pages_done+'/'+j.pages_total : '-';
@@ -620,7 +652,10 @@ async function refreshJobs() {
         pagesDisplay = '<span class="warn" title="All pages detected as blank">0/'+j.pages_total+' (all blank)</span>';
       }
       const actions = '<button class="danger-btn" onclick="event.stopPropagation();deleteJob(\''+j.job_id+'\')">Delete</button>';
-      return '<tr data-job-id="'+j.job_id+'"'+click+'><td><code>'+id+'</code></td><td>'+name+'</td><td><code>'+esc(fileExt)+'</code></td><td class="badges">'+badge+'</td><td>'+pagesDisplay+'</td><td>'+detail+'</td><td>'+time+'</td><td>'+actions+'</td></tr>';
+      const sha = j.input_sha256
+        ? '<code class="sha-cell" title="'+esc(j.input_sha256)+'">'+esc(j.input_sha256)+'</code>'
+        : '<span class="muted">-</span>';
+      return '<tr data-job-id="'+esc(j.job_id)+'"'+click+'><td><code class="id-cell" title="'+esc(j.job_id)+'">'+id+'</code></td><td>'+name+'</td><td><code>'+esc(fileExt)+'</code></td><td>'+sha+'</td><td class="badges">'+badge+'</td><td>'+pagesDisplay+'</td><td>'+detail+'</td><td>'+time+'</td><td>'+actions+'</td></tr>';
     }).join('');
     // Lazy QR badge fetch for done jobs
     for (const job of jobs) {
