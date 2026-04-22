@@ -157,106 +157,87 @@ Five shipping shapes, trading setup effort for isolation depth:
 ### Compose + gVisor (runsc) — recommended
 
 ```mermaid
-flowchart TB
-    client[👤 Client<br/>upload doc]
-    subgraph host["Host (Linux)"]
-        subgraph apic["🛡️ API container<br/>read-only, cap-drop=ALL, no-new-privs"]
-            api[FastAPI<br/>Postgres URL only]
-        end
-        subgraph dispc["🛡️ Dispatcher container<br/>read-only, cap-drop=ALL, docker.sock access"]
-            disp[Dispatcher loop<br/>claim jobs, launch workers]
-        end
-        subgraph pg["Postgres container"]
-            pgd[(Job store)]
-        end
-        subgraph runsc["⚔️ gVisor / runsc per-job worker"]
-            subgraph worker["🛡️ Worker container<br/>read-only, cap-drop=ALL, no-new-privs,<br/>--network=none, seccomp=clippyshot.json,<br/>apparmor=clippyshot-soffice"]
-                subgraph cs["ContainerSandbox (in-process)"]
-                    soff[LibreOffice<br/>MacroSecurity=4, no Java/net/OLE]
-                    pdftoppm[pdftoppm]
-                    zxing[ZXingReader]
-                    tess[tesseract]
-                end
-            end
-        end
+flowchart LR
+    client((Client))
+    api[API container]
+    disp[Dispatcher]
+    pg[(Postgres)]
+    subgraph worker["Worker container (runsc)"]
+        cs[ContainerSandbox]
+        cs --- soff[LibreOffice]
+        cs --- rast[pdftoppm]
+        cs --- scan[ZXing + tesseract]
     end
-    client -->|HTTPS + auth| api
-    api -->|enqueue| pgd
-    disp -->|poll| pgd
-    disp -->|docker run --runtime=runsc| worker
-    worker -->|metadata + pages| disp
-    disp -->|result| pgd
-    client -->|GET artifacts| api
+    client -->|HTTPS| api
+    api --> pg
+    disp --> pg
+    disp -.->|docker run --runtime=runsc| worker
 ```
 
-Layers, outside→in: host kernel → Docker container hardening → gVisor syscall interception → inner `ContainerSandbox` assertions → hardened LibreOffice profile.
+Hardening on each tier, outside→in:
+- **API container** — read-only rootfs, `cap-drop=ALL`, `no-new-privileges`, no Docker socket, only Postgres + job-artifact access.
+- **Dispatcher container** — same, plus `/var/run/docker.sock` to launch workers. No PII handling.
+- **Worker container** — read-only rootfs, `--network=none`, dedicated `seccomp=clippyshot.json`, `apparmor=clippyshot-soffice`, UID 10001.
+- **gVisor (runsc)** — syscall-level interception; LibreOffice never talks to the host kernel directly.
+- **ContainerSandbox** — in-process checks that NoNewPrivs, Seccomp, and cap-drop are effective before LO starts.
+- **LibreOffice** — MacroSecurity=3, Java/OLE/updates/network all disabled.
 
 ### Compose + runc (no gVisor)
 
 ```mermaid
-flowchart TB
-    client[👤 Client]
-    subgraph host["Host (Linux)"]
-        api2[API container]
-        disp2[Dispatcher container]
-        pg2[(Postgres)]
-        subgraph worker2["🛡️ Worker container (runc)<br/>read-only, cap-drop=ALL, no-new-privs,<br/>--network=none, seccomp=clippyshot.json,<br/>apparmor=clippyshot-soffice"]
-            subgraph cs2["ContainerSandbox<br/>(requires WARN_ON_INSECURE=1)"]
-                soff2[LibreOffice]
-                pdftoppm2[pdftoppm]
-                zxing2[ZXingReader]
-                tess2[tesseract]
-            end
-        end
+flowchart LR
+    client((Client))
+    api[API]
+    disp[Dispatcher]
+    pg[(Postgres)]
+    subgraph worker["Worker container (runc)"]
+        cs[ContainerSandbox]
+        cs --- soff[LibreOffice]
+        cs --- scan[Scanners]
     end
-    client -->|HTTPS + auth| api2
-    api2 --> pg2
-    disp2 --> pg2
-    disp2 -->|docker run --runtime=runc| worker2
+    client -->|HTTPS| api
+    api --> pg
+    disp --> pg
+    disp -.->|docker run --runtime=runc| worker
 ```
 
-Same as gVisor mode minus the syscall-interception layer. Operator must opt into the insecure path via `CLIPPYSHOT_WARN_ON_INSECURE=1`; the ContainerSandbox's hardening checks read `/proc/self/status`, which gVisor virtualises (so runsc needs the opt-in automatically; runc doesn't and the dispatcher refuses until asked).
+Same topology minus gVisor's syscall-interception layer. The ContainerSandbox's hardening checks read `/proc/self/status`; runsc virtualises that file (so it opts into the "insecure" fallback automatically), runc doesn't — on runc the operator must set `CLIPPYSHOT_WARN_ON_INSECURE=1` explicitly.
 
 ### Host-native bwrap / nsjail
 
 ```mermaid
-flowchart TB
-    client[👤 Client]
-    subgraph host["Host (Linux) — AppArmor profiles loaded"]
-        api3[clippyshot serve<br/>FastAPI process]
-        subgraph bwrap["⚔️ bwrap OR nsjail sandbox (per-job subprocess)<br/>user+mount+PID+IPC+UTS+cgroup+net namespaces,<br/>cap-drop=ALL, seccomp-BPF / KAFEL, rlimits,<br/>aa-exec clippyshot-soffice"]
-            soff3[LibreOffice]
-            pdftoppm3[pdftoppm]
-            zxing3[ZXingReader]
-            tess3[tesseract]
-        end
+flowchart LR
+    client((Client))
+    api[clippyshot serve]
+    subgraph sbx["bwrap or nsjail (per job)"]
+        soff[LibreOffice]
+        rast[pdftoppm]
+        scan[ZXing + tesseract]
     end
-    client -->|HTTP or HTTPS| api3
-    api3 -->|fork + sandbox| bwrap
-    bwrap -->|stdout / files| api3
+    client -->|HTTP/S| api
+    api -.->|fork + sandbox| sbx
 ```
 
-No Docker dependency; the FastAPI process spawns a fresh `bwrap` (or `nsjail`) subprocess per job with its own namespaces and seccomp filter. Needs the shipped `clippyshot-{bwrap,nsjail,soffice}` AppArmor profiles loaded on Ubuntu 24.04+ for userns.
+No Docker dependency. FastAPI forks a fresh `bwrap` (or `nsjail`) subprocess per conversion with its own user/mount/PID/IPC/UTS/cgroup/network namespaces, dropped caps, seccomp-BPF (bwrap) or KAFEL (nsjail), rlimits, and `aa-exec clippyshot-soffice` attached. On Ubuntu 24.04+ this needs the shipped `clippyshot-{bwrap,nsjail,soffice}` AppArmor profiles loaded once; see `deploy/apparmor/README.md`.
 
 ### Shared pipeline (all modes)
 
 ```mermaid
 flowchart LR
-    upload[📄 upload] --> detect[Magika<br/>+ libmagic<br/>content-type]
-    detect --> soffice[LibreOffice<br/>hardened profile]
+    upload[Upload] --> detect[Magika + libmagic]
+    detect --> soffice[LibreOffice]
     soffice --> pdf[PDF]
-    pdf --> pdftoppm[pdftoppm<br/>150 DPI]
-    pdftoppm --> pages[per-page PNGs]
-    pages --> fanout[parallel fan-out]
-    fanout --> hash[pHash + colorhash<br/>+ SHA-256]
-    fanout --> trim[trim bottom<br/>focus derivative]
-    fanout --> qr[ZXingReader<br/>QR scan]
-    fanout --> ocr[tesseract<br/>OCR gating: images<br/>+ drawings + empty TL]
-    hash --> out[metadata.json<br/>+ encrypted zip<br/>+ PDF]
-    trim --> out
+    pdf --> rast[pdftoppm]
+    rast --> pages[Per-page PNGs]
+    pages --> hash[Hash / trim]
+    pages --> qr[QR scan]
+    pages --> ocr[OCR]
+    hash --> out[metadata + zip + PDF]
     qr --> out
     ocr --> out
 ```
+
+`hash` covers pHash + colorhash + SHA-256 and the trimmed/focused derivatives. OCR is gated by default to pages carrying raster images, vector drawings, or an empty PDF text layer (override with `ocr_all=1`).
 
 Notes that matter in practice:
 - On **Ubuntu 24.04+**, unprivileged user namespaces are restricted by default (`kernel.apparmor_restrict_unprivileged_userns=1`). bwrap/nsjail won't work until the shipped `deploy/apparmor/clippyshot-{bwrap,nsjail}` profiles are loaded. See `deploy/apparmor/README.md`.
@@ -343,7 +324,7 @@ allowlist below when Magika returns a generic container label.
 
 Macro-enabled formats (`.docm`, `.xlsm`, `.pptm`, `.dotm`, `.xltm`, `.ppsm`,
 `.potm`, `.xlsb`) are accepted: ClippyShot's hardened LibreOffice profile
-prevents macros from running (`MacroSecurityLevel=4`,
+prevents macros from running (`MacroSecurityLevel=3`,
 `DisableMacrosExecution=true`), and a `macro_enabled_format` warning is
 recorded in `metadata.warnings` so downstream consumers can apply their own
 audit policy.
