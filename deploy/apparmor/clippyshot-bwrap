@@ -1,0 +1,14 @@
+abi <abi/4.0>,
+include <tunables/global>
+
+# Minimal profile to allow `bwrap` to create unprivileged user namespaces.
+#
+# Required on Ubuntu 24.04+ where kernel.apparmor_restrict_unprivileged_userns=1
+# blocks user-namespace creation by default. This profile grants ONLY the
+# userns capability to /usr/bin/bwrap; bwrap remains otherwise unconfined and
+# enforces its own isolation via the namespaces it creates.
+#
+# Load with:  sudo apparmor_parser -r -W /etc/apparmor.d/clippyshot-bwrap
+profile clippyshot-bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+}

@@ -1,0 +1,46 @@
+abi <abi/4.0>,
+include <tunables/global>
+
+# AppArmor profile for the ClippyShot Python runtime (CLI / HTTP server).
+# Looser than clippyshot-soffice — the runtime needs to listen on a TCP port
+# and exec the sandbox binaries. It still denies ptrace and raw sockets.
+#
+# Load with:  sudo apparmor_parser -r -W /etc/apparmor.d/clippyshot-runtime
+# Apply by passing --security-opt apparmor=clippyshot-runtime to docker run.
+profile clippyshot-runtime flags=(attach_disconnected,mediate_deleted) {
+  include <abstractions/base>
+  include <abstractions/python>
+  include <abstractions/nameservice>
+
+  network inet stream,
+  network inet6 stream,
+
+  deny network raw,
+  deny capability net_raw,
+  deny ptrace,
+  deny mount,
+  deny pivot_root,
+
+  # Python venv install + deps.
+  /opt/clippyshot/** mr,
+  /opt/clippyshot/bin/clippyshot ix,
+  /usr/bin/python3* ix,
+  /usr/bin/tini ix,
+
+  # Sandbox binaries the runtime is allowed to spawn. Use explicit profile
+  # transitions below; mixing ix/Px on the same path is rejected by
+  # apparmor_parser as conflicting exec modifiers.
+
+  # Working dirs.
+  /var/lib/clippyshot/** rw,
+  /tmp/clippyshot-** rw,
+  /tmp/** rw,
+
+  # Procfs reads.
+  @{PROC}/self/** r,
+  @{PROC}/sys/kernel/security/** r,
+
+  # Children inherit unconfined so the sandbox binaries can do their thing.
+  /usr/bin/bwrap Px -> clippyshot-bwrap,
+  /usr/local/bin/nsjail Px -> clippyshot-nsjail,
+}

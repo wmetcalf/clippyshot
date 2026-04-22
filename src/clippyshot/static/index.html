@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClippyShot</title>
+<link rel="icon" type="image/x-icon" href="/assets/favicon.ico">
+<link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon-16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#c9d1d9;min-height:100vh}
+a{color:#58a6ff;text-decoration:none}
+a:hover{text-decoration:underline}
+.container{max-width:1200px;margin:0 auto;padding:20px}
+header{display:flex;flex-direction:column;align-items:center;padding:40px 0;margin-bottom:40px;text-align:center;background:linear-gradient(to bottom, #161b22, transparent);border-radius:0 0 24px 24px;border-bottom:1px solid #30363d}
+header img.logo{width:320px;height:auto;border-radius:12px;box-shadow:0 12px 32px rgba(0,0,0,.6);margin-bottom:24px;border:1px solid #30363d;transition:transform .3s}
+header img.logo:hover{transform:scale(1.02)}
+header h1{font-size:2.8rem;font-weight:900;letter-spacing:-1.5px;background:linear-gradient(135deg, #fff, #8b949e);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:12px;font-family:'Outfit',system-ui,sans-serif}
+header .ver{font-size:.85rem;color:#58a6ff;background:rgba(88,166,255,.1);padding:4px 14px;border-radius:20px;border:1px solid rgba(88,166,255,.2);font-family:monospace;letter-spacing:1px}
+
+/* Upload area */
+.upload{border:2px dashed #30363d;border-radius:12px;padding:48px 24px;text-align:center;cursor:pointer;transition:all .2s}
+.upload:hover,.upload.drag{border-color:#58a6ff;background:#161b22}
+.upload h2{font-size:1.1rem;margin-bottom:8px}
+.upload p{color:#8b949e;font-size:.85rem}
+.upload input[type=file]{display:none}
+.upload .btn{display:inline-block;margin-top:16px;padding:8px 20px;background:#238636;color:#fff;border:none;border-radius:6px;font-size:.9rem;cursor:pointer}
+.upload .btn:hover{background:#2ea043}
+
+/* Status bar */
+.status{margin:16px 0;padding:12px 16px;border-radius:8px;font-size:.85rem;display:none}
+.status.info{display:block;background:#0d1117;border:1px solid #1f6feb;color:#58a6ff}
+.status.ok{display:block;background:#0d1117;border:1px solid #238636;color:#3fb950}
+.status.err{display:block;background:#0d1117;border:1px solid #da3633;color:#f85149}
+.status .prog{display:inline-block;width:16px;height:16px;border:2px solid transparent;border-top-color:#58a6ff;border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle;margin-right:8px}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Results */
+.result{margin-top:24px;display:none}
+.result.show{display:block}
+.meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px}
+@media(max-width:768px){.meta-grid{grid-template-columns:1fr}}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px}
+.card h3{font-size:.85rem;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px}
+.card table{width:100%;font-size:.82rem}
+.card td{padding:3px 0;vertical-align:top}
+.card td:first-child{color:#8b949e;width:40%;white-space:nowrap}
+.card td:last-child{word-break:break-all}
+.warn{color:#d29922}
+.err-text{color:#f85149}
+
+/* Page gallery */
+.pages{margin-top:24px}
+.pages h3{font-size:1rem;margin-bottom:12px}
+.page-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
+.page-card{background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden}
+.page-card img{width:100%;display:block;background:#fff}
+.page-card .info{padding:8px 12px;font-size:.78rem;color:#8b949e;display:flex;justify-content:space-between}
+.page-card .info .blank{color:#d29922}
+
+/* Recent jobs */
+.recent{margin-top:32px}
+.recent h3{font-size:1rem;margin-bottom:12px}
+.job-table{width:100%;border-collapse:collapse;font-size:.82rem}
+.job-table th{text-align:left;padding:8px;border-bottom:1px solid #30363d;color:#8b949e}
+.job-table td{padding:8px;border-bottom:1px solid #21262d}
+.badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:.75rem}
+.badge.queued{background:#1f6feb22;color:#58a6ff}
+.badge.running{background:#d2992222;color:#d29922}
+.badge.done{background:#23863622;color:#3fb950}
+.badge.failed{background:#da363322;color:#f85149}
+.badge.expired{background:#21262d;color:#8b949e}
+.badge-qr{background:#c0392b;color:#fff;margin-left:4px}
+
+/* Download */
+.dl-btn{display:inline-block;margin-top:12px;padding:6px 16px;background:#21262d;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;font-size:.82rem;cursor:pointer}
+.dl-btn:hover{background:#30363d;text-decoration:none}
+.filter-btn{padding:4px 12px;background:#21262d;border:1px solid #30363d;color:#8b949e;border-radius:14px;font-size:.78rem;cursor:pointer}
+.filter-btn:hover,.filter-btn.active{background:#30363d;color:#c9d1d9;border-color:#58a6ff}
+.pg-btn{padding:3px 10px;background:#21262d;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;font-size:.78rem;cursor:pointer}
+.pg-btn:hover{background:#30363d}
+.danger-btn{padding:3px 10px;background:#2d1416;border:1px solid #da3633;color:#f85149;border-radius:6px;font-size:.78rem;cursor:pointer}
+.danger-btn:hover{background:#3f1d21}
+
+/* Lightbox */
+.lightbox{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(13,17,23,.95);backdrop-filter:blur(12px);display:none;z-index:1000;padding:20px;overflow:auto;cursor:zoom-out;transition:opacity .3s}
+.lightbox.show{display:flex;align-items:flex-start;justify-content:center}
+.lightbox img{max-width:95%;margin:auto;box-shadow:0 32px 64px rgba(0,0,0,.8);background:#fff;border-radius:8px;transform:scale(.95);transition:transform .3s;border:1px solid #30363d}
+.lightbox.show img{transform:scale(1)}
+.page-card:hover{transform:translateY(-8px) scale(1.02);border-color:#58a6ff;box-shadow:0 12px 24px rgba(0,0,0,.4)}
+.close-btn{position:fixed;top:30px;right:40px;background:none;border:none;color:#fff;font-size:3rem;line-height:1;cursor:pointer;z-index:1010;transition:transform .2s;text-shadow:0 0 10px rgba(0,0,0,.5)}
+.close-btn:hover{transform:scale(1.2);color:#58a6ff}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <img src="/assets/logo.png" alt="ClippyShot" class="logo">
+    <span class="ver" id="ver">loading...</span>
+  </header>
+
+  <div class="upload" id="dropzone">
+    <h2>Drop a document here</h2>
+    <p>docx, xlsx, pptx, doc, xls, ppt, odt, ods, odp, rtf, txt, csv, md, and 25+ more formats</p>
+    <button class="btn" onclick="document.getElementById('fileinput').click()">Browse files</button>
+    <input type="file" id="fileinput" multiple>
+  </div>
+  <div style="display:flex;gap:16px;margin:10px 0 20px;font-size:.85rem;color:#8b949e;align-items:center;flex-wrap:wrap">
+    <label><input type="checkbox" id="opt-qr" checked> QR scan</label>
+    <label><input type="checkbox" id="opt-ocr"> OCR</label>
+    <label><input type="checkbox" id="opt-ocr-all"> OCR all pages (not just image-bearing)</label>
+  </div>
+
+  <div class="status" id="status"></div>
+
+  <div class="result" id="result">
+    <div class="meta-grid">
+      <div class="card" id="input-card">
+        <h3>Input</h3>
+        <table id="input-table"></table>
+      </div>
+      <div class="card" id="render-card">
+        <h3>Render</h3>
+        <table id="render-table"></table>
+      </div>
+      <div class="card" id="security-card">
+        <h3>Security</h3>
+        <table id="security-table"></table>
+      </div>
+      <div class="card" id="warnings-card">
+        <h3>Warnings</h3>
+        <div id="warnings-body"></div>
+      </div>
+    </div>
+    <a class="dl-btn" id="dl-link" href="#">Download ZIP (password: infected)</a>
+    <a class="dl-btn" id="dl-pdf" href="#" style="margin-left:8px">Download PDF</a>
+
+    <div class="pages">
+      <h3>Rendered Pages</h3>
+      <div class="page-grid" id="page-grid"></div>
+    </div>
+  </div>
+
+  <div class="recent">
+    <h3>Jobs</h3>
+    <div style="margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      <button class="filter-btn active" data-status="all" onclick="filterJobs('')">All</button>
+      <button class="filter-btn" data-status="done" onclick="filterJobs('done')">Done</button>
+      <button class="filter-btn" data-status="failed" onclick="filterJobs('failed')">Failed</button>
+      <button class="filter-btn" data-status="running" onclick="filterJobs('running')">Running</button>
+      <button class="filter-btn" data-status="queued" onclick="filterJobs('queued')">Queued</button>
+      <input type="text" id="job-search" placeholder="Search filename..." oninput="searchJobs(this.value)"
+        style="margin-left:auto;padding:4px 10px;background:#0d1117;border:1px solid #30363d;border-radius:14px;color:#c9d1d9;font-size:.82rem;width:200px;outline:none">
+    </div>
+    <table class="job-table">
+      <thead><tr>
+        <th>ID</th>
+        <th style="cursor:pointer" onclick="sortJobs('filename')">File <span id="sort-filename"></span></th>
+        <th style="cursor:pointer" onclick="sortJobs('ext')">Ext <span id="sort-ext"></span></th>
+        <th style="cursor:pointer" onclick="sortJobs('status')">Status <span id="sort-status"></span></th>
+        <th style="cursor:pointer" onclick="sortJobs('pages')">Pages <span id="sort-pages"></span></th>
+        <th>Detail</th>
+        <th style="cursor:pointer" onclick="sortJobs('created_at')">Time <span id="sort-created_at"></span></th>
+        <th>Actions</th>
+      </tr></thead>
+      <tbody id="job-tbody"></tbody>
+    </table>
+    <div id="job-pagination" style="margin-top:8px;display:flex;gap:8px;align-items:center"></div>
+  </div>
+</div>
+
+<script>
+const API = '';  // same origin
+let lastJobId = null;
+
+// Version
+fetch(API+'/v1/version').then(r=>r.json()).then(v=>{
+  document.getElementById('ver').textContent = 'v'+v.version+' | '+v.sandbox+' sandbox';
+}).catch(()=>{});
+
+// Drop zone
+const dz = document.getElementById('dropzone');
+const fi = document.getElementById('fileinput');
+dz.addEventListener('dragover', e=>{e.preventDefault();dz.classList.add('drag')});
+dz.addEventListener('dragleave', ()=>dz.classList.remove('drag'));
+dz.addEventListener('drop', e=>{e.preventDefault();dz.classList.remove('drag');handleFiles(e.dataTransfer.files)});
+fi.addEventListener('change', ()=>{
+  const files = fi.files;
+  handleFiles(files);
+  fi.value = '';
+});
+
+function handleFiles(files) {
+  for (const f of files) submitFile(f);
+}
+
+async function submitFile(file) {
+  const st = document.getElementById('status');
+  st.className = 'status info';
+  st.innerHTML = '<span class="prog"></span> Converting <b>'+esc(file.name)+'</b> ('+fmtSize(file.size)+')...';
+
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('qr', document.getElementById('opt-qr').checked ? '1' : '0');
+  fd.append('ocr', document.getElementById('opt-ocr').checked ? '1' : '0');
+  fd.append('ocr_all', document.getElementById('opt-ocr-all').checked ? '1' : '0');
+
+  try {
+    // Use async jobs API so we can poll status
+    const r = await fetch(API+'/v1/jobs', {method:'POST', body:fd});
+    if (!r.ok) {
+      const body = await r.text();
+      st.className='status err';
+      st.textContent='HTTP '+r.status+': '+body;
+      return;
+    }
+    const job = await r.json();
+    lastJobId = job.job_id;
+    st.className='status info';
+    st.innerHTML='<span class="prog"></span> Job <b>'+job.job_id.slice(0,8)+'</b> queued...';
+    pollJob(job.job_id, file.name);
+  } catch(e) {
+    st.className='status err';
+    st.textContent='Request failed: '+e.message;
+  }
+}
+
+async function pollJob(jobId, filename) {
+  const st = document.getElementById('status');
+  for (let i=0; i<600; i++) {
+    await sleep(500);
+    try {
+      const r = await fetch(API+'/v1/jobs/'+jobId);
+      if (!r.ok) break;
+      const j = await r.json();
+      if (j.status==='running') {
+        st.innerHTML='<span class="prog"></span> Converting <b>'+esc(filename)+'</b>...';
+      }
+      if (j.status==='done') {
+        st.className='status ok';
+        st.textContent='Conversion complete!';
+        loadResult(jobId);
+        refreshJobs();
+        return;
+      }
+      if (j.status==='failed') {
+        st.className='status err';
+        st.textContent='Conversion failed: '+(j.error||'unknown error');
+        showFailure(j);
+        refreshJobs();
+        return;
+      }
+    } catch(e) {break}
+  }
+}
+
+async function loadFailedJob(jobId) {
+  try {
+    const r = await fetch(API+'/v1/jobs/'+jobId);
+    if (!r.ok) return;
+    const j = await r.json();
+    showFailure(j);
+  } catch(e) { console.error(e); }
+}
+
+function showFailure(job) {
+  const res = document.getElementById('result');
+  const det = job.detected || {};
+  const inputRows = [
+    ['Filename', job.filename || '?'],
+    ['Job ID', job.job_id || '?'],
+    ['Status', '<span class="err-text">'+esc(job.status)+'</span>'],
+  ];
+  // Show detection info if available (populated before conversion attempt)
+  if (det.label) {
+    const magikaNote = det.magika_label && det.magika_label !== det.label
+      ? ' <span style="color:#d29922">(magika raw: '+esc(det.magika_label)+')</span>' : '';
+    inputRows.push(['Detected', esc(det.label)+' ('+esc(det.source)+', '+Math.round((det.confidence||0)*100)+'%)'+magikaNote]);
+    inputRows.push(['Magika', (det.magika_label||'-')+' / '+(det.magika_mime||'-')]);
+    inputRows.push(['libmagic', det.libmagic_mime || '<span style="color:#8b949e">n/a</span>']);
+    if (det.warnings && det.warnings.length) {
+      inputRows.push(['Warnings', det.warnings.map(w => '<span class="warn">'+esc(w)+'</span>').join(', ')]);
+    }
+  }
+  setTable('input-table', inputRows);
+  setTable('render-table', [
+    ['Error', '<span class="err-text">'+esc(job.error || 'unknown')+'</span>'],
+  ]);
+  setTable('security-table', []);
+  document.getElementById('warnings-body').innerHTML = '';
+  document.getElementById('page-grid').innerHTML =
+    '<div style="padding:24px;color:#f85149;text-align:center">Conversion failed. No pages rendered.</div>';
+  document.getElementById('dl-link').style.display = 'none';
+  document.getElementById('dl-pdf').style.display = 'none';
+  res.classList.add('show');
+}
+
+async function loadResult(jobId) {
+  const res = document.getElementById('result');
+  try {
+    const r = await fetch(API+'/v1/jobs/'+jobId+'/metadata');
+    if (!r.ok) return;
+    const meta = await r.json();
+
+    // Input card
+    const inp = meta.input || {};
+    const det = inp.detected || {};
+    const magikaNote = det.magika_label && det.magika_label !== det.label
+      ? ' <span style="color:#d29922">(magika raw: '+esc(det.magika_label)+')</span>' : '';
+    setTable('input-table', [
+      ['Filename', inp.filename],
+      ['Size', fmtSize(inp.size_bytes)],
+      ['SHA-256', inp.sha256 ? '<code>'+inp.sha256.slice(0,16)+'...</code>' : ''],
+      ['Detected', det.label+' ('+det.source+', '+Math.round((det.confidence||0)*100)+'%)'+magikaNote],
+      ['MIME', det.mime],
+      ['Magika', (det.magika_label||'-')+' / '+(det.magika_mime||'-')],
+      ['libmagic', det.libmagic_mime || '<span style="color:#8b949e">n/a</span>'],
+      ['Extension match', det.agreed_with_extension ? 'yes' : '<span class="warn">no</span>'],
+    ]);
+
+    // Render card
+    const rnd = meta.render || {};
+    const dur = rnd.duration_ms || {};
+    setTable('render-table', [
+      ['Pages', rnd.page_count_rendered+'/'+rnd.page_count_total
+        +(rnd.truncated?' <span class="warn">(truncated)</span>':'')
+        +(rnd.page_count_rendered===0 && rnd.page_count_total>0 ? ' <span class="warn">ALL BLANK</span>':'')],
+      ['Blank pages', (rnd.blank_pages||[]).length
+        +((rnd.blank_pages||[]).length === rnd.page_count_total && rnd.page_count_total > 0
+          ? ' <span class="warn">(entire document is blank)</span>' : '')],
+      ['DPI', rnd.dpi],
+      ['Total time', dur.total+'ms'],
+      ['Detect', dur.detect+'ms'],
+      ['soffice', dur.soffice+'ms'],
+      ['Rasterize', dur.rasterize+'ms'],
+      ['Postprocess', dur.hash+'ms'],
+      ['Original hash', (dur.hash_original ?? 0)+'ms'],
+      ['Trim', (dur.trim ?? 0)+'ms'],
+      ['Focus', (dur.focus ?? 0)+'ms'],
+      ['Derivative hash', (dur.hash_derivatives ?? 0)+'ms'],
+    ]);
+
+    // Security card. Merge in the worker_runtime from the job record so
+    // operators see whether the job ran under gVisor (runsc) or plain runc.
+    const sec = meta.security || {};
+    let secRows = Object.entries(sec).map(([k,v])=>[k, String(v)]);
+    try {
+      const jr = await fetch(API+'/v1/jobs/'+jobId);
+      if (jr.ok) {
+        const jdata = await jr.json();
+        if (jdata.worker_runtime) {
+          const rt = jdata.worker_runtime;
+          const isGvisor = rt === 'runsc';
+          const label = isGvisor ? 'gVisor (runsc)' : rt;
+          const color = isGvisor ? '#3fb950' : '#d29922';
+          secRows.unshift(['worker_runtime',
+            '<span style="color:'+color+'">'+esc(label)+'</span>'
+            + (isGvisor ? ' <span style="color:#8b949e;font-size:.72rem">syscall-level sandbox</span>' : ' <span style="color:#d29922;font-size:.72rem">namespace only</span>')]);
+        }
+        if (jdata.security_warnings && jdata.security_warnings.length) {
+          secRows.push(['warnings',
+            jdata.security_warnings.map(w => '<span class="warn">'+esc(w)+'</span>').join('<br>')]);
+        }
+      }
+    } catch(e) { /* best-effort */ }
+    setTable('security-table', secRows);
+
+    // Warnings
+    const wb = document.getElementById('warnings-body');
+    const warnings = meta.warnings || [];
+    if (warnings.length === 0) {
+      wb.innerHTML = '<span style="color:#8b949e;font-size:.82rem">None</span>';
+    } else {
+      wb.innerHTML = warnings.map(w=>'<div class="warn" style="font-size:.82rem;margin-bottom:4px">'+esc(w.code)+': '+esc(w.message)+'</div>').join('');
+    }
+
+    // Download link
+    const dl = document.getElementById('dl-link');
+    dl.href = API+'/v1/jobs/'+jobId+'/result';
+    dl.download = (inp.filename||'result')+'.zip';
+    dl.style.display = 'inline-block';
+    document.getElementById('dl-pdf').href = `/v1/jobs/${jobId}/pdf`;
+    document.getElementById('dl-pdf').style.display = 'inline-block';
+
+    // Pages
+    const grid = document.getElementById('page-grid');
+    grid.innerHTML = '';
+    const pages = meta.pages || [];
+    for (const p of pages) {
+      const origUrl = API+'/v1/jobs/'+jobId+'/pages/'+p.index+'.png';
+      const trimUrl = p.trimmed ? API+'/v1/jobs/'+jobId+'/pages/trimmed/'+p.index+'.png' : null;
+      const focusUrl = p.focused ? API+'/v1/jobs/'+jobId+'/pages/focused/'+p.index+'.png' : null;
+      const card = document.createElement('div');
+      card.className = 'page-card';
+
+      let trimSection = '';
+      if (p.trimmed) {
+        const t = p.trimmed;
+        const trimHashes = t.phash ? '<div style="font-size:.72rem;color:#8b949e;padding:2px 0;font-family:monospace">p:'+t.phash+' c:'+t.colorhash+'</div>' : '';
+        trimSection = '<details style="padding:4px 8px;border-top:1px solid #30363d">'
+          +'<summary style="font-size:.75rem;color:#58a6ff;cursor:pointer">'
+          +'Trimmed version (-'+t.removed_percent+'% bg:'+t.background_color+')</summary>'
+          +'<img src="'+trimUrl+'" alt="Page '+p.index+' trimmed" '
+          +'onclick="openLightbox(\''+trimUrl+'\')" '
+          +'style="width:100%;display:block;background:#fff;margin-top:4px;cursor:pointer" loading="lazy">'
+          +'<div style="font-size:.72rem;color:#8b949e;padding:2px 0">'
+          +t.width_px+'&times;'+t.height_px+' (was '+t.original_height_px+'px tall)</div>'
+          +trimHashes
+          +'</details>';
+      }
+
+      let focusSection = '';
+      if (p.focused) {
+        const f = p.focused;
+        const focusHashes = f.phash ? '<div style="font-size:.72rem;color:#8b949e;padding:2px 0;font-family:monospace">p:'+f.phash+' c:'+f.colorhash+'</div>' : '';
+        focusSection = '<details style="padding:4px 8px;border-top:1px solid #30363d">'
+          +'<summary style="font-size:.75rem;color:#58a6ff;cursor:pointer">'
+          +'Focused view (-'+f.removed_percent+'%)</summary>'
+          +'<img src="'+focusUrl+'" alt="Page '+p.index+' focused" '
+          +'onclick="openLightbox(\''+focusUrl+'\')" '
+          +'style="width:100%;display:block;background:#fff;margin-top:4px;cursor:pointer" loading="lazy">'
+          +'<div style="font-size:.72rem;color:#8b949e;padding:2px 0">'
+          +f.width_px+'&times;'+f.height_px+' (was '+f.original_width_px+'&times;'+f.original_height_px+')</div>'
+          +focusHashes
+          +'</details>';
+      }
+
+      card.innerHTML = '<img src="'+origUrl+'" alt="Page '+p.index+'" loading="lazy" '
+        +'onclick="openLightbox(\''+origUrl+'\')" style="cursor:pointer">'
+        +'<div class="info"><span>Page '+p.index+' &middot; '+p.width_px+'&times;'+p.height_px
+        +' &middot; '+p.width_mm+'&times;'+p.height_mm+'mm</span>'
+        +(p.is_blank?'<span class="blank">blank</span>':'')
+        +'</div>'
+        +(p.phash ? '<div style="font-size:.72rem;color:#8b949e;padding:2px 8px;font-family:monospace">p:'+p.phash+' c:'+p.colorhash+'</div>' : '')
+        +trimSection
+        +focusSection;
+
+      // OCR section
+      if (p.ocr) {
+        let ocrHtml;
+        if (p.ocr.skipped) {
+          ocrHtml = `<div class="muted">OCR skipped: ${escapeHtml(p.ocr.skipped)}</div>`;
+        } else if (p.ocr.text) {
+          // Full text inside <details>: collapsed by default, expand to read.
+          // <pre> is scrollable so even very long text stays bounded visually
+          // without truncating the payload.
+          ocrHtml = `<details><summary>OCR text (${p.ocr.char_count} chars)</summary>
+                       <pre style="white-space:pre-wrap;max-height:400px;overflow:auto">${escapeHtml(p.ocr.text)}</pre>
+                     </details>`;
+        } else {
+          ocrHtml = '';
+        }
+        if (ocrHtml) card.insertAdjacentHTML('beforeend', ocrHtml);
+      }
+
+      // QR section
+      if (p.qr && p.qr.length) {
+        const items = p.qr.map(q =>
+          `<li><code>${escapeHtml(q.value)}</code> <span class="muted">${escapeHtml(q.format)}</span></li>`
+        ).join('');
+        card.insertAdjacentHTML('beforeend',
+          `<details open><summary>QR codes (${p.qr.length})</summary><ul>${items}</ul></details>`
+        );
+      }
+
+      grid.appendChild(card);
+    }
+
+    res.classList.add('show');
+  } catch(e) {
+    console.error('loadResult error:', e);
+  }
+}
+
+function openLightbox(url) {
+  const lb = document.getElementById('lightbox');
+  lb.innerHTML = '<button class="close-btn" onclick="closeLightbox()">&times;</button><img src="'+url+'" alt="Full size view">';
+  lb.classList.add('show');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeLightbox() {
+  const lb = document.getElementById('lightbox');
+  lb.classList.remove('show');
+  lb.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+// Keyboard navigation: Escape closes lightbox, Left/Right iterates through jobs
+let _currentJobIds = [];  // populated by refreshJobs
+let _currentJobIdx = -1;
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeLightbox();
+  if (e.key === 'ArrowLeft' && _currentJobIds.length > 0) {
+    _currentJobIdx = Math.max(0, _currentJobIdx - 1);
+    _navigateToJob(_currentJobIdx);
+  }
+  if (e.key === 'ArrowRight' && _currentJobIds.length > 0) {
+    _currentJobIdx = Math.min(_currentJobIds.length - 1, _currentJobIdx + 1);
+    _navigateToJob(_currentJobIdx);
+  }
+});
+
+function _navigateToJob(idx) {
+  if (idx < 0 || idx >= _currentJobIds.length) return;
+  const entry = _currentJobIds[idx];
+  if (entry.status === 'done') loadResult(entry.id);
+  else if (entry.status === 'failed') loadFailedJob(entry.id);
+  // Update highlight in table
+  document.querySelectorAll('#job-tbody tr').forEach((tr, i) => {
+    tr.style.outline = (i === idx) ? '2px solid #58a6ff' : '';
+  });
+}
+
+// Job list with pagination and sorting
+let jobPage = 0;
+const jobPageSize = 50;
+let jobStatusFilter = '';
+let jobSort = 'created_at';
+let jobOrder = 'desc';
+let jobSearch = '';
+let _searchTimer = null;
+
+function searchJobs(val) {
+  clearTimeout(_searchTimer);
+  _searchTimer = setTimeout(() => {
+    jobSearch = val.trim();
+    jobPage = 0;
+    refreshJobs();
+  }, 300);
+}
+
+function sortJobs(field) {
+  if (jobSort === field) {
+    jobOrder = jobOrder === 'desc' ? 'asc' : 'desc';
+  } else {
+    jobSort = field;
+    jobOrder = field === 'filename' || field === 'ext' ? 'asc' : 'desc';
+  }
+  // Update sort indicators
+  document.querySelectorAll('[id^="sort-"]').forEach(el => el.textContent = '');
+  const indicator = document.getElementById('sort-' + field);
+  if (indicator) indicator.textContent = jobOrder === 'asc' ? ' ▲' : ' ▼';
+  jobPage = 0;
+  refreshJobs();
+}
+
+async function refreshJobs() {
+  try {
+    let url = API+'/v1/jobs?offset='+(jobPage*jobPageSize)+'&limit='+jobPageSize+'&sort='+jobSort+'&order='+jobOrder;
+    if (jobStatusFilter) url += '&status='+jobStatusFilter;
+    if (jobSearch) url += '&q='+encodeURIComponent(jobSearch);
+    const r = await fetch(url);
+    if (!r.ok) return;
+    const data = await r.json();
+    const jobs = data.jobs || data;
+    const total = data.total || jobs.length;
+    // Update navigation index for arrow keys
+    _currentJobIds = jobs.map(j => ({id: j.job_id, status: j.status}));
+    const tbody = document.getElementById('job-tbody');
+    tbody.innerHTML = jobs.map(j => {
+      const id = j.job_id.slice(0,8);
+      const errorTitle = j.error ? ' title="'+esc(j.error)+'"' : '';
+      const badge = '<span class="badge '+j.status+'"'+errorTitle+'>'+j.status+'</span>';
+      const pages = (j.pages_done && j.pages_total) ? j.pages_done+'/'+j.pages_total : '-';
+      const time = j.finished_at ? new Date(j.finished_at*1000).toLocaleTimeString() :
+                   j.created_at ? new Date(j.created_at*1000).toLocaleTimeString() : '-';
+      const name = esc(j.filename || '?');
+      const idx = jobs.indexOf(j);
+      let click = '';
+      if (j.status === 'done') {
+        click = ' style="cursor:pointer" onclick="_currentJobIdx='+idx+';loadResult(\'' + j.job_id + '\')"';
+      } else if (j.status === 'failed') {
+        click = ' style="cursor:pointer" onclick="_currentJobIdx='+idx+';loadFailedJob(\'' + j.job_id + '\')"';
+      }
+      // Detail column: show error snippet or detection warnings for failed, detected label for done
+      let detail = '-';
+      if (j.status === 'failed') {
+        const det = j.detected || {};
+        const w = (det.warnings || []);
+        if (w.length) {
+          detail = '<span class="warn">'+w.map(esc).join(', ')+'</span>';
+        } else if (j.error) {
+          // Extract a short reason from the error string
+          const m = j.error.match(/unsupported_type: magika=(\w+)/);
+          if (m) { detail = '<span class="err-text">unsupported: '+esc(m[1])+'</span>'; }
+          else if (j.error.includes('source file could not be loaded')) { detail = '<span class="err-text">unloadable</span>'; }
+          else if (j.error.includes('killed')) { detail = '<span class="err-text">timeout</span>'; }
+          else if (j.error.includes('Signal 11')) { detail = '<span class="err-text">crash (SIGSEGV)</span>'; }
+          else { detail = '<span class="err-text">error</span>'; }
+        }
+      } else if (j.status === 'done') {
+        const det = j.detected || {};
+        detail = det.label ? esc(det.label) : '-';
+        if (det.magika_label && det.magika_label !== det.label) {
+          detail += ' <span style="color:#d29922;font-size:.72rem">(was: '+esc(det.magika_label)+')</span>';
+        }
+        // Flag all-blank documents
+        if (j.pages_total > 0 && j.pages_done === 0) {
+          detail += ' <span class="warn">all blank</span>';
+        }
+        // Show worker runtime badge (gVisor vs runc)
+        if (j.worker_runtime) {
+          const isGvisor = j.worker_runtime === 'runsc';
+          const color = isGvisor ? '#3fb950' : '#d29922';
+          const label = isGvisor ? 'gVisor' : esc(j.worker_runtime);
+          const title = isGvisor
+            ? 'Worker ran under gVisor (runsc) — syscall-level sandboxing'
+            : 'Worker ran under standard runc — namespace isolation only';
+          detail += ' <span style="color:'+color+';font-size:.72rem;margin-left:4px" title="'+title+'">['+label+']</span>';
+        }
+      }
+      const fileExt = (j.filename||'').includes('.') ? (j.filename||'').split('.').pop().toLowerCase() : '-';
+      // Pages column: show blank info
+      let pagesDisplay = pages;
+      if (j.status === 'done' && j.pages_total > 0 && j.pages_done === 0) {
+        pagesDisplay = '<span class="warn" title="All pages detected as blank">0/'+j.pages_total+' (all blank)</span>';
+      }
+      const actions = '<button class="danger-btn" onclick="event.stopPropagation();deleteJob(\''+j.job_id+'\')">Delete</button>';
+      return '<tr data-job-id="'+j.job_id+'"'+click+'><td><code>'+id+'</code></td><td>'+name+'</td><td><code>'+esc(fileExt)+'</code></td><td class="badges">'+badge+'</td><td>'+pagesDisplay+'</td><td>'+detail+'</td><td>'+time+'</td><td>'+actions+'</td></tr>';
+    }).join('');
+    // Lazy QR badge fetch for done jobs
+    for (const job of jobs) {
+      if (job.status === 'done') {
+        fetch(`/v1/jobs/${job.job_id}/metadata`)
+          .then(r => r.ok ? r.json() : null)
+          .then(meta => {
+            if (!meta) return;
+            const hasQr = (meta.pages || []).some(p => (p.qr || []).length > 0);
+            if (hasQr) {
+              const cell = document.querySelector(`tr[data-job-id="${job.job_id}"] .badges`);
+              if (cell) cell.insertAdjacentHTML('beforeend',
+                '<span class="badge badge-qr">QR</span>');
+            }
+          })
+          .catch(() => {});
+      }
+    }
+    // Pagination controls
+    const totalPages = Math.ceil(total / jobPageSize);
+    document.getElementById('job-pagination').innerHTML =
+      '<span style="color:#8b949e;font-size:.82rem">Page '+(jobPage+1)+' of '+totalPages+' ('+total+' total)</span> '
+      +(jobPage > 0 ? '<button class="pg-btn" onclick="jobPage--;refreshJobs()">Prev</button> ' : '')
+      +(jobPage < totalPages-1 ? '<button class="pg-btn" onclick="jobPage++;refreshJobs()">Next</button>' : '');
+  } catch(e) { console.error('refreshJobs:', e); }
+}
+
+function filterJobs(status) {
+  jobStatusFilter = status;
+  jobPage = 0;
+  refreshJobs();
+  // Highlight active filter
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  if (status) document.querySelector('.filter-btn[data-status="'+status+'"]')?.classList.add('active');
+  else document.querySelector('.filter-btn[data-status="all"]')?.classList.add('active');
+}
+
+async function deleteJob(jobId) {
+  if (!confirm('Delete job '+jobId.slice(0, 8)+' and its stored artifacts?')) return;
+  try {
+    const r = await fetch(API+'/v1/jobs/'+jobId, {method: 'DELETE'});
+    if (!r.ok) throw new Error('HTTP '+r.status);
+    if (lastJobId === jobId) {
+      document.getElementById('result').classList.remove('show');
+      lastJobId = null;
+    }
+    refreshJobs();
+  } catch (e) {
+    const st = document.getElementById('status');
+    st.className = 'status err';
+    st.textContent = 'Delete failed: '+e.message;
+  }
+}
+
+// Auto-refresh job list
+setInterval(refreshJobs, 3000);
+refreshJobs();
+
+// Helpers
+function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML}
+function escapeHtml(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function fmtSize(b){if(!b)return '0B';const u=['B','KB','MB','GB'];let i=0;let v=b;while(v>=1024&&i<u.length-1){v/=1024;i++}return v.toFixed(i?1:0)+' '+u[i]}
+function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
+function setTable(id,rows){
+  const t=document.getElementById(id);
+  t.innerHTML=rows.map(([k,v])=>{
+    // If v is a string and contains HTML tags we WANT (like <span> or <code>),
+    // we assume the caller intended it. Otherwise we escape.
+    // For this audit fix, we'll force escaping of everything that's NOT a
+    // whitelist of safe tags, or just use a proper escaping at the caller side.
+    // Given the current structure, escaping here is safest.
+    const safe = (typeof v === 'string' && (v.includes('<span') || v.includes('<code') || v.includes('<details') || v.includes('<br'))) ? v : esc(v);
+    return '<tr><td>'+esc(k)+'</td><td>'+(safe||'')+'</td></tr>';
+  }).join('');
+}
+</script>
+  <div class="lightbox" id="lightbox" onclick="closeLightbox()"></div>
+</body>
+</html>

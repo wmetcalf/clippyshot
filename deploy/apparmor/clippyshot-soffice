@@ -1,0 +1,117 @@
+abi <abi/4.0>,
+include <tunables/global>
+
+# Strict AppArmor profile for the soffice process running inside ClippyShot's
+# bwrap/nsjail sandbox. This is a third line of defense behind the sandbox
+# itself and the LibreOffice hardening profile.
+#
+# Load with:  sudo apparmor_parser -r -W /etc/apparmor.d/clippyshot-soffice
+# Apply by attaching this profile to soffice via the sandbox runner (nsjail
+# --proc_apparmor or via exec-attached host profile).
+profile clippyshot-soffice flags=(attach_disconnected,mediate_deleted) {
+  include <abstractions/base>
+  include <abstractions/consoles>
+  include <abstractions/fonts>
+  include <abstractions/nameservice>
+  include <abstractions/openssl>
+  include <abstractions/python>
+  include <abstractions/user-tmp>
+
+  # Unprivileged user-namespace creation (Ubuntu 24.04+ apparmor_restrict_
+  # unprivileged_userns=1). soffice/oosplash double-forks which can trip
+  # this when the profile doesn't explicitly permit it; without userns we
+  # get ERROR 4 forking process.
+  userns,
+
+  # Hard deny on real network; PERMIT Unix-domain sockets because LO uses
+  # socketpair(AF_UNIX) extensively for internal IPC (pagein fork, splash
+  # screen, intra-process threads, configmgr accept). A blanket
+  # `deny network` breaks that. The sandbox's own network namespace still
+  # prevents IPv4/IPv6 egress.
+  network unix,
+  # Socket creation / ownership operations (no peer= allowed).
+  unix (create, bind, listen, accept, shutdown, getopt, setopt, getattr, setattr),
+  # Peer-directed operations (connect/send/receive require a target label).
+  unix (connect, send, receive) peer=(label=clippyshot-soffice),
+  unix (send, receive) peer=(label=unconfined),
+  deny network inet,
+  deny network inet6,
+  deny network netlink,
+  deny network packet,
+  deny network raw,
+  deny network icmp,
+  deny network bluetooth,
+
+  # Block dangerous capabilities and operations.
+  deny capability sys_admin,
+  deny capability sys_module,
+  deny capability sys_ptrace,
+  deny capability net_raw,
+  deny ptrace,
+  deny mount,
+  deny pivot_root,
+
+  # Process signals between threads within this profile.
+  signal (send,receive) peer=clippyshot-soffice,
+  signal (receive) peer=unconfined,
+
+  # Broad reads for /etc and /usr/share. LO touches many config files
+  # (fonts, mime, locale, ld.so, java settings, even /etc/os-release)
+  # that we don't want to enumerate exhaustively.
+  /etc/** r,
+  /usr/share/** r,
+  /usr/lib/libreoffice/program/* ix,
+
+  # Binaries soffice invokes. Broad exec permit — LO shells out to many
+  # helpers (pagein, javaldx, sd helper scripts) that change names across
+  # versions. Constraining at the capability+filesystem layer is stronger
+  # than enumerating every helper.
+  /usr/bin/** ixr,
+  /usr/sbin/** ixr,
+  /bin/** ixr,
+  /sbin/** ixr,
+  /usr/lib/** mrix,
+  /lib/** mrix,
+  /lib64/** mrix,
+
+  # Sandbox-private mounts inside the bwrap/nsjail jail. Each pair is
+  # "directory rw" + "contents rwk" — soffice uses flock() on its
+  # profile lock files (.lock, buildid, backenddb.xml) so we need the
+  # `k` (lock) permission in addition to read/write.
+  /sandbox/ r,
+  /sandbox/in/ r,
+  /sandbox/in/** r,
+  /sandbox/out/ rwk,
+  /sandbox/out/** rwk,
+  /sandbox/profile/ rwk,
+  /sandbox/profile/** rwk,
+  /sandbox/scan/ r,
+  /sandbox/scan/** r,
+  /tmp/ rwk,
+  /tmp/** rwk,
+
+  # /run/ is a tmpfs inside the bwrap sandbox — soffice creates
+  # /run/user/<uid> for XDG_RUNTIME_DIR and its dconf cache.
+  /run/ rwk,
+  /run/** rwk,
+
+  # soffice uses /proc/self/* extensively during startup.
+  @{PROC}/ r,
+  @{PROC}/** r,
+  @{PROC}/sys/kernel/random/** r,
+  deny @{PROC}/sys/kernel/** w,
+  deny @{PROC}/*/mem rw,
+  deny /sys/fs/cgroup/** w,
+
+  # /sys reads used by Linux abstractions and LO itself.
+  /sys/devices/system/cpu/** r,
+  /sys/fs/cgroup/** r,
+  /sys/kernel/mm/transparent_hugepage/enabled r,
+
+  # QR / OCR scanning binaries (ZXing + tesseract). Tesseract reads
+  # its language model files from /usr/share/tesseract-ocr/<lang>.
+  /usr/bin/ZXingReader ixr,
+  /usr/bin/tesseract ixr,
+  /usr/share/tesseract-ocr/** r,
+  /usr/share/tessdata/** r,
+}

@@ -1,0 +1,140 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-clippyshot}
+      POSTGRES_USER: ${POSTGRES_USER:-clippyshot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-clippyshot-dev}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - backend
+
+  api:
+    image: ${CLIPPYSHOT_IMAGE:-clippyshot:dev}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - CLIPPYSHOT_DATABASE_URL=postgresql://${POSTGRES_USER:-clippyshot}:${POSTGRES_PASSWORD:-clippyshot-dev}@postgres:5432/${POSTGRES_DB:-clippyshot}
+      - CLIPPYSHOT_WARN_ON_INSECURE=1
+      - CLIPPYSHOT_JOB_RETENTION_SECONDS=${CLIPPYSHOT_JOB_RETENTION_SECONDS:-0}
+      - CLIPPYSHOT_JOB_ROOT=/var/lib/clippyshot/jobs
+    ports:
+      - "${CLIPPYSHOT_PORT:-8001}:8000"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,exec,nosuid,size=2g
+    volumes:
+      - clippyshot-data:/var/lib/clippyshot
+    command: ["serve", "--host", "0.0.0.0", "--port", "8000", "--job-store", "sql"]
+    healthcheck:
+      test: ["CMD", "clippyshot", "selftest"]
+      interval: 30s
+      timeout: 15s
+      start_period: 20s
+      retries: 3
+    networks:
+      - backend
+      - frontend
+
+  dispatcher:
+    image: ${CLIPPYSHOT_IMAGE:-clippyshot:dev}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - CLIPPYSHOT_DATABASE_URL=postgresql://${POSTGRES_USER:-clippyshot}:${POSTGRES_PASSWORD:-clippyshot-dev}@postgres:5432/${POSTGRES_DB:-clippyshot}
+      - CLIPPYSHOT_JOB_ROOT=/var/lib/clippyshot/jobs
+      - CLIPPYSHOT_JOB_RETENTION_SECONDS=${CLIPPYSHOT_JOB_RETENTION_SECONDS:-0}
+      - CLIPPYSHOT_WORKER_IMAGE=${CLIPPYSHOT_WORKER_IMAGE:-clippyshot:dev}
+      - CLIPPYSHOT_DISPATCH_INTERVAL=${CLIPPYSHOT_DISPATCH_INTERVAL:-5}
+      - CLIPPYSHOT_DISPATCH_CONCURRENCY=${CLIPPYSHOT_DISPATCH_CONCURRENCY:-4}
+      # Force the worker runtime (empty = auto-detect, prefer runsc). Set
+      # to `runc` or `runsc` to override.
+      - CLIPPYSHOT_WORKER_RUNTIME=${CLIPPYSHOT_WORKER_RUNTIME:-}
+      # Per-worker resource caps applied when the dispatcher launches
+      # each soffice worker container. Leave unset to use defaults.
+      - CLIPPYSHOT_WORKER_MEMORY=${CLIPPYSHOT_WORKER_MEMORY:-4g}
+      - CLIPPYSHOT_WORKER_PIDS_LIMIT=${CLIPPYSHOT_WORKER_PIDS_LIMIT:-256}
+      - CLIPPYSHOT_WORKER_CPUS=${CLIPPYSHOT_WORKER_CPUS:-1.0}
+      - CLIPPYSHOT_WORKER_NOFILE=${CLIPPYSHOT_WORKER_NOFILE:-4096}
+      # When set, attached to each worker via `--security-opt=seccomp=`.
+      # Must be a path on the HOST filesystem (not inside the dispatcher).
+      - CLIPPYSHOT_SECCOMP_JSON_HOST=${CLIPPYSHOT_SECCOMP_JSON_HOST:-}
+      # Comma-separated list of AppArmor profile names the operator has
+      # loaded on the host (dispatcher can't see /sys/kernel/security
+      # from inside its container). Used to decide whether to emit
+      # --security-opt=apparmor=<name> when launching workers.
+      - CLIPPYSHOT_APPARMOR_PROFILES=${CLIPPYSHOT_APPARMOR_PROFILES:-}
+      # Propagate CLIPPYSHOT_WARN_ON_INSECURE into the worker via the
+      # dispatcher. Default is "0" (secure); auto-flipped to "1" for runsc.
+      - CLIPPYSHOT_WARN_ON_INSECURE=${CLIPPYSHOT_WARN_ON_INSECURE:-0}
+      # Scanner config — propagated via `-e` to each worker container.
+      # QR is on by default; OCR is opt-in.
+      - CLIPPYSHOT_ENABLE_QR=${CLIPPYSHOT_ENABLE_QR:-1}
+      - CLIPPYSHOT_ENABLE_OCR=${CLIPPYSHOT_ENABLE_OCR:-0}
+      - CLIPPYSHOT_OCR_ALL=${CLIPPYSHOT_OCR_ALL:-0}
+      - CLIPPYSHOT_OCR_LANG=${CLIPPYSHOT_OCR_LANG:-eng}
+      - CLIPPYSHOT_OCR_PSM=${CLIPPYSHOT_OCR_PSM:-6}
+      - CLIPPYSHOT_OCR_TIMEOUT_S=${CLIPPYSHOT_OCR_TIMEOUT_S:-60}
+      - CLIPPYSHOT_QR_FORMATS=${CLIPPYSHOT_QR_FORMATS:-qr_code,micro_qr_code,rmqr_code}
+      - CLIPPYSHOT_ZXING_TIMEOUT_S=${CLIPPYSHOT_ZXING_TIMEOUT_S:-10}
+      - CLIPPYSHOT_ZIP_PASSWORD=${CLIPPYSHOT_ZIP_PASSWORD:-infected}
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    group_add:
+      - "${DOCKER_GID:-984}"
+    tmpfs:
+      - /tmp:rw,nosuid,size=64m
+    volumes:
+      - clippyshot-data:/var/lib/clippyshot
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: []
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 30s
+      timeout: 15s
+      start_period: 20s
+      retries: 3
+    command:
+      - /opt/clippyshot/bin/python
+      - -c
+      - >-
+        import os; from clippyshot.dispatcher import Dispatcher; from clippyshot.jobs import SqlJobStore;
+        dispatcher = Dispatcher(job_store=SqlJobStore(os.environ["CLIPPYSHOT_DATABASE_URL"]),
+        image_name=os.environ.get("CLIPPYSHOT_WORKER_IMAGE", "clippyshot:dev"),
+        max_parallel_jobs=int(os.environ.get("CLIPPYSHOT_DISPATCH_CONCURRENCY", "4")));
+        dispatcher.run_forever(float(os.environ.get("CLIPPYSHOT_DISPATCH_INTERVAL", "5")))
+    networks:
+      - backend
+
+networks:
+  backend:
+    internal: true
+  frontend:
+
+volumes:
+  postgres-data:
+  clippyshot-data:

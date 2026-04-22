@@ -1,0 +1,38 @@
+# Dev-only / cache directories — keep the build context small and don't
+# copy local state into the image.
+.git/
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Editor / agent state
+.claude/
+.vscode/
+.idea/
+AGENTS.md
+CLAUDE.md
+
+# Local runtime artifacts and scratch notes
+.clippyshot-jobs/
+scratch/
+out/
+test_samples/
+test.xml
+tests/fixtures/corpus/
+
+# LibreOffice lock files
+.~lock.*#
+
+# Logs and temp
+*.log
+/tmp/clippyshot-*

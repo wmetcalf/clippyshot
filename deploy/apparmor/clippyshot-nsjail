@@ -1,0 +1,14 @@
+abi <abi/4.0>,
+include <tunables/global>
+
+# Minimal profile to allow `nsjail` to create unprivileged user namespaces.
+#
+# Mirror of clippyshot-bwrap for the nsjail backend. nsjail is installed by
+# the ClippyShot Docker image at /usr/local/bin/nsjail (built from source in
+# the Dockerfile builder stage). On dev machines that have nsjail installed
+# at the same path, this profile attaches to it.
+#
+# Load with:  sudo apparmor_parser -r -W /etc/apparmor.d/clippyshot-nsjail
+profile clippyshot-nsjail /usr/local/bin/nsjail flags=(unconfined) {
+  userns,
+}

@@ -1,0 +1,16 @@
+tests/fixtures/safe/** binary
+tests/fixtures/malicious/** binary
+*.png binary
+*.pdf binary
+*.docx binary
+*.xlsx binary
+*.pptx binary
+*.doc binary
+*.xls binary
+*.ppt binary
+*.odt binary
+*.ods binary
+*.odp binary
+*.odg binary
+*.xps binary
+*.oxps binary
