@@ -346,6 +346,7 @@ def test_sql_store_claim_next_postgres_branch_uses_skip_locked(monkeypatch):
                     None,
                     None,
                     None,
+                    None,
                 )
             )
 

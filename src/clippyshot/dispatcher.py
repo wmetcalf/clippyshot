@@ -176,6 +176,13 @@ class Dispatcher:
                     )
                     return
                 pages_done, pages_total = self._page_counts(metadata, output_dir)
+                input_sha256 = None
+                try:
+                    raw = metadata.get("input", {}).get("sha256")
+                    if isinstance(raw, str) and len(raw) == 64 and all(c in "0123456789abcdef" for c in raw.lower()):
+                        input_sha256 = raw.lower()
+                except Exception:
+                    pass
                 self._job_store.update(
                     job.job_id,
                     status=JobStatus.DONE,
@@ -187,6 +194,7 @@ class Dispatcher:
                     result_dir=str(output_dir),
                     worker_runtime=runtime.runtime,
                     security_warnings=warnings,
+                    input_sha256=input_sha256,
                 )
                 return
             self._job_store.update(

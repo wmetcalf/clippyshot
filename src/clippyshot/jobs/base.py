@@ -34,11 +34,12 @@ class Job:
     detected: dict | None = None  # detection info (magika, libmagic, label)
     scan_options: dict[str, str] | None = None
     expires_at: float | None = None
+    input_sha256: str | None = None  # SHA-256 of the uploaded bytes
 
     @classmethod
     def new(cls, filename: str) -> "Job":
         return cls(
-            job_id=uuid.uuid4().hex,
+            job_id=str(uuid.uuid4()),
             filename=filename,
             status=JobStatus.QUEUED,
             created_at=time.time(),
@@ -77,6 +78,7 @@ class Job:
             detected=d.get("detected"),
             scan_options=d.get("scan_options"),
             expires_at=float(d["expires_at"]) if d.get("expires_at") else None,
+            input_sha256=d.get("input_sha256"),
         )
 
 

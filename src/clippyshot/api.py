@@ -145,7 +145,10 @@ def _build_convert_options(
     limits = Limits.from_env()
     env_qr = os.environ.get("CLIPPYSHOT_ENABLE_QR", "1")
     env_ocr = os.environ.get("CLIPPYSHOT_ENABLE_OCR", "0")
-    env_lang = os.environ.get("CLIPPYSHOT_OCR_LANG", "eng")
+    env_lang = os.environ.get(
+        "CLIPPYSHOT_OCR_LANG",
+        "eng+Latin",
+    )
     env_ocr_all = os.environ.get("CLIPPYSHOT_OCR_ALL", "0")
 
     qr_enabled = _parse_bool(qr, default=_parse_bool(env_qr, default=True))
@@ -154,7 +157,7 @@ def _build_convert_options(
         ocr_all, default=_parse_bool(env_ocr_all, default=False)
     )
 
-    psm_int = 6
+    psm_int = 3
     if ocr_psm is not None and ocr_psm != "":
         try:
             psm_int = int(ocr_psm)

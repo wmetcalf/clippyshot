@@ -29,6 +29,7 @@ _COLUMNS = (
     "detected",
     "scan_options",
     "expires_at",
+    "input_sha256",
 )
 
 
@@ -37,6 +38,10 @@ class SqlJobStore:
         self._database_url = database_url
         self._lock = threading.RLock()
         self._driver, self._param = self._parse_url(database_url)
+        self._pool = None
+        if self._driver == "postgres":
+            from psycopg_pool import ConnectionPool
+            self._pool = ConnectionPool(self._database_url, min_size=1, max_size=8, timeout=10.0)
         self._init_db()
 
     def _parse_url(self, database_url: str) -> tuple[str, str]:
@@ -63,18 +68,22 @@ class SqlJobStore:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=5000")
+            try:
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
         else:
-            import psycopg
-
-            conn = psycopg.connect(self._database_url)
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+            with self._pool.connection() as conn:
+                try:
+                    yield conn
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
 
     def _init_db(self) -> None:
         sql = """
@@ -93,7 +102,8 @@ class SqlJobStore:
             security_warnings TEXT,
             detected TEXT,
             scan_options TEXT,
-            expires_at DOUBLE PRECISION
+            expires_at DOUBLE PRECISION,
+            input_sha256 TEXT
         )
         """
         with self._lock, self._connect() as conn:
@@ -102,9 +112,9 @@ class SqlJobStore:
 
     def _ensure_columns(self, conn) -> None:
         existing = self._existing_columns(conn)
-        if "scan_options" in existing:
-            return
-        conn.execute(f"ALTER TABLE jobs ADD COLUMN scan_options TEXT")
+        for col in ("scan_options", "input_sha256"):
+            if col not in existing:
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT")
 
     def _existing_columns(self, conn) -> set[str]:
         if self._driver == "sqlite":
@@ -166,6 +176,9 @@ class SqlJobStore:
             if job is None:
                 raise KeyError(job_id)
             return job
+        for key in fields:
+            if key not in _COLUMNS:
+                raise ValueError(f"invalid column: {key}")
         encoded = {key: self._encode_value(key, value) for key, value in fields.items()}
         set_clause = ", ".join(f"{key} = {self._param}" for key in encoded)
         sql = f"UPDATE jobs SET {set_clause} WHERE job_id = {self._param}"
