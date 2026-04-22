@@ -30,9 +30,23 @@ class OCRError(RuntimeError):
     """Raised by run_ocr when tesseract failed to execute cleanly."""
 
 
-DEFAULT_LANG = "eng"
-DEFAULT_PSM = 6
+# Default covers the bulk of world documents via tesseract script
+# meta-models plus dedicated models for non-Latin/Cyrillic scripts.
+# `Latin` covers English, German, French, Spanish, Portuguese, Italian,
+# Vietnamese, Turkish, Polish, Czech, Slovak, Croatian, and others.
+# `Cyrillic` covers Russian, Ukrainian, Bulgarian, Serbian, Belarusian, etc.
+# The remaining entries are single-language models.
+DEFAULT_LANG = "eng+Latin"
+# psm=3 (fully automatic page segmentation) matches tesseract's own default
+# and produces better results on office documents than psm=6 (single uniform
+# block of text). Rendered office pages contain headers, multi-column layouts,
+# tables, and mixed font sizes that psm=6 tends to mash together.
+DEFAULT_PSM = 3
 DEFAULT_TIMEOUT_S = 60
+# Rasterization DPI we tell tesseract about. Our pdftoppm output is 150 DPI
+# by default; tesseract assumes 300 if not told, and misinterpreting the DPI
+# hurts both accuracy and speed. Keep this in sync with Limits.dpi.
+DEFAULT_DPI = 150
 
 
 def _tesseract_binary() -> str:
@@ -82,6 +96,7 @@ def run_ocr(
         "-",
         "-l", lang,
         "--psm", str(psm),
+        "--dpi", str(DEFAULT_DPI),
     ]
     t0 = time.monotonic()
     try:

@@ -319,8 +319,8 @@ class ConvertOptions:
     # OCR scanning — opt in
     ocr_enabled: bool = False
     ocr_all: bool = False                   # when False, OCR only image-bearing pages
-    ocr_lang: str = "eng"
-    ocr_psm: int = 6
+    ocr_lang: str = "eng+Latin"
+    ocr_psm: int = 3
     ocr_timeout_s: int = 60
 
 

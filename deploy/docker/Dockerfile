@@ -94,7 +94,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-seccomp \
         python3-venv \
         tesseract-ocr \
-        tesseract-ocr-eng \
+        tesseract-ocr-all \
         tini \
         zxing-cpp-tools \
     && apt-get purge -y software-properties-common gnupg \

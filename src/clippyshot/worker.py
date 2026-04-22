@@ -66,8 +66,11 @@ def run_worker(args: argparse.Namespace) -> int:
         qr_timeout_s=int(os.environ.get("CLIPPYSHOT_ZXING_TIMEOUT_S", "10")),
         ocr_enabled=_parse_bool(os.environ.get("CLIPPYSHOT_ENABLE_OCR"), default=False),
         ocr_all=_parse_bool(os.environ.get("CLIPPYSHOT_OCR_ALL"), default=False),
-        ocr_lang=os.environ.get("CLIPPYSHOT_OCR_LANG", "eng"),
-        ocr_psm=int(os.environ.get("CLIPPYSHOT_OCR_PSM", "6")),
+        ocr_lang=os.environ.get(
+            "CLIPPYSHOT_OCR_LANG",
+            "eng+Latin",
+        ),
+        ocr_psm=int(os.environ.get("CLIPPYSHOT_OCR_PSM", "3")),
         ocr_timeout_s=int(os.environ.get("CLIPPYSHOT_OCR_TIMEOUT_S", "60")),
     )
 

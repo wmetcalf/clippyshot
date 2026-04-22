@@ -42,7 +42,7 @@ def trim_bottom_solid(
     png_path: Path,
     *,
     tolerance: int = 10,
-    min_content_ratio: float = 0.1,
+    min_content_ratio: float = 0.05,
 ) -> dict | None:
     """Trim solid-color rows from the bottom of a PNG image.
 

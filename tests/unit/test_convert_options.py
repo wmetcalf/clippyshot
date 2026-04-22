@@ -10,8 +10,8 @@ def test_defaults_qr_on_ocr_off():
     assert opts.qr_enabled is True
     assert opts.ocr_enabled is False
     assert opts.qr_formats == "qr_code,micro_qr_code,rmqr_code"
-    assert opts.ocr_lang == "eng"
-    assert opts.ocr_psm == 6
+    assert opts.ocr_lang == "eng+Latin"
+    assert opts.ocr_psm == 3
     assert opts.ocr_timeout_s == 60
     assert opts.qr_timeout_s == 10
 
