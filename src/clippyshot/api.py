@@ -898,13 +898,36 @@ def build_app(
             filename=f"{job_id}.pdf",
         )
 
+    def _require_done_for_artifact(job_id: str) -> "Job":
+        """Shared gate for artifact routes.
+
+        - 404 if the id is unknown.
+        - 410 if the job was DONE but retention has expired it (artifacts gone).
+        - 409 if the job is still queued/running, or failed.
+        - Passes through when status is DONE.
+
+        The output directory is created at submit time and the worker
+        writes pages incrementally, so without this check callers could
+        fetch partial PNGs from RUNNING jobs or stale pages from FAILED
+        jobs. Mirrors the gate the /metadata and /pdf routes apply.
+        """
+        job_artifacts.expire_due(job_store)
+        job = job_store.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job.status == JobStatus.EXPIRED:
+            raise HTTPException(410, "result expired")
+        if job.status != JobStatus.DONE:
+            raise HTTPException(409, f"job not done (status={job.status.value})")
+        return job
+
     @app.get("/v1/jobs/{job_id}/pages/trimmed/{idx}.png")
     def get_page_trimmed(job_id: str, idx: int):
         """Serve the trimmed version of a page (solid-color bottom removed)."""
-        job_artifacts.expire_due(job_store)
-        out = _job_output_dir(job_id)
+        job = _require_done_for_artifact(job_id)
+        out = _job_output_dir(job_id, job)
         if out is None:
-            raise HTTPException(404, "job not found")
+            raise HTTPException(410, "result expired")
         png = _safe_artifact_path(out, f"page-{idx:03d}-trimmed.png")
         if png is None or not png.exists():
             raise HTTPException(404, "no trimmed version for this page")
@@ -913,10 +936,10 @@ def build_app(
     @app.get("/v1/jobs/{job_id}/pages/focused/{idx}.png")
     def get_page_focused(job_id: str, idx: int):
         """Serve the focused version of a page (solid margins trimmed on all sides)."""
-        job_artifacts.expire_due(job_store)
-        out = _job_output_dir(job_id)
+        job = _require_done_for_artifact(job_id)
+        out = _job_output_dir(job_id, job)
         if out is None:
-            raise HTTPException(404, "job not found")
+            raise HTTPException(410, "result expired")
         png = _safe_artifact_path(out, f"page-{idx:03d}-focused.png")
         if png is None or not png.exists():
             raise HTTPException(404, "no focused version for this page")
@@ -924,10 +947,10 @@ def build_app(
 
     @app.get("/v1/jobs/{job_id}/pages/{idx}.png")
     def get_page(job_id: str, idx: int):
-        job_artifacts.expire_due(job_store)
-        out = _job_output_dir(job_id)
+        job = _require_done_for_artifact(job_id)
+        out = _job_output_dir(job_id, job)
         if out is None:
-            raise HTTPException(404, "job not found")
+            raise HTTPException(410, "result expired")
         png = _safe_artifact_path(out, f"page-{idx:03d}.png")
         if png is None or not png.exists():
             raise HTTPException(404, "page not yet rendered")
@@ -935,7 +958,24 @@ def build_app(
 
     @app.delete("/v1/jobs/{job_id}")
     def delete_job(job_id: str):
+        """Remove a job's store entry and artifacts.
+
+        Refuses to delete a job that's still queued or running — the
+        dispatcher writes terminal state back to the row when the worker
+        finishes; deleting the row out from under it would raise inside
+        the dispatch loop and orphan the worker container.
+
+        404s if neither the store nor the artifact registry knows the id.
+        """
         job = job_store.get(job_id)
+        artifact_path = job_artifacts.path_for(job_id)
+        if job is None and artifact_path is None:
+            raise HTTPException(404, "job not found")
+        if job is not None and job.status in (JobStatus.QUEUED, JobStatus.RUNNING):
+            raise HTTPException(
+                409,
+                f"cannot delete job in status={job.status.value}; wait for it to finish",
+            )
         out = _job_output_dir(job_id, job)
         job_artifacts.delete(job_id)
         if out is not None:

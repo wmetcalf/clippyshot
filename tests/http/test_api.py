@@ -466,6 +466,13 @@ def test_undersized_upload_is_accepted_when_limit_is_raised(monkeypatch):
 
 
 def test_delete_job(client):
+    """DELETE on a queued job is refused; on a done job it wipes the record.
+
+    Deleting a queued/running job would orphan the dispatcher's worker
+    update (the store row goes away, the dispatcher tries to mark it
+    DONE, the store raises). Contract: wait for terminal state before
+    deleting.
+    """
     files = {
         "file": (
             "tiny.docx",
@@ -475,9 +482,22 @@ def test_delete_job(client):
     }
     r = client.post("/v1/jobs", files=files)
     job_id = r.json()["job_id"]
+
+    # DELETE while queued is refused.
+    r = client.delete(f"/v1/jobs/{job_id}")
+    assert r.status_code == 409
+
+    # Flip the stored job to DONE and retry — now it's deletable.
+    client.app.state.job_store.update(job_id, status=JobStatus.DONE)
     r = client.delete(f"/v1/jobs/{job_id}")
     assert r.status_code == 200
+
+    # Gone now.
     r = client.get(f"/v1/jobs/{job_id}")
+    assert r.status_code == 404
+
+    # DELETE on an unknown id 404s (doesn't silently no-op).
+    r = client.delete("/v1/jobs/unknown-uuid-that-does-not-exist")
     assert r.status_code == 404
 
 
@@ -632,8 +652,9 @@ def test_trimmed_and_focused_endpoints_honor_expiry(tmp_path: Path):
     trimmed = client.get(f"/v1/jobs/{job.job_id}/pages/trimmed/1.png")
     focused = client.get(f"/v1/jobs/{job.job_id}/pages/focused/1.png")
 
-    assert trimmed.status_code == 404
-    assert focused.status_code == 404
+    # Expired artifacts → 410 Gone, matching the metadata/pdf routes.
+    assert trimmed.status_code == 410
+    assert focused.status_code == 410
     updated = job_store.get(job.job_id)
     assert updated is not None
     assert updated.status is JobStatus.EXPIRED
