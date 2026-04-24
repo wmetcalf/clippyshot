@@ -12,6 +12,7 @@ error as a non-fatal per-page `ocr.skipped="error"` entry.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import time
@@ -64,9 +65,18 @@ def _tesseract_binary() -> str:
 
 
 def _default_runner(argv: list[str], timeout_s: int) -> tuple[int, str, str]:
-    """Plain subprocess.run — used when no sandbox runner is injected (tests)."""
+    """Plain subprocess.run — used when no sandbox runner is injected (tests).
+
+    Sets ``OMP_NUM_THREADS=2`` so tesseract's Leptonica preprocessing +
+    LSTM inference use two threads per page when the build supports
+    OpenMP. On a many-core host, this roughly halves per-page OCR time
+    without raising the total CPU budget beyond what we already grant
+    each worker via --cpus. Tesseract is well-behaved under OpenMP; if
+    the binary was built without OpenMP, the env var is simply ignored.
+    """
+    env = {**os.environ, "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", "2")}
     proc = subprocess.run(
-        argv, capture_output=True, text=True, timeout=timeout_s, check=False,
+        argv, capture_output=True, text=True, timeout=timeout_s, check=False, env=env,
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 

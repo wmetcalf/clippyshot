@@ -1,4 +1,5 @@
 """Retention helpers for async job artifacts."""
+
 from __future__ import annotations
 
 import logging
@@ -31,6 +32,7 @@ class JobArtifactRegistry:
         self._retention_seconds = max(0, retention_seconds)
         self._clock = clock or time.time
         self._artifacts: dict[str, tuple[Path, float | None]] = {}
+        self._in_use: dict[str, int] = {}
         self._lock = threading.Lock()
 
     def register(self, job_id: str, output_dir: Path) -> None:
@@ -43,7 +45,31 @@ class JobArtifactRegistry:
             if entry is None:
                 return
             out, _ = entry
-            self._artifacts[job_id] = (out, self._clock() + self._retention_seconds)
+            expires_at = None
+            if self._retention_seconds > 0:
+                expires_at = self._clock() + self._retention_seconds
+            self._artifacts[job_id] = (out, expires_at)
+
+    def acquire(self, job_id: str) -> bool:
+        with self._lock:
+            if job_id not in self._artifacts:
+                return False
+            self._in_use[job_id] = self._in_use.get(job_id, 0) + 1
+            return True
+
+    def release(self, job_id: str) -> None:
+        with self._lock:
+            count = self._in_use.get(job_id)
+            if count is None:
+                return
+            if count <= 1:
+                self._in_use.pop(job_id, None)
+                return
+            self._in_use[job_id] = count - 1
+
+    def in_use(self, job_id: str) -> bool:
+        with self._lock:
+            return self._in_use.get(job_id, 0) > 0
 
     def path_for(self, job_id: str) -> Path | None:
         with self._lock:
@@ -52,6 +78,8 @@ class JobArtifactRegistry:
 
     def delete(self, job_id: str) -> None:
         with self._lock:
+            if self._in_use.get(job_id, 0) > 0:
+                return
             entry = self._artifacts.pop(job_id, None)
         if entry is None:
             return
@@ -73,6 +101,8 @@ class JobArtifactRegistry:
         for job_id, (out, expires_at) in snapshot:
             if expires_at is None or expires_at > now:
                 continue
+            if self.in_use(job_id):
+                continue
             try:
                 self._expire_job(job_store, job_id, out)
                 expired.append(job_id)
@@ -83,6 +113,8 @@ class JobArtifactRegistry:
             if job.job_id in tracked_ids:
                 continue
             if job.expires_at is None or job.expires_at > now:
+                continue
+            if self.in_use(job.job_id):
                 continue
             # Expire any terminal OR long-stale job. Orphaned queued/running
             # jobs (e.g. dispatcher died mid-flight) also need cleanup so

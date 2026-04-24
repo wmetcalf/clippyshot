@@ -13,9 +13,10 @@ is needed.
 """
 from __future__ import annotations
 
-import zipfile
-import re
 import io
+import re
+import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 
 # OOXML suffixes we can patch directly (zip+xml)
@@ -29,6 +30,80 @@ SPREADSHEET_SUFFIXES = _OOXML_SPREADSHEET_SUFFIXES | _BINARY_SPREADSHEET_SUFFIXE
 
 def is_spreadsheet(path: Path) -> bool:
     return path.suffix.lower() in SPREADSHEET_SUFFIXES
+
+
+# OOXML spreadsheet namespace used in xl/workbook.xml. Hardcoded because
+# this namespace is frozen in the OPC/OOXML spec (ECMA-376 part 1).
+_OOXML_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+
+
+def read_sheet_list(xlsx_path: Path) -> list[dict]:
+    """Parse ``xl/workbook.xml`` and return per-sheet metadata in workbook order.
+
+    Each entry is a dict with:
+
+    - ``name``: human-readable sheet name (up to 31 chars per Excel, uncapped here)
+    - ``state``: ``"visible"`` / ``"hidden"`` / ``"veryHidden"`` (defaults to
+      ``"visible"`` when the attribute is absent)
+    - ``type``: ``"worksheet"`` / ``"chartsheet"`` / ``"macro"`` / ``"dialog"``
+      (defaults to ``"worksheet"``; the ``type`` attribute only appears for
+      non-default types, and Excel 4 macro sheets set it to ``"macro"``)
+
+    Returns an empty list if the file is not an OOXML zip, the workbook.xml
+    is missing, or the XML fails to parse. This function is read-only and
+    safe to call on any Path — it never raises on a well-formed but unusual
+    zip (encrypted content, foreign namespaces, missing sheet nodes, etc.).
+    """
+    if not zipfile.is_zipfile(xlsx_path):
+        return []
+    try:
+        with zipfile.ZipFile(xlsx_path) as zf:
+            try:
+                data = zf.read("xl/workbook.xml")
+            except KeyError:
+                return []
+    except (zipfile.BadZipFile, OSError):
+        return []
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError:
+        return []
+    sheets = root.find(f"{_OOXML_NS}sheets")
+    if sheets is None:
+        # Some non-Microsoft writers emit without a namespace; try unqualified.
+        sheets = root.find("sheets")
+    if sheets is None:
+        return []
+    out: list[dict] = []
+    for sheet in sheets:
+        # Accept both namespaced and bare tag names.
+        tag = sheet.tag.rsplit("}", 1)[-1]
+        if tag != "sheet":
+            continue
+        name = sheet.attrib.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        state = sheet.attrib.get("state", "visible")
+        # type attribute: when missing it's a worksheet by convention. Only
+        # Excel 4 macro sheets set this explicitly.
+        sheet_type = sheet.attrib.get("type", "worksheet")
+        out.append({"name": name, "state": state, "type": sheet_type})
+    return out
+
+
+def visible_sheet_names(sheets: list[dict]) -> list[str]:
+    """Return names of sheets LibreOffice will emit as PDF pages.
+
+    LO Calc's PDF export skips ``hidden`` and ``veryHidden`` sheets, and
+    (for ``SinglePageSheets=true``) also drops Excel 4 macro sheets since
+    they can't meaningfully render one-per-page. Output order matches the
+    input workbook order so the i-th name aligns with PDF page i.
+    """
+    return [
+        s["name"]
+        for s in sheets
+        if s.get("state", "visible") == "visible" and s.get("type", "worksheet") != "macro"
+    ]
 
 
 # Maximum "reasonable" used range for SinglePageSheets.

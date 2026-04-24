@@ -80,6 +80,19 @@ def test_delete_idempotent(store):
     store.delete("does-not-exist")  # should not raise
 
 
+def test_redis_store_allows_non_expiring_jobs_when_ttl_is_zero():
+    if fakeredis is None:
+        pytest.skip("fakeredis not installed")
+    store = RedisJobStore(client=fakeredis.FakeStrictRedis(), ttl_seconds=0)
+    job = Job.new(filename="forever.docx")
+
+    store.create(job)
+    fetched = store.get(job.job_id)
+
+    assert fetched is not None
+    assert fetched.job_id == job.job_id
+
+
 def test_job_to_dict_and_from_dict_roundtrip():
     job = Job.new(filename="a.docx")
     job.pages_done = 3

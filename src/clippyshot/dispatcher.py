@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -11,6 +12,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Callable, Sequence
 
+from clippyshot.errors import sanitize_public_error
 from clippyshot.jobs import Job, JobStatus, JobStore
 from clippyshot.runtime.docker_runtime import (
     DockerRuntimeSelection,
@@ -19,8 +21,23 @@ from clippyshot.runtime.docker_runtime import (
 )
 
 
+_log = logging.getLogger("clippyshot.dispatcher")
 _DEFAULT_JOB_ROOT = Path("/var/lib/clippyshot/jobs")
 _DEFAULT_WORKER_COMMAND = ("worker",)
+
+
+def _phash_hex_to_int8(hex_str: str) -> int:
+    """Convert a 16-char hex pHash to a signed int64 suitable for Postgres BIGINT.
+
+    imagehash emits the phash as unsigned 64-bit hex (e.g. "ff00aa...");
+    Postgres BIGINT is signed two's-complement, so values with the high
+    bit set must be reinterpreted as negative to fit. The same mapping
+    gets applied on query so round-trips are exact.
+    """
+    val = int(hex_str, 16)
+    if val >= 1 << 63:
+        val -= 1 << 64
+    return val
 
 
 class Dispatcher:
@@ -179,7 +196,11 @@ class Dispatcher:
                 input_sha256 = None
                 try:
                     raw = metadata.get("input", {}).get("sha256")
-                    if isinstance(raw, str) and len(raw) == 64 and all(c in "0123456789abcdef" for c in raw.lower()):
+                    if (
+                        isinstance(raw, str)
+                        and len(raw) == 64
+                        and all(c in "0123456789abcdef" for c in raw.lower())
+                    ):
                         input_sha256 = raw.lower()
                 except Exception:
                     pass
@@ -196,6 +217,52 @@ class Dispatcher:
                     security_warnings=warnings,
                     input_sha256=input_sha256,
                 )
+                # Fan out perceptual hashes to the page_hashes table for
+                # similarity search. Best-effort — a JobStore that doesn't
+                # implement upsert_page_hashes (in-memory / older SQLite)
+                # just won't populate the index.
+                upsert = getattr(self._job_store, "upsert_page_hashes", None)
+                if callable(upsert):
+                    rows: list[dict] = []
+                    for p in metadata.get("pages", []):
+                        idx = p.get("index")
+                        if idx is None:
+                            continue
+                        # Emit one row per available variant (original +
+                        # trimmed + focused if present). Each has its own
+                        # phash / colorhash / sha256 computed at render time.
+                        for variant, src in (
+                            ("original", p),
+                            ("trimmed", p.get("trimmed") or {}),
+                            ("focused", p.get("focused") or {}),
+                        ):
+                            ph_hex = src.get("phash")
+                            ch = src.get("colorhash")
+                            sha = src.get("sha256")
+                            if not (ph_hex and ch and sha):
+                                continue
+                            try:
+                                ph_int = _phash_hex_to_int8(ph_hex)
+                            except (TypeError, ValueError):
+                                continue
+                            rows.append(
+                                {
+                                    "page_index": int(idx),
+                                    "variant": variant,
+                                    "phash": ph_int,
+                                    "colorhash": ch,
+                                    "sha256": sha,
+                                }
+                            )
+                    if rows:
+                        try:
+                            upsert(job.job_id, rows)
+                        except Exception as e:
+                            _log.warning(
+                                "page_hash_upsert_failed job_id=%s error=%s",
+                                job.job_id,
+                                str(e)[:200],
+                            )
                 return
             self._job_store.update(
                 job.job_id,
@@ -406,6 +473,34 @@ class Dispatcher:
         return meta
 
     _SAFE_PAGE_FILE = re.compile(r"^page-\d{1,4}(-trimmed|-focused)?\.png$")
+    # Hash fields flow from worker metadata.json into the DB and are later
+    # echoed back to the browser as clickable hashes. The UI renders them
+    # inside inline onclick="..." attributes, so an attacker-controlled
+    # string with HTML entities could escape the JS literal via attribute
+    # decoding. Enforce fixed-length hex here so the untrusted-worker →
+    # DB → UI chain can't introduce non-hex content in the first place.
+    _PHASH_HEX = re.compile(r"^[0-9a-fA-F]{16}$")
+    _COLORHASH_HEX = re.compile(r"^[0-9a-fA-F]{14}$")
+    _SHA256_HEX = re.compile(r"^[0-9a-fA-F]{64}$")
+
+    def _hash_fields_valid(self, src: dict) -> bool:
+        """Return True iff phash/colorhash/sha256 on ``src`` are missing or hex.
+
+        A valid page can omit all three (e.g. blank pages short-circuit
+        before hashing). If any are present they must match the canonical
+        hex form; otherwise we reject the whole metadata.json.
+        """
+        for key, pattern in (
+            ("phash", self._PHASH_HEX),
+            ("colorhash", self._COLORHASH_HEX),
+            ("sha256", self._SHA256_HEX),
+        ):
+            v = src.get(key)
+            if v is None:
+                continue
+            if not isinstance(v, str) or not pattern.match(v):
+                return False
+        return True
 
     def _validate_metadata(self, meta: dict, output_dir: Path) -> bool:
         """Reject attacker-crafted metadata.json content."""
@@ -445,9 +540,21 @@ class Dispatcher:
                         sub_real.relative_to(output_real)
                     except ValueError:
                         return False
+                if not self._hash_fields_valid(sub):
+                    return False
+            if not self._hash_fields_valid(p):
+                return False
             if "image_count" in p:
                 if not isinstance(p["image_count"], int) or p["image_count"] < 0:
                     return False
+            # sheet_name is an opaque label sourced from the input document's
+            # PDF outline (for spreadsheets). Cap length and require str.
+            if "sheet_name" in p:
+                sn = p["sheet_name"]
+                if not isinstance(sn, str) or not sn:
+                    return False
+                if len(sn) > 255:
+                    p["sheet_name"] = sn[:255]
         render = meta.get("render", {})
         if not isinstance(render, dict):
             return False
@@ -461,6 +568,33 @@ class Dispatcher:
             v = render.get(key)
             if v is not None and (not isinstance(v, int) or v < 0):
                 return False
+
+        # Spreadsheet sheet-inventory block (optional). Worker-sourced, so
+        # truncate anything wild and reject obvious shape bugs.
+        sheets_block = meta.get("sheets")
+        if sheets_block is not None:
+            if not isinstance(sheets_block, dict):
+                return False
+            for key in ("total", "rendered"):
+                v = sheets_block.get(key)
+                if v is not None and (not isinstance(v, int) or v < 0 or v > 100_000):
+                    return False
+            non_rendered = sheets_block.get("non_rendered")
+            if non_rendered is not None:
+                if not isinstance(non_rendered, list) or len(non_rendered) > 10_000:
+                    return False
+                for entry in non_rendered:
+                    if not isinstance(entry, dict):
+                        return False
+                    name = entry.get("name")
+                    if not isinstance(name, str) or not name:
+                        return False
+                    if len(name) > 255:
+                        entry["name"] = name[:255]
+                    for key in ("state", "type"):
+                        v = entry.get(key)
+                        if v is not None and (not isinstance(v, str) or len(v) > 64):
+                            return False
 
         # --- begin T15 additions: scanner fields ---
         scanners = render.get("scanners")
@@ -579,7 +713,7 @@ class Dispatcher:
         stderr = self._coerce_text(getattr(completed, "stderr", "")).strip()
         stdout = self._coerce_text(getattr(completed, "stdout", "")).strip()
         detail = stderr or stdout or "no worker output"
-        return f"worker exit {completed.returncode}: {detail}"
+        return sanitize_public_error(f"worker exit {completed.returncode}: {detail}")
 
     def _coerce_text(self, value: object) -> str:
         if isinstance(value, bytes):
@@ -589,6 +723,7 @@ class Dispatcher:
         return str(value)
 
     def _fail_job(self, job: Job, output_dir: Path, error: str) -> None:
+        error = sanitize_public_error(error)
         finished = time.time()
         expires = (
             finished + self._job_retention_seconds

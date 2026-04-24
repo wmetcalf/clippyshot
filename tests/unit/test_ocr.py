@@ -20,7 +20,7 @@ def test_run_ocr_happy_path(monkeypatch, tmp_path):
     png = tmp_path / "p.png"
     png.write_bytes(b"fake")
 
-    def fake_run(argv, *, capture_output, text, timeout, check):
+    def fake_run(argv, *, capture_output, text, timeout, check, env=None):
         assert argv[0].endswith("tesseract")
         assert str(png) in argv
         assert "-" in argv
@@ -41,7 +41,7 @@ def test_run_ocr_passes_lang_and_psm(monkeypatch, tmp_path):
     png.write_bytes(b"fake")
     captured = {}
 
-    def fake_run(argv, *, capture_output, text, timeout, check):
+    def fake_run(argv, *, capture_output, text, timeout, check, env=None):
         captured["argv"] = argv
         return _FakeCompleted(returncode=0, stdout="x")
 
@@ -56,7 +56,7 @@ def test_run_ocr_empty_output_returns_result_with_empty_text(monkeypatch, tmp_pa
     png = tmp_path / "p.png"
     png.write_bytes(b"fake")
 
-    def fake_run(argv, *, capture_output, text, timeout, check):
+    def fake_run(argv, *, capture_output, text, timeout, check, env=None):
         return _FakeCompleted(returncode=0, stdout="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -69,7 +69,7 @@ def test_run_ocr_timeout_raises_ocr_error(monkeypatch, tmp_path):
     png = tmp_path / "p.png"
     png.write_bytes(b"fake")
 
-    def fake_run(argv, *, capture_output, text, timeout, check):
+    def fake_run(argv, *, capture_output, text, timeout, check, env=None):
         raise subprocess.TimeoutExpired(argv, timeout)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -82,7 +82,7 @@ def test_run_ocr_nonzero_exit_raises_ocr_error(monkeypatch, tmp_path):
     png = tmp_path / "p.png"
     png.write_bytes(b"fake")
 
-    def fake_run(argv, *, capture_output, text, timeout, check):
+    def fake_run(argv, *, capture_output, text, timeout, check, env=None):
         return _FakeCompleted(returncode=1, stdout="", stderr="corrupt image")
 
     monkeypatch.setattr(subprocess, "run", fake_run)

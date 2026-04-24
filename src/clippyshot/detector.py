@@ -39,6 +39,11 @@ _SUPPORTED_MAGIKA: dict[str, tuple[str, str]] = {
     "xps": ("xps", "application/vnd.ms-xpsdocument"),
     "oxps": ("oxps", "application/oxps"),
     "xlsb": ("xlsb", "application/vnd.ms-excel.sheet.binary.macroEnabled.12"),
+    # MIME HTML / "Single File Web Page" archives. Magika has no dedicated
+    # label for these — they arrive tagged as docx/txt/unknown — so we set
+    # the label ourselves via a content sniff in ``detect`` below and feed
+    # the result back through this table for mime/canonical lookup.
+    "mht": ("mht", "multipart/related"),
 }
 
 
@@ -183,9 +188,12 @@ _EXT_ALLOWLIST: dict[str, tuple[str, str]] = {
     "fods": _SUPPORTED_MAGIKA["ods"],
     "fodp": _SUPPORTED_MAGIKA["odp"],
     "fodg": _SUPPORTED_MAGIKA["odg"],
-    # MIME HTML archives — Writer opens these via its HTML import filter
-    "mht": ("txt", "text/plain"),
-    "mhtml": ("txt", "text/plain"),
+    # MIME HTML archives. LO opens these via its Writer MHTML importer
+    # when the file has a ``.mht`` / ``.mhtml`` extension — ``rewrite_active``
+    # in the runner takes care of the rename when uploads arrive with a
+    # spoofed extension (e.g. .docx hiding a MHT payload).
+    "mht": ("mht", "multipart/related"),
+    "mhtml": ("mht", "multipart/related"),
     # HTML — Writer handles natively
     "html": ("txt", "text/plain"),
     "htm": ("txt", "text/plain"),
@@ -275,6 +283,34 @@ _LIBMAGIC_MIME_PATTERNS: list[tuple[str, str]] = [
     ("x-ole-storage", None),  # don't correct — too ambiguous
     ("CDFV2", None),
 ]
+
+
+def _looks_like_mht(path: Path) -> bool:
+    """Sniff the first 8 KB for MIME/Multipart markers (olevba-style).
+
+    Word and Excel's "Save as Web Page, Filtered" produces MHTML files
+    that may start with whitespace or extra headers before the canonical
+    ``MIME-Version: 1.0`` line. Checking for the three tokens anywhere in
+    the first chunk, plus a proximity constraint between ``mime`` and
+    ``version``, catches both variants without false-positive-ing on
+    unrelated files that happen to contain all three words spread out.
+
+    Based on oletools/olevba.py's MHT heuristic.
+    """
+    try:
+        with path.open("rb") as f:
+            head = f.read(8192)
+    except OSError:
+        return False
+    if not head:
+        return False
+    low = head.lower()
+    if b"mime" not in low or b"version" not in low or b"multipart" not in low:
+        return False
+    try:
+        return abs(low.index(b"version") - low.index(b"mime")) < 20
+    except ValueError:
+        return False
 
 
 def _correct_office_label_via_libmagic(path: Path, magika_label: str) -> str:
@@ -465,6 +501,15 @@ class Detector:
             corrected = _correct_office_label_via_libmagic(path, magika_label)
             if corrected != magika_label:
                 magika_label = corrected
+
+        # MHT override: magika routinely tags Word/Excel-saved MHTMLs as
+        # docx with high confidence because the outer OOXML metadata in
+        # the MHT wrapper fools the ML signature. libmagic misses them
+        # too. A cheap first-8-KB sniff for MIME-Version + multipart
+        # (olevba's approach) catches them before the OOXML code paths
+        # try to unwrap a non-existent zip.
+        if size > 0 and _looks_like_mht(path):
+            magika_label = "mht"
 
         # Structural content checks: detect files that are valid containers
         # but have no actual document content to render.

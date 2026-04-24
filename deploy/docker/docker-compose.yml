@@ -1,6 +1,11 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    # Custom image: postgres:16-alpine + evirma/pg_bktree compiled in,
+    # so SqlJobStore can create SP-GiST Hamming-distance indexes on
+    # perceptual hashes. See deploy/docker/postgres/Dockerfile.
+    build:
+      context: postgres
+    image: clippyshot-postgres:dev
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-clippyshot}

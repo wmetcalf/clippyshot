@@ -30,6 +30,7 @@ def _make_stub_png() -> bytes:
     upscaled to the 32x32 DCT grid, so it's not considered uniform).
     """
     from PIL import Image as _Image
+
     # A 2x2 checkerboard pattern ensures phash sees real DCT structure.
     img = _Image.new("RGB", (2, 2), (255, 0, 0))
     img.putpixel((1, 0), (0, 0, 255))
@@ -65,8 +66,11 @@ class StubRunner:
     def convert_to_pdf(self, input_path, output_dir, limits, label="docx"):
         self.calls += 1
         from PIL import Image
+
         out = Path(output_dir) / "input.pdf"
-        imgs = [Image.new("RGB", (612, 792), (255, 255, 255)) for _ in range(self.pages)]
+        imgs = [
+            Image.new("RGB", (612, 792), (255, 255, 255)) for _ in range(self.pages)
+        ]
         imgs[0].save(out, "PDF", save_all=True, append_images=imgs[1:], resolution=72.0)
         return out
 
@@ -86,9 +90,12 @@ class StubRasterizer:
             (Path(out_dir) / name).write_bytes(_TINY_PNG)
             results.append(
                 RasterizedPage(
-                    index=i, path=name,
-                    width_px=1, height_px=1,
-                    width_mm=215.9, height_mm=279.4,
+                    index=i,
+                    path=name,
+                    width_px=1,
+                    height_px=1,
+                    width_mm=215.9,
+                    height_mm=279.4,
                 )
             )
         return results
@@ -210,12 +217,58 @@ def test_converter_records_timings_in_metadata(tmp_path: Path):
 
     meta = json.loads((out / "metadata.json").read_text())
     timings = meta["render"]["duration_ms"]
-    for stage in ("detect", "soffice", "rasterize", "hash", "hash_original", "trim", "focus", "hash_derivatives", "total"):
+    for stage in (
+        "detect",
+        "soffice",
+        "rasterize",
+        "hash",
+        "hash_original",
+        "trim",
+        "focus",
+        "hash_derivatives",
+        "total",
+    ):
         assert stage in timings
         assert isinstance(timings[stage], int)
         assert timings[stage] >= 0
     assert timings["hash"] >= timings["hash_original"]
     assert timings["hash"] >= timings["trim"] + timings["focus"]
+
+
+def test_converter_surfaces_altchunk_warnings_in_metadata(tmp_path: Path):
+    class AltChunkRunner(StubRunner):
+        def convert_to_pdf(self, input_path, output_dir, limits, label="docx"):
+            self.last_altchunks = [
+                {
+                    "part_name": "/word/afchunk.mht",
+                    "content_type": "message/rfc822",
+                    "size": 1234,
+                }
+            ]
+            return super().convert_to_pdf(input_path, output_dir, limits, label)
+
+    src = tmp_path / "input.docx"
+    src.write_bytes(b"x")
+    out = tmp_path / "out"
+    out.mkdir()
+    conv = Converter(
+        detector=StubDetector(),
+        runner=AltChunkRunner(pages=1),
+        rasterizer=StubRasterizer(pages=1),
+        sandbox_backend="bwrap",
+        apparmor_profile="unconfined",
+    )
+
+    conv.convert(src, out, ConvertOptions(limits=Limits()))
+
+    meta = json.loads((out / "metadata.json").read_text())
+    assert any(
+        warning["code"] == "altchunk_present"
+        and warning["part_name"] == "/word/afchunk.mht"
+        and warning["content_type"] == "message/rfc822"
+        and warning["size"] == 1234
+        for warning in meta["warnings"]
+    )
 
 
 def test_converter_records_extension_mismatch_warning(tmp_path: Path):
@@ -272,10 +325,16 @@ def test_converter_skips_blank_pages_when_skip_blanks_true(tmp_path: Path):
             # Page 3: white (blank)
             (Path(out_dir) / "page-003.png").write_bytes(_png_bytes(white))
             for i in (1, 2, 3):
-                results.append(RasterizedPage(
-                    index=i, path=f"page-{i:03d}.png",
-                    width_px=100, height_px=100, width_mm=10, height_mm=10,
-                ))
+                results.append(
+                    RasterizedPage(
+                        index=i,
+                        path=f"page-{i:03d}.png",
+                        width_px=100,
+                        height_px=100,
+                        width_mm=10,
+                        height_mm=10,
+                    )
+                )
             return results
 
     conv = Converter(
@@ -314,10 +373,16 @@ def test_converter_keeps_blank_pages_when_skip_blanks_false(tmp_path: Path):
         def rasterize(self, pdf_path, out_dir, dpi, max_pages, page_sizes_mm=None):
             white = Image.new("RGB", (100, 100), (255, 255, 255))
             (Path(out_dir) / "page-001.png").write_bytes(_png_bytes(white))
-            return [RasterizedPage(
-                index=1, path="page-001.png",
-                width_px=100, height_px=100, width_mm=10, height_mm=10,
-            )]
+            return [
+                RasterizedPage(
+                    index=1,
+                    path="page-001.png",
+                    width_px=100,
+                    height_px=100,
+                    width_mm=10,
+                    height_mm=10,
+                )
+            ]
 
     conv = Converter(
         detector=StubDetector(),
@@ -362,10 +427,16 @@ def test_converter_adds_focused_derivative_for_spreadsheets(tmp_path: Path):
             draw = ImageDraw.Draw(img)
             draw.rectangle((80, 70, 170, 150), fill=(0, 64, 160))
             (Path(out_dir) / "page-001.png").write_bytes(_png_bytes(img))
-            return [RasterizedPage(
-                index=1, path="page-001.png",
-                width_px=240, height_px=240, width_mm=10, height_mm=10,
-            )]
+            return [
+                RasterizedPage(
+                    index=1,
+                    path="page-001.png",
+                    width_px=240,
+                    height_px=240,
+                    width_mm=10,
+                    height_mm=10,
+                )
+            ]
 
     conv = Converter(
         detector=SpreadsheetDetector(),
@@ -411,7 +482,9 @@ def test_security_block_disclosed_when_opt_in(tmp_path: Path):
     out = tmp_path / "out"
     out.mkdir()
     conv = _build_converter(pages=1)
-    conv.convert(src, out, ConvertOptions(limits=Limits(disclose_security_internals=True)))
+    conv.convert(
+        src, out, ConvertOptions(limits=Limits(disclose_security_internals=True))
+    )
     meta = json.loads((out / "metadata.json").read_text())
     sec = meta["security"]
     # Internal fields must be present when explicitly opted in.
@@ -433,6 +506,7 @@ def test_pdf_intermediate_dir_cleaned_on_rasterize_failure(tmp_path: Path):
 
         def rasterize(self, pdf_path, out_dir, dpi, max_pages, page_sizes_mm=None):
             from clippyshot.errors import RasterizeError
+
             raise RasterizeError("synthetic failure")
 
     conv = Converter(
@@ -443,6 +517,7 @@ def test_pdf_intermediate_dir_cleaned_on_rasterize_failure(tmp_path: Path):
         apparmor_profile="unconfined",
     )
     from clippyshot.errors import ConversionError
+
     with pytest.raises(ConversionError):
         conv.convert(src, out, ConvertOptions(limits=Limits()))
     # _pdf dir must be gone regardless of the rasterize failure.

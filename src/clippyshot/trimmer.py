@@ -38,6 +38,29 @@ def _sampled_deviation_mask(arr: np.ndarray, bg: np.ndarray, *, axis: str) -> np
     return diff.max(axis=(1, 2)) if axis == "rows" else diff.max(axis=(0, 2))
 
 
+def _density_per_axis(
+    arr: np.ndarray, bg: np.ndarray, *, tolerance: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``(row_nonbg_count, col_nonbg_count)`` — exact count of
+    non-background pixels per row and per column.
+
+    Max-deviation (``_sampled_deviation_mask``) fires on any single pixel
+    out of bg, which means a row with one stray artifact is indistinguishable
+    from a row of real content. For focus detection we want to reject
+    scattered noise and keep only rows/cols with enough content to be visually
+    meaningful — so we need COUNT of non-bg pixels, not any/none. That requires
+    the full deviation mask (column-sampling underestimates scattered content
+    and over-extrapolation from sampled hits wrecks the threshold). For
+    typical rasterized pages this is ~6MB; for pathological spreadsheet
+    pages ~50MB. The caller's ``_MAX_VECTOR_PIXELS`` bound already caps total
+    pixel counts before this function runs."""
+    h, w, _ = arr.shape
+    if w == 0 or h == 0:
+        return np.zeros(h, dtype=np.int64), np.zeros(w, dtype=np.int64)
+    hot = np.abs(arr.astype(np.int16) - bg).max(axis=2) > tolerance  # (H, W) bool
+    return hot.sum(axis=1, dtype=np.int64), hot.sum(axis=0, dtype=np.int64)
+
+
 def trim_bottom_solid(
     png_path: Path,
     *,
@@ -155,18 +178,46 @@ def focus_content_solid_bg(
 
         arr = np.asarray(img)
         bg = arr[-1, -1].astype(np.int16)
-        row_max = _sampled_deviation_mask(arr, bg, axis="rows")
-        col_max = _sampled_deviation_mask(arr, bg, axis="cols")
+        # Density-aware detection: a row only counts as "content" if it
+        # contains enough non-bg pixels to form a visually meaningful
+        # stripe, not just 1-2 stray artifacts. This matters on dense
+        # spreadsheet renders where sub-pixel noise is scattered across
+        # every row — naive bounding-box detection would crop to the
+        # full image (useless), whereas the real signal (a logo or
+        # header block) is tightly clustered in one corner.
+        row_count, _ = _density_per_axis(arr, bg, tolerance=tolerance)
+        row_density_floor = max(10, int(w * 0.01))
+        dense_rows = np.where(row_count >= row_density_floor)[0]
+        if len(dense_rows) == 0:
+            # No row stripe is dense enough — either a pure-noise page or a
+            # small chart. Fall back to any-content bounds so we don't miss
+            # light content (small test fixtures etc.).
+            row_any = _sampled_deviation_mask(arr, bg, axis="rows")
+            dense_rows = np.where(row_any > tolerance)[0]
+            if len(dense_rows) == 0:
+                return None
+            # For the fallback case, scan columns globally too.
+            col_any = _sampled_deviation_mask(arr, bg, axis="cols")
+            dense_cols = np.where(col_any > tolerance)[0]
+            if len(dense_cols) == 0:
+                return None
+        else:
+            # Restrict the column search to the dense-row band. A tall
+            # page with right-edge noise would otherwise make the noise
+            # columns look dense (one pixel × thousands of rows = huge
+            # col_count), and the crop would land on the noise instead
+            # of the actual content cluster.
+            row_slice = slice(int(dense_rows[0]), int(dense_rows[-1]) + 1)
+            sub = arr[row_slice].astype(np.int16)
+            col_mask = (np.abs(sub - bg).max(axis=2) > tolerance).any(axis=0)
+            dense_cols = np.where(col_mask)[0]
+            if len(dense_cols) == 0:
+                return None
 
-        non_bg_rows = np.where(row_max > tolerance)[0]
-        non_bg_cols = np.where(col_max > tolerance)[0]
-        if len(non_bg_rows) == 0 or len(non_bg_cols) == 0:
-            return None
-
-        top = int(non_bg_rows[0])
-        bottom = int(non_bg_rows[-1])
-        left = int(non_bg_cols[0])
-        right = int(non_bg_cols[-1])
+        top = int(dense_rows[0])
+        bottom = int(dense_rows[-1])
+        left = int(dense_cols[0])
+        right = int(dense_cols[-1])
 
         content_w = right - left + 1
         content_h = bottom - top + 1
@@ -187,14 +238,32 @@ def focus_content_solid_bg(
         # Skip if the focused crop is a useless sliver. When a page has
         # stray artifacts or grid lines spanning every row/column, trim
         # only works in one axis — producing a 30-pixel-wide ribbon or
-        # a 50-pixel-tall strip that's impossible to read. Require the
-        # result to stay within 1:8 aspect in both directions.
+        # a 50-pixel-tall strip that's impossible to read.
+        #
+        # The guard is relative to the original page's aspect: "don't
+        # produce something meaningfully narrower/taller than what the
+        # user already has." A legitimately tall-and-narrow spreadsheet
+        # (16:1 original) should still get a focused crop at ~16:1 —
+        # what we want to reject is a 30:1 ribbon that emerged because
+        # trim only worked in one axis. Threshold: stay within
+        # max(8.0, original_aspect * 1.5).
         crop_w = crop_right - crop_left
         crop_h = crop_bottom - crop_top
-        if crop_w < 100 or crop_h < 100:
+        # Minimum readable dimension in either axis. Narrow columns of
+        # spreadsheet data can legitimately be ~80px wide; 64 is the
+        # knee below which a crop stops being a useful derivative.
+        if crop_w < 64 or crop_h < 64:
             return None
-        aspect = max(crop_w / crop_h, crop_h / crop_w)
-        if aspect > 8.0:
+        original_aspect = max(w / h, h / w)
+        focused_aspect = max(crop_w / crop_h, crop_h / crop_w)
+        # Allow the crop to become up to 2.5x more extreme than the
+        # original — accommodates spreadsheet pages where the content
+        # is a narrow column in one corner (crop is a tall ribbon but
+        # *is* the content the user wants to see). For roughly square
+        # pages the max(8.0, ...) floor still keeps genuinely weird
+        # single-axis-trim slivers out.
+        aspect_ceiling = max(8.0, original_aspect * 2.5)
+        if focused_aspect > aspect_ceiling:
             return None
 
         focused = img.crop((crop_left, crop_top, crop_right, crop_bottom))

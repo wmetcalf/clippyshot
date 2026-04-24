@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from clippyshot.jobs import InMemoryJobStore, Job, JobArtifactRegistry, JobStatus, SqlJobStore
+from clippyshot.jobs import (
+    InMemoryJobStore,
+    Job,
+    JobArtifactRegistry,
+    JobStatus,
+    SqlJobStore,
+)
 
 
 def test_registry_expires_finished_job_artifacts(tmp_path: Path):
@@ -44,6 +50,29 @@ def test_registry_delete_removes_job_directory_immediately(tmp_path: Path):
 
     assert not work.exists()
     assert registry.path_for("job-2") is None
+
+
+def test_registry_non_expiring_jobs_do_not_expire_when_retention_is_zero(
+    tmp_path: Path,
+):
+    store = InMemoryJobStore()
+    job = Job.new(filename="keep.docx")
+    store.create(job)
+
+    work = tmp_path / "job-keep"
+    out = work / "out"
+    out.mkdir(parents=True)
+
+    registry = JobArtifactRegistry(retention_seconds=0, clock=lambda: 100.0)
+    registry.register(job.job_id, out)
+    registry.mark_finished(job.job_id)
+    store.update(job.job_id, status=JobStatus.DONE, result_dir=str(out))
+
+    expired = registry.expire_due(store)
+
+    assert expired == []
+    assert work.exists()
+    assert store.get(job.job_id).status == JobStatus.DONE
 
 
 def test_registry_expires_persisted_job_without_in_memory_registration(tmp_path: Path):

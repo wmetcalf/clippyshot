@@ -1,5 +1,17 @@
 """Exception hierarchy for ClippyShot."""
+
 from __future__ import annotations
+
+import re
+
+
+# Strip internal filesystem paths from public-facing error messages.
+_INTERNAL_PATH_RE = re.compile(r"/(?:tmp|sandbox|var|home|opt|usr)/[^\s:;\"']+")
+
+
+def sanitize_public_error(msg: str) -> str:
+    """Remove internal filesystem paths from an error message."""
+    return _INTERNAL_PATH_RE.sub("<path>", msg)
 
 
 class ClippyShotError(Exception):

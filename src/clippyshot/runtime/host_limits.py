@@ -63,7 +63,7 @@ def _read_mem_available_gb() -> float:
 
 
 # Hard caps so we never produce pathological values even on huge hosts.
-_MAX_CONCURRENCY = 8
+_MAX_CONCURRENCY = 16
 _MIN_WORKER_MEMORY_GB = 1.0
 _MAX_WORKER_MEMORY_GB = 4.0
 _MIN_WORKER_CPUS = 1.0
@@ -72,6 +72,56 @@ _DEFAULT_PIDS_LIMIT = 256
 # Reserve this many GB of host memory for the OS + dispatcher + api +
 # postgres so the worker budget doesn't starve the control plane.
 _HEADROOM_GB = 1.0
+
+# Rough upper-bound for peak RAM of one in-flight page buffer during
+# rasterization (pdftoppm) or per-page post-processing (PIL loading
+# the PNG for hash/trim/focus). A normal letter-sized page at 150 DPI
+# is ~6MB; pathological spreadsheet renders (e.g. 1786x28319) can hit
+# ~150MB. We estimate a middle-ground 200MB so the cap errs toward
+# safety on mixed corpora.
+_PER_PAGE_PEAK_MB = 200
+# Absolute ceiling on parallel page-operation counts even on huge
+# hosts — beyond ~8 the wall-clock win flattens out and gVisor /
+# kernel contention becomes the bottleneck.
+_ABSOLUTE_PAGE_OP_CEILING = 8
+
+
+def parse_memory_gb(spec: str) -> float:
+    """Parse a docker-style memory spec like '4g', '512m', '1024' into GB."""
+    if not spec:
+        return 0.0
+    s = spec.strip().lower()
+    try:
+        if s.endswith("g"):
+            return float(s[:-1])
+        if s.endswith("m"):
+            return float(s[:-1]) / 1024.0
+        if s.endswith("k"):
+            return float(s[:-1]) / (1024.0 * 1024.0)
+        # Plain number — assume bytes.
+        return float(s) / (1024.0 ** 3)
+    except ValueError:
+        return 0.0
+
+
+def max_concurrent_page_ops(worker_memory_spec: str | None = None) -> int:
+    """Bound parallel page-level operations by the worker's memory budget.
+
+    Used by both pdftoppm rasterization (shard count) and the per-page
+    fan-out in the converter (hash/trim/focus/scanners). Both load the
+    full page image into memory; running too many concurrently on a
+    memory-constrained worker risks OOM-kill by the cgroup.
+    """
+    mem_gb = parse_memory_gb(
+        worker_memory_spec
+        or os.environ.get("CLIPPYSHOT_WORKER_MEMORY")
+        or "4g"
+    )
+    # Leave half the worker memory for Python runtime, LibreOffice,
+    # and transient allocations.
+    usable_mb = max(1.0, mem_gb * 1024.0 * 0.5)
+    mem_cap = max(1, int(usable_mb // _PER_PAGE_PEAK_MB))
+    return max(1, min(_ABSOLUTE_PAGE_OP_CEILING, mem_cap))
 
 
 def compute_host_defaults(env: dict[str, str] | None = None) -> HostDefaults:

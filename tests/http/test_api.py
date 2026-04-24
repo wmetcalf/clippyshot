@@ -1,5 +1,8 @@
 import json
+import os
+import threading
 import time
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -7,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from clippyshot.api import build_app
 from clippyshot.converter import ConversionResult
+from clippyshot.errors import ConversionError
 from clippyshot.jobs import InMemoryJobStore, Job, JobStatus
 
 
@@ -106,6 +110,28 @@ def test_sync_convert_returns_zip(client):
     assert r.content[:2] == b"PK"
 
 
+@pytest.mark.asyncio
+async def test_write_upload_to_path_streams_chunks(tmp_path: Path):
+    from clippyshot.api import _write_upload_to_path
+
+    class FakeUpload:
+        def __init__(self):
+            self.calls = []
+            self._chunks = [b"abc", b"def", b""]
+
+        async def read(self, size: int = -1):
+            self.calls.append(size)
+            return self._chunks.pop(0)
+
+    dest = tmp_path / "upload.bin"
+    upload = FakeUpload()
+
+    await _write_upload_to_path(upload, dest)
+
+    assert dest.read_bytes() == b"abcdef"
+    assert upload.calls == [65536, 65536, 65536]
+
+
 def test_async_job_submission_is_queue_only(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("CLIPPYSHOT_JOB_ROOT", str(tmp_path / "jobs"))
     fake = FakeConverter()
@@ -141,8 +167,8 @@ def test_async_job_submission_is_queue_only(tmp_path: Path, monkeypatch):
         "CLIPPYSHOT_ZXING_TIMEOUT_S": "10",
         "CLIPPYSHOT_ENABLE_OCR": "0",
         "CLIPPYSHOT_OCR_ALL": "0",
-        "CLIPPYSHOT_OCR_LANG": "eng",
-        "CLIPPYSHOT_OCR_PSM": "6",
+        "CLIPPYSHOT_OCR_LANG": "eng+Latin",
+        "CLIPPYSHOT_OCR_PSM": "3",
         "CLIPPYSHOT_OCR_TIMEOUT_S": "60",
     }
     assert Path(job.result_dir).is_dir()
@@ -499,6 +525,111 @@ def test_delete_job(client):
     # DELETE on an unknown id 404s (doesn't silently no-op).
     r = client.delete("/v1/jobs/unknown-uuid-that-does-not-exist")
     assert r.status_code == 404
+
+
+def test_delete_job_conflicts_while_result_zip_is_in_progress(client, monkeypatch):
+    files = {
+        "file": (
+            "tiny.docx",
+            (FIXTURES / "tiny.docx").read_bytes(),
+            "application/octet-stream",
+        ),
+    }
+    r = client.post("/v1/jobs", files=files)
+    job_id = r.json()["job_id"]
+    _finish_job(client.app.state.job_store, job_id)
+
+    import clippyshot.api as api
+
+    zip_started = threading.Event()
+    release_zip = threading.Event()
+    result = {"status": None, "exception": None}
+    orig_zip = api._zip_dir_to_file
+
+    def sleepy_zip(src_dir: Path, dest_file: Path) -> Path:
+        import pyzipper
+
+        password = os.environ.get("CLIPPYSHOT_ZIP_PASSWORD", "infected").encode("utf-8")
+        with pyzipper.AESZipFile(
+            dest_file,
+            "w",
+            compression=pyzipper.ZIP_DEFLATED,
+            encryption=pyzipper.WZ_AES,
+        ) as zf:
+            zf.setpassword(password)
+            for f in sorted(src_dir.rglob("*")):
+                if f.is_file():
+                    zip_started.set()
+                    release_zip.wait(5)
+                    zf.write(f, arcname=f.relative_to(src_dir))
+        return dest_file
+
+    api._zip_dir_to_file = sleepy_zip
+    try:
+        with TestClient(client.app) as get_client:
+
+            def run_get():
+                try:
+                    resp = get_client.get(f"/v1/jobs/{job_id}/result")
+                    _ = resp.content
+                    result["status"] = resp.status_code
+                except Exception as exc:  # noqa: BLE001
+                    result["exception"] = repr(exc)
+
+            t = threading.Thread(target=run_get)
+            t.start()
+            assert zip_started.wait(5)
+
+            delete_resp = client.delete(f"/v1/jobs/{job_id}")
+            assert delete_resp.status_code == 409
+
+            release_zip.set()
+            t.join(5)
+    finally:
+        api._zip_dir_to_file = orig_zip
+
+    assert result["exception"] is None
+    assert result["status"] == 200
+
+
+def test_sync_convert_sanitizes_internal_paths(monkeypatch):
+    class FailingConverter:
+        def convert(self, input_path, output_dir, options):
+            raise ConversionError(
+                "/tmp/clippyshot-stage-abc123/secret.pdf blew up in /sandbox/in/input.docx"
+            )
+
+    app = build_app(
+        converter_factory=lambda: FailingConverter(),
+        job_store=InMemoryJobStore(),
+    )
+    with TestClient(app) as c:
+        files = {"file": ("tiny.docx", b"abc", "application/octet-stream")}
+        r = c.post("/v1/convert", files=files)
+
+    assert r.status_code == 422
+    body = r.json()
+    assert body["detail"] == "<path> blew up in <path>"
+
+
+def test_async_job_errors_are_sanitized_in_public_response():
+    job = Job.new(filename="bad.docx")
+    job.status = JobStatus.FAILED
+    job.error = (
+        "worker exit 3: /tmp/clippyshot-job-1/log.txt mentioned /sandbox/in/bad.docx"
+    )
+    store = InMemoryJobStore()
+    store.create(job)
+    app = build_app(
+        converter_factory=lambda: FakeConverter(),
+        job_store=store,
+    )
+
+    with TestClient(app) as c:
+        r = c.get(f"/v1/jobs/{job.job_id}")
+
+    assert r.status_code == 200
+    assert r.json()["error"] == "worker exit 3: <path> mentioned <path>"
 
 
 def _finish_job(job_store, job_id: str, *, focused: bool = False) -> Path:

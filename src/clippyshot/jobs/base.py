@@ -8,6 +8,8 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Protocol, runtime_checkable
 
+from clippyshot.errors import sanitize_public_error
+
 
 class JobStatus(str, enum.Enum):
     QUEUED = "queued"
@@ -54,6 +56,8 @@ class Job:
         d = self.to_dict()
         d.pop("result_dir", None)
         d.pop("scan_options", None)
+        if isinstance(d.get("error"), str):
+            d["error"] = sanitize_public_error(d["error"])
         return d
 
     @classmethod

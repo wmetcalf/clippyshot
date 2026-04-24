@@ -98,6 +98,30 @@ header .theme-song:hover{background:rgba(210,153,34,.18)}
 .page-card:hover{transform:translateY(-8px) scale(1.02);border-color:#58a6ff;box-shadow:0 12px 24px rgba(0,0,0,.4)}
 .close-btn{position:fixed;top:30px;right:40px;background:none;border:none;color:#fff;font-size:3rem;line-height:1;cursor:pointer;z-index:1010;transition:transform .2s;text-shadow:0 0 10px rgba(0,0,0,.5)}
 .close-btn:hover{transform:scale(1.2);color:#58a6ff}
+
+/* Hash links + similarity panel */
+.hash-link{cursor:pointer;color:#58a6ff;border-bottom:1px dotted rgba(88,166,255,.4);padding:0 2px;border-radius:2px}
+.hash-link:hover{background:rgba(88,166,255,.1);border-bottom-style:solid}
+.similar-panel{position:fixed;top:0;right:0;width:min(520px,92vw);height:100vh;background:#0d1117;border-left:1px solid #30363d;z-index:1020;display:none;flex-direction:column;box-shadow:-12px 0 32px rgba(0,0,0,.6)}
+.similar-panel.show{display:flex}
+.similar-panel header{background:#161b22;padding:14px 18px;border-bottom:1px solid #30363d;display:flex;justify-content:space-between;align-items:center;flex-direction:row;margin:0;text-align:left}
+.similar-panel header h3{font-size:.95rem;font-weight:600;color:#c9d1d9;margin:0}
+.similar-panel .close-sim{background:none;border:none;color:#8b949e;font-size:1.5rem;line-height:1;cursor:pointer;padding:0 4px}
+.similar-panel .close-sim:hover{color:#f85149}
+.similar-panel .sim-body{flex:1;overflow-y:auto;padding:12px}
+.similar-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}
+.similar-tile{background:#161b22;border:1px solid #30363d;border-radius:6px;overflow:hidden;display:flex;flex-direction:column;transition:border-color .15s}
+.similar-tile:hover{border-color:#58a6ff}
+.similar-tile img{width:100%;display:block;background:#fff;aspect-ratio:3/4;object-fit:cover}
+.similar-tile .meta{padding:6px 8px;font-size:.72rem;color:#8b949e;display:flex;flex-direction:column;gap:2px}
+.similar-tile .meta a{color:#58a6ff;text-decoration:none;font-family:ui-monospace,monospace;word-break:break-all}
+.similar-tile .meta a:hover{text-decoration:underline}
+.similar-tile .meta .fname{color:#c9d1d9;font-weight:500;word-break:break-word}
+.similar-tile .dist{background:rgba(63,185,113,.12);color:#3fb950;padding:1px 6px;border-radius:3px;font-size:.7rem;align-self:flex-start}
+.similar-tile .variant{background:rgba(210,153,34,.12);color:#d29922;padding:1px 6px;border-radius:3px;font-size:.7rem;align-self:flex-start}
+.similar-tile.current-job{outline:2px solid #58a6ff;outline-offset:-2px}
+.similar-tile .this-job{background:rgba(88,166,255,.2);color:#58a6ff;padding:1px 6px;border-radius:3px;font-size:.7rem;align-self:flex-start;font-weight:600}
+.similar-empty{color:#8b949e;padding:16px;text-align:center;font-style:italic}
 </style>
 </head>
 <body>
@@ -150,6 +174,42 @@ header .theme-song:hover{background:rgba(210,153,34,.18)}
       <div class="page-grid" id="page-grid"></div>
     </div>
   </div>
+
+  <aside class="similar-panel" id="similar-panel" aria-hidden="true">
+    <header>
+      <h3 id="similar-title">Similar pages</h3>
+      <button class="close-sim" onclick="closeSimilar()" aria-label="Close">×</button>
+    </header>
+    <div class="sim-controls" id="similar-controls" style="display:none;padding:8px 14px;border-bottom:1px solid #30363d;background:#0d1117;flex-direction:column;gap:6px;font-size:.8rem;color:#8b949e">
+      <div id="similar-phash-row" style="display:none;align-items:center;gap:10px">
+        <label for="similar-hamming" style="white-space:nowrap">Hamming ≤ <span id="similar-hamming-val" style="color:#c9d1d9;font-weight:600">5</span></label>
+        <input id="similar-hamming" type="range" min="0" max="32" step="1" value="5" style="flex:1;accent-color:#58a6ff" oninput="onHammingChange(this.value)">
+      </div>
+      <div id="similar-chash-row" style="display:none;flex-direction:column;gap:6px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <label for="similar-chash-total" style="white-space:nowrap">Bin Δ ≤ <span id="similar-chash-total-val" style="color:#c9d1d9;font-weight:600">0</span></label>
+          <input id="similar-chash-total" type="range" min="0" max="56" step="1" value="0" style="flex:1;accent-color:#58a6ff" oninput="onColorhashChange()">
+          <button id="similar-chash-adv-toggle" type="button" style="background:none;border:1px solid #30363d;color:#8b949e;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:.75rem" onclick="toggleColorhashAdvanced()">Advanced</button>
+        </div>
+        <div id="similar-chash-adv" style="display:none;flex-direction:column;gap:4px;padding:4px 0 2px;border-top:1px dashed #30363d">
+          <div style="display:flex;align-items:center;gap:8px">
+            <label for="similar-chash-frac" style="white-space:nowrap;width:100px">Fraction ≤ <span id="similar-chash-frac-val" style="color:#c9d1d9;font-weight:600">—</span></label>
+            <input id="similar-chash-frac" type="range" min="-1" max="30" step="1" value="-1" style="flex:1;accent-color:#58a6ff" oninput="onColorhashChange()">
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <label for="similar-chash-faint" style="white-space:nowrap;width:100px">Faint hue ≤ <span id="similar-chash-faint-val" style="color:#c9d1d9;font-weight:600">—</span></label>
+            <input id="similar-chash-faint" type="range" min="-1" max="90" step="1" value="-1" style="flex:1;accent-color:#58a6ff" oninput="onColorhashChange()">
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <label for="similar-chash-bright" style="white-space:nowrap;width:100px">Bright hue ≤ <span id="similar-chash-bright-val" style="color:#c9d1d9;font-weight:600">—</span></label>
+            <input id="similar-chash-bright" type="range" min="-1" max="90" step="1" value="-1" style="flex:1;accent-color:#58a6ff" oninput="onColorhashChange()">
+          </div>
+          <div style="color:#6e7681;font-size:.7rem">-1 = unset (group ignored)</div>
+        </div>
+      </div>
+    </div>
+    <div class="sim-body" id="similar-body"></div>
+  </aside>
 
   <div class="recent">
     <h3>Jobs</h3>
@@ -265,7 +325,7 @@ async function pollJob(jobId, filename) {
   }
 }
 
-async function loadFailedJob(jobId) {
+async function loadFailedJob(jobId, opts) {
   try {
     const r = await fetch(API+'/v1/jobs/'+jobId);
     if (!r.ok) return;
@@ -303,28 +363,63 @@ function showFailure(job) {
     '<div style="padding:24px;color:#f85149;text-align:center">Conversion failed. No pages rendered.</div>';
   document.getElementById('dl-link').style.display = 'none';
   document.getElementById('dl-pdf').style.display = 'none';
-  _showJobDetail();
+  _showJobDetail(jobId, opts);
 }
 
-function _showJobDetail() {
+function _showJobDetail(jobId, opts) {
   document.getElementById('result').classList.add('show');
   document.querySelector('header').style.display = 'none';
   document.querySelector('.upload').style.display = 'none';
   document.getElementById('scan-opts').style.display = 'none';
   document.querySelector('.recent').style.display = 'none';
   window.scrollTo({top: 0, behavior: 'smooth'});
+  const pushHistory = !opts || opts.pushHistory !== false;
+  if (!pushHistory || !jobId) return;
+  if (history.state?.jobId === jobId) return;
+  if (history.state?.view === 'detail') {
+    // Already in detail view — arrow-key navigation between jobs uses
+    // replaceState so the browser Back button returns to the list, not
+    // to each previous job we skimmed through.
+    history.replaceState({view: 'detail', jobId}, '', '#/job/' + jobId);
+  } else {
+    history.pushState({view: 'detail', jobId}, '', '#/job/' + jobId);
+  }
 }
 
-function showJobList() {
+function showJobList(opts) {
+  const wasDetail = history.state?.view === 'detail';
   document.getElementById('result').classList.remove('show');
   document.querySelector('header').style.display = '';
   document.querySelector('.upload').style.display = '';
   // scan-opts uses flex layout; restore explicitly so we don't fall back to block.
   document.getElementById('scan-opts').style.display = 'flex';
   document.querySelector('.recent').style.display = '';
+  const pushHistory = !opts || opts.pushHistory !== false;
+  // If we entered detail via pushState, hitting the UI back button should
+  // consume that history entry so the browser back stack stays consistent
+  // with what the user sees.
+  if (pushHistory && wasDetail) {
+    history.back();
+  }
 }
 
-async function loadResult(jobId) {
+// Wire browser back/forward to the list/detail transitions.
+window.addEventListener('popstate', (e) => {
+  const s = e.state;
+  if (s && s.view === 'detail' && s.jobId) {
+    loadResult(s.jobId, {pushHistory: false});
+  } else {
+    showJobList({pushHistory: false});
+  }
+});
+
+// On initial page load, honor any #/job/<id> deep link in the URL.
+window.addEventListener('DOMContentLoaded', () => {
+  const m = location.hash.match(/^#\/job\/([0-9a-fA-F-]+)$/);
+  if (m) loadResult(m[1]);
+});
+
+async function loadResult(jobId, opts) {
   const res = document.getElementById('result');
   try {
     const r = await fetch(API+'/v1/jobs/'+jobId+'/metadata');
@@ -350,10 +445,26 @@ async function loadResult(jobId) {
     // Render card
     const rnd = meta.render || {};
     const dur = rnd.duration_ms || {};
+    // Sheet inventory (spreadsheets only). Format as "N/M (+K hidden/macro)"
+    // where N is the number of rendered sheets and K are those LO skipped.
+    const sh = meta.sheets;
+    let sheetsRow = null;
+    if (sh && typeof sh === 'object') {
+      const nr = Array.isArray(sh.non_rendered) ? sh.non_rendered : [];
+      const nrLabel = nr.length
+        ? ' <span class="warn">(+' + nr.length + ' ' +
+          nr.map(s => escapeHtml(s.name) +
+            (s.state && s.state !== 'visible' ? ' [' + escapeHtml(s.state) + ']' : '') +
+            (s.type === 'macro' ? ' [macro]' : '')
+          ).join(', ') + ')</span>'
+        : '';
+      sheetsRow = ['Sheets', (sh.rendered ?? '?') + '/' + (sh.total ?? '?') + nrLabel];
+    }
     setTable('render-table', [
       ['Pages', rnd.page_count_rendered+'/'+rnd.page_count_total
         +(rnd.truncated?' <span class="warn">(truncated)</span>':'')
         +(rnd.page_count_rendered===0 && rnd.page_count_total>0 ? ' <span class="warn">ALL BLANK</span>':'')],
+      ...(sheetsRow ? [sheetsRow] : []),
       ['Blank pages', (rnd.blank_pages||[]).length
         +((rnd.blank_pages||[]).length === rnd.page_count_total && rnd.page_count_total > 0
           ? ' <span class="warn">(entire document is blank)</span>' : '')],
@@ -425,7 +536,7 @@ async function loadResult(jobId) {
       let trimSection = '';
       if (p.trimmed) {
         const t = p.trimmed;
-        const trimHashes = t.phash ? '<div style="font-size:.72rem;color:#8b949e;padding:2px 0;font-family:monospace">p:'+t.phash+' c:'+t.colorhash+'</div>' : '';
+        const trimHashes = t.phash ? '<div style="font-size:.72rem;color:#8b949e;padding:2px 0;font-family:ui-monospace,monospace">p:'+hashLink('phash', t.phash)+' c:'+hashLink('colorhash', t.colorhash)+'</div>' : '';
         trimSection = '<details style="padding:4px 8px;border-top:1px solid #30363d">'
           +'<summary style="font-size:.75rem;color:#58a6ff;cursor:pointer">'
           +'Trimmed version (-'+t.removed_percent+'% bg:'+t.background_color+')</summary>'
@@ -441,7 +552,7 @@ async function loadResult(jobId) {
       let focusSection = '';
       if (p.focused) {
         const f = p.focused;
-        const focusHashes = f.phash ? '<div style="font-size:.72rem;color:#8b949e;padding:2px 0;font-family:monospace">p:'+f.phash+' c:'+f.colorhash+'</div>' : '';
+        const focusHashes = f.phash ? '<div style="font-size:.72rem;color:#8b949e;padding:2px 0;font-family:ui-monospace,monospace">p:'+hashLink('phash', f.phash)+' c:'+hashLink('colorhash', f.colorhash)+'</div>' : '';
         focusSection = '<details style="padding:4px 8px;border-top:1px solid #30363d">'
           +'<summary style="font-size:.75rem;color:#58a6ff;cursor:pointer">'
           +'Focused view (-'+f.removed_percent+'%)</summary>'
@@ -456,11 +567,13 @@ async function loadResult(jobId) {
 
       card.innerHTML = '<img src="'+origUrl+'" alt="Page '+p.index+'" loading="lazy" '
         +'onclick="openLightbox(\''+origUrl+'\')" style="cursor:pointer">'
-        +'<div class="info"><span>Page '+p.index+' &middot; '+p.width_px+'&times;'+p.height_px
+        +'<div class="info"><span>Page '+p.index
+        +(p.sheet_name ? ' &middot; <span style="color:#d2a8ff">Sheet: '+escapeHtml(p.sheet_name)+'</span>' : '')
+        +' &middot; '+p.width_px+'&times;'+p.height_px
         +' &middot; '+p.width_mm+'&times;'+p.height_mm+'mm</span>'
         +(p.is_blank?'<span class="blank">blank</span>':'')
         +'</div>'
-        +(p.phash ? '<div style="font-size:.72rem;color:#8b949e;padding:2px 8px;font-family:monospace">p:'+p.phash+' c:'+p.colorhash+'</div>' : '')
+        +(p.phash ? '<div style="font-size:.72rem;color:#8b949e;padding:2px 8px;font-family:ui-monospace,monospace">p:'+hashLink('phash', p.phash)+' c:'+hashLink('colorhash', p.colorhash)+'</div>' : '')
         +trimSection
         +focusSection;
 
@@ -485,7 +598,11 @@ async function loadResult(jobId) {
       // QR section
       if (p.qr && p.qr.length) {
         const items = p.qr.map(q =>
-          `<li><code>${escapeHtml(q.value)}</code> <span class="muted">${escapeHtml(q.format)}</span></li>`
+          `<li style="margin:4px 0;word-break:break-all">`
+          + `<code style="color:#c9d1d9;font-size:.82rem;background:rgba(88,166,255,.06);padding:1px 6px;border-radius:3px">`
+          + escapeHtml(q.value) + `</code> `
+          + `<span style="color:#6e7681;font-size:.7rem;padding-left:6px">` + escapeHtml(q.format) + `</span>`
+          + `</li>`
         ).join('');
         card.insertAdjacentHTML('beforeend',
           `<details open><summary>QR codes (${p.qr.length})</summary><ul>${items}</ul></details>`
@@ -495,7 +612,7 @@ async function loadResult(jobId) {
       grid.appendChild(card);
     }
 
-    _showJobDetail();
+    _showJobDetail(jobId, opts);
   } catch(e) {
     console.error('loadResult error:', e);
   }
@@ -521,7 +638,9 @@ let _currentJobIdx = -1;
 
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
-    // Lightbox (page image) closes first; if it wasn't open, exit job detail.
+    // Close order: similarity panel → lightbox → detail view.
+    const sim = document.getElementById('similar-panel');
+    if (sim && sim.classList.contains('show')) { closeSimilar(); return; }
     const lb = document.getElementById('lightbox');
     if (lb && lb.classList.contains('show')) { closeLightbox(); return; }
     if (document.getElementById('result').classList.contains('show')) { showJobList(); return; }
@@ -718,6 +837,157 @@ refreshJobs();
 function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML}
 function escapeHtml(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function fmtSize(b){if(!b)return '0B';const u=['B','KB','MB','GB'];let i=0;let v=b;while(v>=1024&&i<u.length-1){v/=1024;i++}return v.toFixed(i?1:0)+' '+u[i]}
+
+// Similarity search: clickable hashes + side panel of matches.
+// Inline style on the span beats the parent .info / hash-row inline
+// color so the link actually LOOKS like a link regardless of where we
+// embed it.
+function hashLink(kind, hash) {
+  if (!hash) return '';
+  return '<span class="hash-link" style="color:#58a6ff;cursor:pointer;border-bottom:1px dotted rgba(88,166,255,.4);padding:0 2px"'
+    + ' title="Click to find similar pages by ' + kind + '"'
+    + ' onclick="event.stopPropagation();openSimilar(\'' + kind + '\',\'' + escapeHtml(hash) + '\')">'
+    + escapeHtml(hash) + '</span>';
+}
+
+// Tracks the currently-open similarity search so the hamming slider can re-fetch.
+let _similarActive = null;
+let _similarSeq = 0;
+let _hammingTimer = null;
+
+async function openSimilar(kind, hash) {
+  _similarActive = {kind, hash};
+  const panel = document.getElementById('similar-panel');
+  const controls = document.getElementById('similar-controls');
+  const phashRow = document.getElementById('similar-phash-row');
+  const chashRow = document.getElementById('similar-chash-row');
+  // sha256 searches are exact-only — hide the whole control bar.
+  if (kind === 'phash') {
+    controls.style.display = 'flex'; phashRow.style.display = 'flex'; chashRow.style.display = 'none';
+  } else if (kind === 'colorhash') {
+    controls.style.display = 'flex'; phashRow.style.display = 'none'; chashRow.style.display = 'flex';
+  } else {
+    controls.style.display = 'none';
+  }
+  panel.classList.add('show');
+  panel.setAttribute('aria-hidden', 'false');
+  await _runSimilar();
+}
+
+function onHammingChange(v) {
+  document.getElementById('similar-hamming-val').textContent = v;
+  if (!_similarActive || _similarActive.kind !== 'phash') return;
+  clearTimeout(_hammingTimer);
+  _hammingTimer = setTimeout(() => _runSimilar(), 200);
+}
+
+function onColorhashChange() {
+  const total = document.getElementById('similar-chash-total').value;
+  document.getElementById('similar-chash-total-val').textContent = total;
+  for (const k of ['frac', 'faint', 'bright']) {
+    const v = document.getElementById('similar-chash-' + k).value;
+    document.getElementById('similar-chash-' + k + '-val').textContent = (v === '-1') ? '—' : v;
+  }
+  if (!_similarActive || _similarActive.kind !== 'colorhash') return;
+  clearTimeout(_hammingTimer);
+  _hammingTimer = setTimeout(() => _runSimilar(), 200);
+}
+
+function toggleColorhashAdvanced() {
+  const adv = document.getElementById('similar-chash-adv');
+  const btn = document.getElementById('similar-chash-adv-toggle');
+  const showing = adv.style.display !== 'none';
+  adv.style.display = showing ? 'none' : 'flex';
+  btn.textContent = showing ? 'Advanced' : 'Hide advanced';
+  if (showing) {
+    // Collapsing advanced: clear per-group caps so they don't silently
+    // constrain the next query. Triggers a re-fetch via onColorhashChange.
+    for (const k of ['frac', 'faint', 'bright']) {
+      document.getElementById('similar-chash-' + k).value = '-1';
+    }
+    onColorhashChange();
+  }
+}
+
+async function _runSimilar() {
+  if (!_similarActive) return;
+  const {kind, hash} = _similarActive;
+  const mySeq = ++_similarSeq;
+  const title = document.getElementById('similar-title');
+  const body = document.getElementById('similar-body');
+  const params = new URLSearchParams({limit: '50'});
+  let titleText;
+  if (kind === 'phash') {
+    const maxHamming = parseInt(document.getElementById('similar-hamming').value, 10);
+    params.set('phash', hash); params.set('max_hamming', String(maxHamming));
+    titleText = 'Similar pages (phash ≤ ' + maxHamming + ' hamming)';
+  } else if (kind === 'colorhash') {
+    params.set('colorhash', hash);
+    const total = parseInt(document.getElementById('similar-chash-total').value, 10);
+    const frac = parseInt(document.getElementById('similar-chash-frac').value, 10);
+    const faint = parseInt(document.getElementById('similar-chash-faint').value, 10);
+    const bright = parseInt(document.getElementById('similar-chash-bright').value, 10);
+    const labelBits = [];
+    if (total > 0) { params.set('colorhash_distance', String(total)); labelBits.push('Δ≤' + total); }
+    if (frac >= 0) { params.set('colorhash_frac_max', String(frac)); labelBits.push('frac≤' + frac); }
+    if (faint >= 0) { params.set('colorhash_faint_max', String(faint)); labelBits.push('faint≤' + faint); }
+    if (bright >= 0) { params.set('colorhash_bright_max', String(bright)); labelBits.push('bright≤' + bright); }
+    titleText = labelBits.length
+      ? 'Similar pages (colorhash ' + labelBits.join(', ') + ')'
+      : 'Similar pages (exact colorhash)';
+  } else {
+    params.set('sha256', hash);
+    titleText = 'Similar pages (exact sha256)';
+  }
+  title.textContent = titleText;
+  body.innerHTML = '<div class="similar-empty">Searching…</div>';
+  const currentJobId = history.state && history.state.view === 'detail' ? history.state.jobId : null;
+  try {
+    const r = await fetch(API + '/v1/similar?' + params.toString());
+    if (mySeq !== _similarSeq) return; // a newer request superseded this one
+    if (!r.ok) { body.innerHTML = '<div class="similar-empty">Search failed ('+r.status+')</div>'; return; }
+    const data = await r.json();
+    if (mySeq !== _similarSeq) return;
+    const rows = data.results || [];
+    if (rows.length === 0) { body.innerHTML = '<div class="similar-empty">No matches.</div>'; return; }
+    body.innerHTML = '<div class="similar-grid">'
+      + rows.map(r => renderSimilarTile(r, currentJobId)).join('')
+      + '</div>';
+  } catch (e) {
+    if (mySeq !== _similarSeq) return;
+    body.innerHTML = '<div class="similar-empty">Error: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function renderSimilarTile(row, currentJobId) {
+  // For trimmed/focused matches we want the corresponding derivative PNG
+  // so tiles visually reflect what actually matched. Falls back to the
+  // base page image if the derivative URL doesn't exist.
+  const idx3 = String(row.page_index).padStart(3, '0');
+  let pngUrl;
+  if (row.variant === 'trimmed')      pngUrl = API + '/v1/jobs/' + row.job_id + '/pages/trimmed/' + row.page_index + '.png';
+  else if (row.variant === 'focused') pngUrl = API + '/v1/jobs/' + row.job_id + '/pages/focused/' + row.page_index + '.png';
+  else                                pngUrl = API + '/v1/jobs/' + row.job_id + '/pages/' + idx3 + '.png';
+  const jobUrl = '#/job/' + row.job_id;
+  const isCurrent = currentJobId && row.job_id === currentJobId;
+  const badges = [];
+  if (isCurrent) badges.push('<span class="this-job">this job</span>');
+  if (row.distance !== undefined && row.distance !== null) badges.push('<span class="dist">dist ' + row.distance + '</span>');
+  if (row.variant && row.variant !== 'original') badges.push('<span class="variant">' + escapeHtml(row.variant) + '</span>');
+  return '<div class="similar-tile' + (isCurrent ? ' current-job' : '') + '">'
+    + '<img src="' + pngUrl + '" alt="page ' + row.page_index + '" loading="lazy">'
+    + '<div class="meta">'
+    + (badges.length ? '<div style="display:flex;gap:4px;flex-wrap:wrap">' + badges.join('') + '</div>' : '')
+    + '<span class="fname">' + escapeHtml(row.filename || row.job_id) + '</span>'
+    + '<a href="' + jobUrl + '" onclick="closeSimilar();loadResult(\'' + row.job_id + '\');return false">page ' + row.page_index + ' · open job</a>'
+    + '</div></div>';
+}
+
+function closeSimilar() {
+  const panel = document.getElementById('similar-panel');
+  panel.classList.remove('show');
+  panel.setAttribute('aria-hidden', 'true');
+}
 function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
 function setTable(id,rows){
   const t=document.getElementById(id);

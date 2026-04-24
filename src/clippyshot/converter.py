@@ -39,8 +39,84 @@ _log = get_logger("clippyshot.converter")
 _PT_PER_INCH = 72.0
 _MM_PER_INCH = 25.4
 _FOCUSED_DERIVATIVE_LABELS = frozenset({"xlsx", "xlsm", "xls", "xlsb", "ods", "fods", "csv"})
+# Spreadsheet formats for which we try to annotate each rasterized page
+# with its source sheet name. The mapping comes from LibreOffice Calc's
+# PDF export, which emits one bookmark per exported sheet — so anything
+# with SinglePageSheets-compatible output gets a 1:1 page→sheet map
+# whether or not SheetJS or calamine could parse it.
+_SPREADSHEET_LABELS = _FOCUSED_DERIVATIVE_LABELS
+# Worst-case sheet name length we'll persist. Excel's own ceiling is 31,
+# ODF doesn't enforce one, and a malicious document could claim megabytes.
+# 255 is comfortably above any legitimate title without inviting abuse.
+_MAX_SHEET_NAME_CHARS = 255
 
 
+
+
+def _sheets_from_runner(runner) -> list[dict]:
+    """Read captured sheet inventory off the runner.
+
+    The runner populates ``last_run_sheets`` after each PDF export when
+    the staged form was an OOXML spreadsheet — which covers xlsx/xlsm
+    directly and xls/xlsb/ods/csv through the two-pass xlsx intermediate.
+    Falls back to an empty list if the runner doesn't expose the attribute
+    (older test fakes, alternative implementations).
+    """
+    raw = getattr(runner, "last_run_sheets", None)
+    if not isinstance(raw, list):
+        return []
+    cleaned: list[dict] = []
+    for s in raw:
+        if not isinstance(s, dict):
+            continue
+        name = s.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        if len(name) > _MAX_SHEET_NAME_CHARS:
+            name = name[:_MAX_SHEET_NAME_CHARS]
+        state = s.get("state", "visible")
+        sheet_type = s.get("type", "worksheet")
+        if not isinstance(state, str):
+            state = "visible"
+        if not isinstance(sheet_type, str):
+            sheet_type = "worksheet"
+        cleaned.append({"name": name, "state": state, "type": sheet_type})
+    return cleaned
+
+
+def _page_sheet_names(sheets: list[dict], page_count: int) -> list[str | None]:
+    """Map rasterized page index → source sheet name (or ``None``).
+
+    ``SinglePageSheets=true`` lays down exactly one PDF page per sheet LO
+    chose to export, in workbook order. We reproduce the same filter so
+    position i of the filtered list corresponds to PDF page i+1. Any tail
+    mismatch falls through to ``None`` on the unaligned entries.
+    """
+    from clippyshot.libreoffice.sheet_prep import visible_sheet_names
+    if not sheets:
+        return [None] * page_count
+    visible = visible_sheet_names(sheets)
+    return [visible[i] if i < len(visible) else None for i in range(page_count)]
+
+
+def _non_rendered_sheets(sheets: list[dict]) -> list[dict]:
+    """Return sheet entries LO is expected to skip (hidden / macro).
+
+    Useful malware-analysis signal: a hidden or Excel 4 macro sheet is
+    present in the workbook but never rasterized, so the usual per-page
+    scanners can't see it.
+    """
+    out: list[dict] = []
+    for s in sheets:
+        state = s.get("state", "visible")
+        sheet_type = s.get("type", "worksheet")
+        if state != "visible" or sheet_type == "macro":
+            name = s.get("name")
+            if isinstance(name, str) and name:
+                if len(name) > _MAX_SHEET_NAME_CHARS:
+                    name = name[:_MAX_SHEET_NAME_CHARS]
+                out.append({"name": name, "state": state, "type": sheet_type})
+    return out
 
 
 def _mediabox_mm(page) -> tuple[float, float]:
@@ -444,6 +520,20 @@ class Converter:
                     page_sizes_mm = [
                         _mediabox_mm(reader.pages[i]) for i in range(pages_to_render)
                     ]
+                    # Sheet inventory comes from the runner, which captures
+                    # the list off the final staged xlsx (original for
+                    # xlsx/xlsm, two-pass intermediate for xls/xlsb/ods/
+                    # csv). Only meaningful for spreadsheet inputs.
+                    if detected.label in _SPREADSHEET_LABELS:
+                        _sheets_discovered = _sheets_from_runner(self._runner)
+                    else:
+                        _sheets_discovered = []
+                    page_sheet_names = _page_sheet_names(_sheets_discovered, pages_to_render)
+                    # Sheets that LO skips (hidden / veryHidden / macro)
+                    # never appear in the PDF so they don't get a page —
+                    # but their presence is still useful malware-analysis
+                    # signal, so surface them on the metadata below.
+                    non_rendered_sheets = _non_rendered_sheets(_sheets_discovered)
                     # Detect which PDF pages are OCR-worthy. We run OCR on a
                     # page when ANY of:
                     #   (a) the page carries raster images (pypdf reports
@@ -543,7 +633,7 @@ class Converter:
 
                 def _process_page(page_with_flag) -> tuple[dict, bool, dict, list[dict]]:
                     """Return (record, is_blank, stage_timings, warnings)."""
-                    page, image_count, has_drawings, text_empty = page_with_flag
+                    page, image_count, has_drawings, text_empty, sheet_name = page_with_flag
                     # OCR-worthy if the page has any non-text visual
                     # content: raster images, vector drawings / stamps,
                     # OR an empty text layer (scanned PDFs).
@@ -569,6 +659,8 @@ class Converter:
                         **h.to_dict(),
                     }
                     rec["image_count"] = image_count
+                    if sheet_name:
+                        rec["sheet_name"] = sheet_name
                     if not h.is_blank:
                         t_stage = time.monotonic()
                         trim_info = trim_bottom_solid(png_path)
@@ -631,8 +723,25 @@ class Converter:
                     rec["ocr"] = ocr_obj
                     return rec, h.is_blank, stage_t, page_warnings
 
-                max_workers = min(len(pages), (_os.cpu_count() or 2), 8) if pages else 1
-                pages_with_flags = list(zip(pages, page_image_counts, page_has_drawings, page_text_empty))
+                # Cap the fan-out by CPU count AND by memory-aware page-op
+                # budget (same helper the rasterizer uses) — each worker in
+                # this pool loads a full-page RGB buffer for hash/trim/focus,
+                # so N-way parallelism costs ~N × page_size RAM.
+                from clippyshot.runtime.host_limits import max_concurrent_page_ops
+                max_workers = (
+                    min(len(pages), (_os.cpu_count() or 2), max_concurrent_page_ops())
+                    if pages else 1
+                )
+                # page_sheet_names is indexed 0-based same as the other
+                # lists; length matches pages_to_render. Zip it in so the
+                # per-page worker gets everything as one tuple.
+                pages_with_flags = list(zip(
+                    pages,
+                    page_image_counts,
+                    page_has_drawings,
+                    page_text_empty,
+                    page_sheet_names,
+                ))
                 if max_workers <= 1:
                     results = [_process_page(p) for p in pages_with_flags]
                 else:
@@ -693,6 +802,27 @@ class Converter:
                         ),
                     })
                 warnings.extend(scanner_warnings)
+
+                # altChunk detection: the runner populates this when the
+                # input docx-family file declares ``<w:altChunk>`` parts
+                # in [Content_Types].xml. Surfaced as a warning because
+                # altChunk in the wild is almost always a malware-evasion
+                # wrapper (AV scans the outer docx, misses the embedded
+                # payload). Benign altChunk usage is vanishingly rare.
+                _altchunks = list(getattr(self._runner, "last_altchunks", []) or [])
+                for a in _altchunks:
+                    warnings.append({
+                        "code": "altchunk_present",
+                        "message": (
+                            "input contains a Word altChunk embedding "
+                            f"({a.get('content_type', 'unknown')}, "
+                            f"{a.get('size', 0)} bytes) at "
+                            f"{a.get('part_name', '')}"
+                        ),
+                        "part_name": a.get("part_name"),
+                        "content_type": a.get("content_type"),
+                        "size": a.get("size"),
+                    })
 
                 # Build the security block. When disclose_security_internals is
                 # False (the default), omit backend name and AppArmor profile
@@ -768,6 +898,19 @@ class Converter:
                     "warnings": warnings,
                     "errors": [],
                 }
+                # Sheet sidecar is spreadsheet-only; keep the top-level
+                # metadata lean and only attach the block when at least
+                # one sheet (rendered or not) was discovered.
+                if detected.label in _SPREADSHEET_LABELS and _sheets_discovered:
+                    metadata["sheets"] = {
+                        "total": len(_sheets_discovered),
+                        "rendered": sum(
+                            1 for s in _sheets_discovered
+                            if s.get("state") == "visible"
+                            and s.get("type") != "macro"
+                        ),
+                        "non_rendered": non_rendered_sheets,
+                    }
                 (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
             finally:
                 # 7. Copy the intermediate PDF to the output dir as

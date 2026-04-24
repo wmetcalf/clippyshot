@@ -1,4 +1,5 @@
 """Redis-backed JobStore."""
+
 from __future__ import annotations
 
 import json
@@ -20,11 +21,14 @@ class RedisJobStore:
     def _key(self, job_id: str) -> str:
         return _PREFIX + job_id
 
+    def _expiry_arg(self) -> int | None:
+        return self._ttl_seconds if self._ttl_seconds > 0 else None
+
     def create(self, job: Job) -> None:
         self._r.set(
             self._key(job.job_id),
             json.dumps(job.to_dict()),
-            ex=self._ttl_seconds,
+            ex=self._expiry_arg(),
         )
 
     def get(self, job_id: str) -> Job | None:
@@ -47,7 +51,7 @@ class RedisJobStore:
                     for k, v in fields.items():
                         setattr(job, k, v)
                     pipe.multi()
-                    pipe.set(key, json.dumps(job.to_dict()), ex=self._ttl_seconds)
+                    pipe.set(key, json.dumps(job.to_dict()), ex=self._expiry_arg())
                     pipe.execute()
                     return job
                 except WatchError:
@@ -90,7 +94,7 @@ class RedisJobStore:
                     job.status = JobStatus.RUNNING
                     job.started_at = time.time()
                     pipe.multi()
-                    pipe.set(key, json.dumps(job.to_dict()), ex=self._ttl_seconds)
+                    pipe.set(key, json.dumps(job.to_dict()), ex=self._expiry_arg())
                     pipe.execute()
                     return job
             except WatchError:

@@ -9,8 +9,6 @@ import os
 import re
 import shutil
 import tempfile
-import time
-import zipfile
 from pathlib import Path
 from typing import Callable
 
@@ -34,6 +32,7 @@ from clippyshot.errors import (
     SandboxError,
     SandboxTimeout,
     SandboxUnavailable,
+    sanitize_public_error,
 )
 from clippyshot.jobs import (
     InMemoryJobStore,
@@ -79,16 +78,6 @@ def _conversion_error_stage(e: Exception) -> str:
 
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 
-# Strip internal filesystem paths from error messages before returning
-# them to callers. Paths like /tmp/clippyshot-stage-xxxx/ or
-# /sandbox/in/ leak sandbox layout details.
-_INTERNAL_PATH_RE = re.compile(r"/(?:tmp|sandbox|var|home|opt|usr)/[^\s:;\"']+")
-
-
-def _sanitize_error(msg: str) -> str:
-    """Remove internal filesystem paths from an error message."""
-    return _INTERNAL_PATH_RE.sub("<path>", msg)
-
 
 def _safe_upload_name(raw: str | None) -> str:
     """Sanitize a client-supplied filename to a safe basename.
@@ -106,6 +95,17 @@ def _safe_upload_name(raw: str | None) -> str:
         return "upload.bin"
     cleaned = _SAFE_FILENAME_RE.sub("_", base)[:255]
     return cleaned or "upload.bin"
+
+
+async def _write_upload_to_path(upload: UploadFile, dest_path: Path) -> None:
+    """Persist an UploadFile to disk without buffering the full body in memory."""
+    with dest_path.open("wb") as f:
+        while chunk := await upload.read(65536):
+            f.write(chunk)
+
+
+def _public_detail(exc: Exception | str) -> str:
+    return sanitize_public_error(str(exc))
 
 
 def _parse_bool(val: str | None, *, default: bool = False) -> bool:
@@ -513,9 +513,17 @@ def build_app(
         @app.get("/", response_class=HTMLResponse)
         async def _ui_root():
             index = _static_dir / "index.html"
+            # Cache-Control: no-store prevents browsers from pinning an old
+            # copy of index.html across redeploys. The file is small and
+            # regenerating it on every nav is cheap; the alternative is an
+            # operator-reported "UI is stale" every time we ship UI changes.
+            headers = {"Cache-Control": "no-store, must-revalidate"}
             if index.is_file():
-                return HTMLResponse(index.read_text())
-            return HTMLResponse("<h1>ClippyShot</h1><p>No UI found.</p>")
+                return HTMLResponse(index.read_text(), headers=headers)
+            return HTMLResponse(
+                "<h1>ClippyShot</h1><p>No UI found.</p>",
+                headers=headers,
+            )
 
         # Serve static assets (logo, etc.)
         assets_dir = _static_dir / "assets"
@@ -616,7 +624,7 @@ def build_app(
         with tempfile.TemporaryDirectory(prefix="clippyshot-sync-") as tmp_str:
             tmp = Path(tmp_str)
             input_path = tmp / safe_name
-            input_path.write_bytes(await file.read())
+            await _write_upload_to_path(file, input_path)
             out = tmp / "out"
             try:
                 opts = _build_convert_options(
@@ -630,13 +638,15 @@ def build_app(
                 )
             except ValueError as e:
                 return JSONResponse(
-                    {"error": "invalid_parameter", "detail": str(e)}, status_code=400
+                    {"error": "invalid_parameter", "detail": _public_detail(e)},
+                    status_code=400,
                 )
             try:
                 get_converter().convert(input_path, out, opts)
             except DetectionError as e:
                 return JSONResponse(
-                    {"error": e.reason, "detail": e.detail}, status_code=400
+                    {"error": e.reason, "detail": sanitize_public_error(e.detail)},
+                    status_code=400,
                 )
             except LibreOfficeEmptyOutputError as e:
                 # soffice finished cleanly but wrote no output — typical
@@ -644,7 +654,7 @@ def build_app(
                 return JSONResponse(
                     {
                         "error": "conversion_produced_no_output",
-                        "detail": str(e),
+                        "detail": _public_detail(e),
                     },
                     status_code=422,
                 )
@@ -656,23 +666,23 @@ def build_app(
                     {
                         "error": "conversion_failed",
                         "stage": _conversion_error_stage(e),
-                        "detail": str(e),
+                        "detail": _public_detail(e),
                     },
                     status_code=422,
                 )
             except SandboxTimeout as e:
                 return JSONResponse(
-                    {"error": "conversion_timeout", "detail": str(e)},
+                    {"error": "conversion_timeout", "detail": _public_detail(e)},
                     status_code=504,
                 )
             except SandboxUnavailable as e:
                 return JSONResponse(
-                    {"error": "sandbox_unavailable", "detail": str(e)},
+                    {"error": "sandbox_unavailable", "detail": _public_detail(e)},
                     status_code=503,
                 )
             except SandboxError as e:
                 return JSONResponse(
-                    {"error": "sandbox_error", "detail": str(e)},
+                    {"error": "sandbox_error", "detail": _public_detail(e)},
                     status_code=503,
                 )
             # M-9: stage zip to disk and stream via FileResponse.
@@ -742,9 +752,7 @@ def build_app(
             root.mkdir(parents=True, exist_ok=True)
             input_dir.mkdir(parents=True, exist_ok=True)
             output_dir.mkdir(parents=True, exist_ok=True)
-            with input_path.open("wb") as f:
-                while chunk := await file.read(65536):
-                    f.write(chunk)
+            await _write_upload_to_path(file, input_path)
         except Exception:
             shutil.rmtree(root, ignore_errors=True)
             raise
@@ -752,6 +760,7 @@ def build_app(
         job.result_dir = str(output_dir)
         try:
             job_store.create(job)
+            job_artifacts.register(job.job_id, output_dir)
         except Exception:
             shutil.rmtree(root, ignore_errors=True)
             raise
@@ -832,6 +841,150 @@ def build_app(
             raise HTTPException(404, "job not found")
         return job.to_public_dict()
 
+    # ---- similarity search -------------------------------------------------
+
+    def _phash_hex_to_int8(hex_str: str) -> int:
+        """Signed int64 cast for a 16-char hex pHash (matches dispatcher)."""
+        val = int(hex_str, 16)
+        if val >= 1 << 63:
+            val -= 1 << 64
+        return val
+
+    def _int8_to_phash_hex(v: int) -> str:
+        return f"{v & ((1 << 64) - 1):016x}"
+
+    def _similar_rows_to_response(rows: list[dict]) -> list[dict]:
+        out = []
+        for r in rows:
+            ph = r.get("phash")
+            out.append(
+                {
+                    "job_id": r["job_id"],
+                    "page_index": r["page_index"],
+                    "variant": r.get("variant", "original"),
+                    "filename": r.get("filename"),
+                    "phash": _int8_to_phash_hex(int(ph)) if ph is not None else None,
+                    "colorhash": r.get("colorhash"),
+                    "sha256": r.get("sha256"),
+                    "distance": r.get("distance"),
+                }
+            )
+        return out
+
+    # Similarity queries (phash bktree + colorhash_bin_distance seq scan)
+    # run directly in Postgres. A handful of concurrent fuzzy colorhash
+    # calls can saturate the pg connection pool since the seq scan has no
+    # usable index, so we gate all /v1/similar traffic through one
+    # semaphore. Size is deliberately small: 3 is enough for normal UI
+    # use (two tabs open, one in flight) but not enough for an
+    # authenticated attacker to pin Postgres.
+    _similar_gate = asyncio.Semaphore(3)
+
+    @app.get("/v1/similar")
+    async def get_similar(
+        phash: str | None = None,
+        colorhash: str | None = None,
+        sha256: str | None = None,
+        max_hamming: int = 5,
+        colorhash_distance: int | None = None,
+        colorhash_frac_max: int | None = None,
+        colorhash_faint_max: int | None = None,
+        colorhash_bright_max: int | None = None,
+        limit: int = 50,
+    ):
+        """Find pages similar to a given hash.
+
+        - phash: 16-char hex pHash; pages within ``max_hamming`` Hamming bits.
+        - colorhash: 14-char hex; exact match by default. Pass any of the
+          following to switch to per-bin L1 fuzzy search:
+            - colorhash_distance: cap on total 14-bin L1 distance (simple).
+            - colorhash_frac_max / colorhash_faint_max / colorhash_bright_max:
+              per-group caps on bins 0–1, 2–7, 8–13 (advanced).
+          Fuzzy-mode caps are cumulative — rows must satisfy every cap set.
+        - sha256: 64-char hex SHA-256; exact match only.
+
+        Exactly one of phash/colorhash/sha256 must be set.
+        """
+        provided = [p for p in (phash, colorhash, sha256) if p]
+        if len(provided) != 1:
+            raise HTTPException(400, "provide exactly one of phash, colorhash, sha256")
+        if limit < 1 or limit > 500:
+            raise HTTPException(400, "limit must be in [1, 500]")
+        if not hasattr(job_store, "find_similar_phash"):
+            raise HTTPException(
+                501, "current job store does not support similarity search"
+            )
+
+        # Validate first so bad requests fail fast without consuming a
+        # semaphore slot. DB work runs inside the gate via asyncio.to_thread
+        # since the store APIs are synchronous (psycopg pool under the hood).
+        if phash:
+            if not re.fullmatch(r"[0-9a-fA-F]{16}", phash):
+                raise HTTPException(400, "phash must be 16 hex chars")
+            if not (0 <= max_hamming <= 64):
+                raise HTTPException(400, "max_hamming must be in [0, 64]")
+            async with _similar_gate:
+                rows = await asyncio.to_thread(
+                    job_store.find_similar_phash,
+                    _phash_hex_to_int8(phash),
+                    max_hamming,
+                    limit=limit,
+                )
+        elif colorhash:
+            if not re.fullmatch(r"[0-9a-fA-F]{14}", colorhash):
+                raise HTTPException(400, "colorhash must be 14 hex chars")
+            fuzzy_caps = {
+                "total_max": colorhash_distance,
+                "frac_max": colorhash_frac_max,
+                "faint_max": colorhash_faint_max,
+                "bright_max": colorhash_bright_max,
+            }
+            # Maxima derive from colorhash's binbits=4 layout: each bin is a
+            # 4-bit count (0–15), so per-bin Δ ≤ 15. Groups:
+            #   total = 14 bins → 210, frac = 2 bins → 30,
+            #   faint/bright = 6 bins → 90 each.
+            fuzzy_cap_limits = {
+                "total_max": 210,
+                "frac_max": 30,
+                "faint_max": 90,
+                "bright_max": 90,
+            }
+            for name, cap in fuzzy_caps.items():
+                if cap is None:
+                    continue
+                ceiling = fuzzy_cap_limits[name]
+                if not (0 <= cap <= ceiling):
+                    raise HTTPException(400, f"{name} must be in [0, {ceiling}]")
+            use_fuzzy = any(v is not None for v in fuzzy_caps.values())
+            if use_fuzzy and not hasattr(job_store, "find_similar_colorhash"):
+                raise HTTPException(
+                    501, "current job store does not support colorhash fuzzy search"
+                )
+            async with _similar_gate:
+                if use_fuzzy:
+                    rows = await asyncio.to_thread(
+                        job_store.find_similar_colorhash,
+                        colorhash,
+                        limit=limit,
+                        **fuzzy_caps,
+                    )
+                else:
+                    rows = await asyncio.to_thread(
+                        job_store.find_by_colorhash,
+                        colorhash,
+                        limit=limit,
+                    )
+        else:
+            if not re.fullmatch(r"[0-9a-fA-F]{64}", sha256):
+                raise HTTPException(400, "sha256 must be 64 hex chars")
+            async with _similar_gate:
+                rows = await asyncio.to_thread(
+                    job_store.find_by_page_sha256,
+                    sha256,
+                    limit=limit,
+                )
+        return {"results": _similar_rows_to_response(rows)}
+
     @app.get("/v1/jobs/{job_id}/result")
     async def get_result(job_id: str):
         job_artifacts.expire_due(job_store)
@@ -853,7 +1006,14 @@ def build_app(
         # Zip work (zlib deflate over potentially hundreds of MB of PNGs)
         # must not run on the asyncio event loop — it blocks every other
         # API request during the compress pass.
-        await asyncio.to_thread(_zip_dir_to_file, out, tmp_zip)
+        if job_artifacts.path_for(job_id) is None:
+            job_artifacts.register(job_id, out)
+        if not job_artifacts.acquire(job_id):
+            raise HTTPException(410, "result expired")
+        try:
+            await asyncio.to_thread(_zip_dir_to_file, out, tmp_zip)
+        finally:
+            job_artifacts.release(job_id)
         return FileResponse(
             tmp_zip,
             media_type="application/zip",
@@ -975,6 +1135,10 @@ def build_app(
             raise HTTPException(
                 409,
                 f"cannot delete job in status={job.status.value}; wait for it to finish",
+            )
+        if job_artifacts.in_use(job_id):
+            raise HTTPException(
+                409, "job artifacts are in use; retry after download completes"
             )
         out = _job_output_dir(job_id, job)
         job_artifacts.delete(job_id)
