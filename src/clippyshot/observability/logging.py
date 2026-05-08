@@ -23,6 +23,7 @@ def configure_logging(format_: Literal["json", "text"] = "json", level: str = "I
         processors.append(structlog.dev.ConsoleRenderer(colors=False))
     structlog.configure(
         processors=processors,
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
         wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, level)),
         cache_logger_on_first_use=True,
     )
