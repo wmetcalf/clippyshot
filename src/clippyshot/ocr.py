@@ -13,11 +13,34 @@ error as a non-fatal per-page `ocr.skipped="error"` entry.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from clippyshot._argv import assert_positional as _assert_positional
+
+# A tesseract ``-l`` value is one or more script/language tokens joined by
+# ``+`` (e.g. ``eng+Latin``, ``chi_sim``). Tokens are letters with optional
+# ``_`` suffixes — no path separators, dots, or option-like characters, so a
+# crafted lang can't probe traineddata paths or inject a flag into the argv.
+_LANG_TOKEN_RE = re.compile(r"^[A-Za-z]{2,}(?:_[A-Za-z]+)*$")
+
+
+def validate_lang(lang: str) -> str:
+    """Return ``lang`` if it is a safe tesseract ``-l`` value, else raise.
+
+    Raises ``ValueError`` (callers map this to a 400 at submit time, or to a
+    non-fatal ``ocr.skipped="error"`` if it slips through to the worker).
+    """
+    if not lang or len(lang) > 100:
+        raise ValueError(f"ocr_lang must be 1-100 chars, got {len(lang or '')}")
+    for token in lang.split("+"):
+        if not _LANG_TOKEN_RE.match(token):
+            raise ValueError(f"ocr_lang has invalid token: {token!r}")
+    return lang
 
 
 @dataclass(frozen=True)
@@ -99,7 +122,15 @@ def run_ocr(
     missing binary).
     """
     runner = argv_runner or _default_runner
+    try:
+        lang = validate_lang(lang)
+    except ValueError as e:
+        raise OCRError(str(e))
     bin_path = _tesseract_binary()
+    # Guard against an option-like positional path reaching tesseract's parser
+    # (tesseract puts the filename first, before its flags — the most fragile
+    # ordering). No-op for our absolute paths; see clippyshot._argv.
+    _assert_positional(png_path)
     argv = [
         bin_path,
         str(png_path),

@@ -338,9 +338,15 @@ class SqlJobStore:
             f"WHERE status = {self._param} "
             f"ORDER BY created_at ASC, job_id ASC LIMIT 1"
         )
+        # The UPDATE is a compare-and-swap: it only fires if the row is STILL
+        # queued. BEGIN IMMEDIATE + self._lock already serialize claimers, but
+        # the status guard also defends against any other path (e.g. retention
+        # marking the row EXPIRED) flipping it between the SELECT and UPDATE —
+        # without it, such a transition would be silently clobbered back to
+        # RUNNING (lost update).
         update_sql = (
             f"UPDATE jobs SET status = {self._param}, started_at = {self._param} "
-            f"WHERE job_id = {self._param}"
+            f"WHERE job_id = {self._param} AND status = {self._param}"
         )
         with self._lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -351,7 +357,13 @@ class SqlJobStore:
             if job is None:
                 return None
             started_at = time.time()
-            conn.execute(update_sql, (JobStatus.RUNNING.value, started_at, job.job_id))
+            cur = conn.execute(
+                update_sql,
+                (JobStatus.RUNNING.value, started_at, job.job_id, JobStatus.QUEUED.value),
+            )
+            if cur.rowcount != 1:
+                # Lost the race / row changed underneath us: don't claim it.
+                return None
             job.status = JobStatus.RUNNING
             job.started_at = started_at
             return job

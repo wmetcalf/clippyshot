@@ -25,8 +25,29 @@ from __future__ import annotations
 import email
 import hashlib
 import html.parser
+import os
 import re
 from pathlib import Path
+
+from clippyshot.libreoffice._safezip import MAX_TOTAL_BYTES
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        val = int(raw)
+    except (ValueError, TypeError):
+        return default
+    return val if val > 0 else default
+
+
+# An MHT with millions of tiny parts is a count-based resource bomb
+# (inode/tmpfs/CPU exhaustion) even though base64/QP can't amplify bytes.
+# Cap both the number of parts written and the cumulative payload size.
+_MAX_MHT_PARTS = _env_int("CLIPPYSHOT_MAX_MHT_PARTS", 4000)
+_MAX_MHT_TOTAL_BYTES = _env_int("CLIPPYSHOT_MAX_MHT_TOTAL_BYTES", MAX_TOTAL_BYTES)
 
 
 _CID_RE = re.compile(r"cid:([^\"'>)\s]+)", re.IGNORECASE)
@@ -572,6 +593,8 @@ def unpack_mht(mht_path: Path, out_dir: Path) -> Path | None:
     cid_map: dict[str, str] = {}
     url_map: dict[str, str] = {}
     used_names: set[str] = set()
+    parts_written = 0
+    bytes_written = 0
 
     for part in msg.walk():
         if part.is_multipart():
@@ -588,6 +611,12 @@ def unpack_mht(mht_path: Path, out_dir: Path) -> Path | None:
         if ctype == "text/html" and html_part is None:
             html_part = part
             continue
+        # Resource-part caps: stop materializing once a crafted MHT tries to
+        # exhaust inodes/tmpfs with a flood of parts or a large cumulative
+        # payload. The HTML we already have still renders; missing resources
+        # just degrade fidelity, which is non-fatal.
+        if parts_written >= _MAX_MHT_PARTS or bytes_written >= _MAX_MHT_TOTAL_BYTES:
+            break
         cid = (part.get("Content-ID") or "").strip().strip("<>")
         cloc = (part.get("Content-Location") or "").strip()
         fallback = f"part-{hashlib.sha1(payload).hexdigest()[:10]}.bin"
@@ -602,6 +631,8 @@ def unpack_mht(mht_path: Path, out_dir: Path) -> Path | None:
             (out_dir / local_name).write_bytes(payload)
         except OSError:
             continue
+        parts_written += 1
+        bytes_written += len(payload)
         if cid:
             cid_map[cid.lower()] = local_name
         if cloc:

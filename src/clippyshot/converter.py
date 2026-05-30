@@ -49,6 +49,10 @@ _SPREADSHEET_LABELS = _FOCUSED_DERIVATIVE_LABELS
 # ODF doesn't enforce one, and a malicious document could claim megabytes.
 # 255 is comfortably above any legitimate title without inviting abuse.
 _MAX_SHEET_NAME_CHARS = 255
+# Minimum remaining OCR budget worth launching a tesseract call for. Pages
+# with less than this left are skipped ("timeout_budget"); a launched call's
+# timeout is the remaining budget, so it is always killed by the deadline.
+_MIN_OCR_CALL_S = 30
 
 
 
@@ -214,19 +218,33 @@ def _make_sandbox_argv_runner(sandbox: Sandbox, limits: Limits | None, scan_png_
     it translated correctly.
     """
     from dataclasses import replace
-    scan_dir_host = str(scan_png_host.parent)
-    scan_dir_sandbox = str(sandbox_scan_path.parent)
+    scan_dir_host = scan_png_host.parent
+    scan_dir_sandbox = sandbox_scan_path.parent
+
+    def _translate(arg: str) -> str:
+        # Translate by path semantics, not substring replace: map the scan dir
+        # itself and any file inside it to the sandbox mount, leaving every
+        # other argv token (flags, format lists, the binary path) untouched.
+        # A plain str.replace corrupts a sibling whose name is a prefix of the
+        # scan dir (e.g. ".../out" embedded in ".../output2/page.png").
+        try:
+            p = Path(arg)
+        except (TypeError, ValueError):
+            return arg
+        if p == scan_dir_host:
+            return str(scan_dir_sandbox)
+        try:
+            rel = p.relative_to(scan_dir_host)
+        except ValueError:
+            return arg
+        return str(scan_dir_sandbox / rel)
 
     def run(argv, timeout_s):
         req_limits = replace(limits, timeout_s=timeout_s) if limits is not None else Limits(timeout_s=timeout_s)
-        # Substitute the parent-dir prefix so any file in the scan dir
-        # (original PNG, downscaled OCR copy, etc.) gets translated to
-        # its sandbox path without each scanner needing to know the
-        # sandbox mount point.
-        sandbox_argv = [
-            arg.replace(scan_dir_host, scan_dir_sandbox)
-            for arg in argv
-        ]
+        # Any file in the scan dir (original PNG, downscaled OCR copy, etc.)
+        # gets translated to its sandbox path without each scanner needing to
+        # know the sandbox mount point.
+        sandbox_argv = [_translate(arg) for arg in argv]
         req = SandboxRequest(
             argv=sandbox_argv,
             ro_mounts=[Mount(scan_png_host.parent, sandbox_scan_path.parent, read_only=True)],
@@ -349,7 +367,13 @@ def _process_page_scanners(
         ocr_obj["skipped"] = "no_images"
     else:
         remaining = ocr_time_left() if ocr_time_left is not None else 60.0
-        if remaining <= 0:
+        # Skip once fewer than _MIN_OCR_CALL_S remain: a shorter call isn't
+        # worth launching, and capping the per-call timeout at the *remaining*
+        # budget (rather than flooring it at 30s) guarantees tesseract is
+        # killed by the job deadline. Previously the 30s floor let pages
+        # launched near the deadline run up to 30s past it — and with parallel
+        # pages, several at once — so total OCR could exceed ocr_timeout_s.
+        if remaining < _MIN_OCR_CALL_S:
             ocr_obj["skipped"] = "timeout_budget"
         else:
             scan_png = select_scan_image(output_dir, page_record)
@@ -361,9 +385,9 @@ def _process_page_scanners(
                     "message": "no scannable PNG found for page",
                 })
             else:
-                # Per-call timeout floors at 30s so tesseract can always
-                # fail cleanly, even when the budget is nearly exhausted.
-                per_call_timeout = max(30, int(remaining))
+                # >= _MIN_OCR_CALL_S guaranteed by the check above, so the call
+                # gets a useful budget yet is still bounded by the deadline.
+                per_call_timeout = int(remaining)
                 try:
                     kwargs = {"lang": ocr_lang, "psm": ocr_psm, "timeout_s": per_call_timeout}
                     if ocr_runner is not None:
@@ -767,14 +791,25 @@ class Converter:
 
                 # 5c. Filter blanks if requested.
                 if options.limits.skip_blanks and blank_indices:
+                    blank_set = set(blank_indices)
                     page_records = [
-                        r for r in all_page_records if r["index"] not in set(blank_indices)
+                        r for r in all_page_records if r["index"] not in blank_set
                     ]
-                    # Delete the blank PNG files so they don't bloat the output dir.
-                    for idx in blank_indices:
-                        png = output_dir / f"page-{idx:03d}.png"
-                        if png.exists():
-                            png.unlink()
+                    # Delete the blank page artifacts so they don't bloat the
+                    # output dir. Use each record's own filename (plus any
+                    # derivatives) rather than rebuilding "page-NNN.png", so
+                    # cleanup can't silently drift from the rasterizer naming.
+                    for rec in all_page_records:
+                        if rec["index"] not in blank_set:
+                            continue
+                        for key in ("file", "trimmed", "focused"):
+                            val = rec.get(key)
+                            fname = val.get("file") if isinstance(val, dict) else val
+                            if not fname:
+                                continue
+                            f = output_dir / fname
+                            if f.exists():
+                                f.unlink()
                 else:
                     page_records = all_page_records
 

@@ -134,9 +134,16 @@ class BwrapSandbox:
         if self._seccomp_active:
             _log.info("bwrap_seccomp_enabled library=libseccomp-python")
         else:
-            _log.warning(
-                "bwrap_seccomp_skipped reason=libseccomp_python_not_available "
-                "note=nsjail_backend_has_seccomp_via_KAFEL"
+            # ERROR, not WARN: with no BPF filter the bwrap backend runs
+            # untrusted soffice behind namespaces+caps only. select_sandbox
+            # refuses this in auto mode, but an operator who set
+            # CLIPPYSHOT_WARN_ON_INSECURE=1 (e.g. for the container backend)
+            # would otherwise unlock this degraded bwrap mode silently. Make
+            # it loud so it can't be missed in logs. Install python3-libseccomp.
+            _log.error(
+                "bwrap_seccomp_unavailable reason=libseccomp_python_not_available "
+                "impact=soffice_runs_without_syscall_filter "
+                "fix=install_python3-libseccomp note=nsjail_backend_has_seccomp_via_KAFEL"
             )
         self._insecurity_reasons: list[str] = []
         if not self._seccomp_active:

@@ -19,6 +19,13 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
+from clippyshot.libreoffice._safexml import safe_fromstring
+from clippyshot.libreoffice._safezip import (
+    ExtractionBudget,
+    ExtractionLimitExceeded,
+    bounded_read,
+)
+
 # OOXML suffixes we can patch directly (zip+xml)
 _OOXML_SPREADSHEET_SUFFIXES = frozenset({".xlsx", ".xlsm"})
 
@@ -59,13 +66,13 @@ def read_sheet_list(xlsx_path: Path) -> list[dict]:
     try:
         with zipfile.ZipFile(xlsx_path) as zf:
             try:
-                data = zf.read("xl/workbook.xml")
-            except KeyError:
+                data = bounded_read(zf, "xl/workbook.xml")
+            except (KeyError, ExtractionLimitExceeded):
                 return []
     except (zipfile.BadZipFile, OSError):
         return []
     try:
-        root = ET.fromstring(data)
+        root = safe_fromstring(data)
     except ET.ParseError:
         return []
     sheets = root.find(f"{_OOXML_NS}sheets")
@@ -133,10 +140,11 @@ def _check_ooxml_dimensions(path: Path) -> bool:
         return False
     try:
         with zipfile.ZipFile(path, "r") as zf:
+            budget = ExtractionBudget()
             for name in zf.namelist():
                 if not re.match(r"xl/worksheets/sheet\d+\.xml$", name):
                     continue
-                data = zf.read(name)
+                data = budget.read(zf, name)
                 m = re.search(rb'<dimension\s+ref="([^"]+)"', data)
                 if not m:
                     continue
@@ -207,13 +215,17 @@ def patch_ooxml_for_print(path: Path) -> None:
 
     patched_entries: dict[str, bytes] = {}
 
+    budget = ExtractionBudget()
     with zipfile.ZipFile(buf, "r") as zin:
         names = zin.namelist()
         for name in names:
-            data = zin.read(name)
+            # Bounded per-entry + cumulative read: a single worksheet that
+            # decompresses to gigabytes (or thousands of padded entries)
+            # raises ExtractionLimitExceeded, which the caller catches and
+            # routes to the sandboxed two-pass conversion instead of OOMing.
+            data = budget.read(zin, name)
             # Worksheets live under xl/worksheets/sheet*.xml
-            if re.match(r"xl/worksheets/sheet\d+\.xml$", name) or \
-               name.startswith("xl/worksheets/sheet") and name.endswith(".xml"):
+            if re.match(r"xl/worksheets/sheet\d+\.xml$", name):
                 data = _patch_worksheet_xml(data)
             patched_entries[name] = data
 

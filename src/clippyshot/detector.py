@@ -263,6 +263,10 @@ _OFFICE_LABELS = frozenset(
     }
 )
 
+# ODF subtypes Magika collapses into one another (it loves labeling ODF
+# drawings/presentations as ``odt``). Corrected via the package mimetype.
+_ODF_LABELS = frozenset({"odt", "ods", "odp", "odg"})
+
 # libmagic MIME → our canonical label mapping
 _LIBMAGIC_MIME_TO_LABEL: dict[str, str] = {}
 _LIBMAGIC_MIME_PATTERNS: list[tuple[str, str]] = [
@@ -354,6 +358,39 @@ def _correct_office_label_via_libmagic(path: Path, magika_label: str) -> str:
                     return "xlsx"
         except (zipfile.BadZipFile, OSError, KeyError):
             pass
+    return magika_label
+
+
+# ODF packages carry a spec-mandated, uncompressed ``mimetype`` member whose
+# string authoritatively names the subtype. Magika's ML classifier frequently
+# collapses ODF drawings/presentations/spreadsheets to ``odt`` because they
+# share an identical zip skeleton, so we trust this marker over Magika.
+_ODF_MIMETYPE_MARKERS: list[tuple[str, str]] = [
+    ("opendocument.graphics", "odg"),
+    ("opendocument.presentation", "odp"),
+    ("opendocument.spreadsheet", "ods"),
+    ("opendocument.text", "odt"),
+]
+
+
+def _correct_odf_label_via_mimetype(path: Path, magika_label: str) -> str:
+    """Disambiguate an ODF subtype (odt/ods/odp/odg) via its ``mimetype`` member.
+
+    Version-independent and deterministic: the ODF spec requires the marker.
+    Reads at most 256 bytes so a crafted oversized ``mimetype`` entry can't be
+    a decompression bomb. Returns ``magika_label`` unchanged on any failure.
+    """
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(str(path)) as zf:
+            with zf.open("mimetype") as fh:
+                mimetype = fh.read(256).decode("ascii", errors="ignore").strip()
+    except (zipfile.BadZipFile, OSError, KeyError):
+        return magika_label
+    for marker, label in _ODF_MIMETYPE_MARKERS:
+        if marker in mimetype:
+            return label
     return magika_label
 
 
@@ -499,6 +536,14 @@ class Detector:
         # and reads format-specific signatures directly.
         if magika_label in _OFFICE_LABELS and size > 0:
             corrected = _correct_office_label_via_libmagic(path, magika_label)
+            if corrected != magika_label:
+                magika_label = corrected
+
+        # ODF subtype correction: Magika frequently mislabels ODF
+        # drawings/presentations/spreadsheets as ``odt``. The package's
+        # ``mimetype`` member is the spec-mandated source of truth.
+        if magika_label in _ODF_LABELS and size > 0:
+            corrected = _correct_odf_label_via_mimetype(path, magika_label)
             if corrected != magika_label:
                 magika_label = corrected
 

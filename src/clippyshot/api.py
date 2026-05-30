@@ -46,6 +46,8 @@ from clippyshot.jobs import (
 from clippyshot.libreoffice.runner import LibreOfficeRunner
 from clippyshot.limits import Limits
 from clippyshot.observability import configure_logging, get_logger, set_sandbox_backend
+from clippyshot.ocr import validate_lang as _validate_ocr_lang
+from clippyshot.qr import validate_formats as _validate_qr_formats
 from clippyshot.rasterizer.pdftoppm import PdftoppmRasterizer
 from clippyshot.sandbox.detect import select_sandbox
 from clippyshot.selftest import (
@@ -177,14 +179,21 @@ def _build_convert_options(
 
     qr_timeout_int = int(os.environ.get("CLIPPYSHOT_ZXING_TIMEOUT_S", "10"))
 
+    # Validate the two free-form scanner strings before they reach the
+    # tesseract/zxing argv. validate_* raise ValueError → 400 at the caller,
+    # so a hostile ocr_lang/qr_formats is rejected at submit time rather than
+    # surfacing as a non-fatal per-page scan error after the work is done.
+    qr_formats_val = _validate_qr_formats(qr_formats or "qr_code,micro_qr_code,rmqr_code")
+    ocr_lang_val = _validate_ocr_lang(ocr_lang or env_lang)
+
     return ConvertOptions(
         limits=limits,
         qr_enabled=qr_enabled,
-        qr_formats=qr_formats or "qr_code,micro_qr_code,rmqr_code",
+        qr_formats=qr_formats_val,
         qr_timeout_s=qr_timeout_int,
         ocr_enabled=ocr_enabled,
         ocr_all=ocr_all_enabled,
-        ocr_lang=ocr_lang or env_lang,
+        ocr_lang=ocr_lang_val,
         ocr_psm=psm_int,
         ocr_timeout_s=timeout_int,
     )
@@ -440,6 +449,13 @@ def build_app(
         _api_workers = 1
     if _api_workers > 64:
         _api_workers = 64  # safety cap; raise if you really need more
+    # Global concurrency gate for the heavy/intake endpoints. /v1/convert runs
+    # the synchronous LibreOffice pipeline in a worker thread; without a cap a
+    # burst of uploads would spawn unbounded threads and spool unbounded bytes
+    # to disk. Bounding both the sync convert and the async-job intake to
+    # CLIPPYSHOT_API_WORKERS gives the operator one real concurrency knob
+    # (previously _api_workers was parsed but never used).
+    _convert_gate = asyncio.Semaphore(_api_workers)
     job_artifacts = JobArtifactRegistry(retention_seconds=job_retention_seconds)
     job_root = Path(
         os.environ.get("CLIPPYSHOT_JOB_ROOT", "/var/lib/clippyshot/jobs")
@@ -642,7 +658,13 @@ def build_app(
                     status_code=400,
                 )
             try:
-                get_converter().convert(input_path, out, opts)
+                # Offload the synchronous LibreOffice/pdftoppm pipeline to a
+                # worker thread so a single conversion can't block the event
+                # loop (and every other request) for up to timeout_s. Bounded
+                # by _convert_gate so concurrent converts can't exhaust the
+                # thread pool / sandbox capacity.
+                async with _convert_gate:
+                    await asyncio.to_thread(get_converter().convert, input_path, out, opts)
             except DetectionError as e:
                 return JSONResponse(
                     {"error": e.reason, "detail": sanitize_public_error(e.detail)},
@@ -752,7 +774,10 @@ def build_app(
             root.mkdir(parents=True, exist_ok=True)
             input_dir.mkdir(parents=True, exist_ok=True)
             output_dir.mkdir(parents=True, exist_ok=True)
-            await _write_upload_to_path(file, input_path)
+            # Bound concurrent upload spooling so a burst of large uploads
+            # can't fill the job-root volume faster than the limit allows.
+            async with _convert_gate:
+                await _write_upload_to_path(file, input_path)
         except Exception:
             shutil.rmtree(root, ignore_errors=True)
             raise
@@ -987,12 +1012,7 @@ def build_app(
 
     @app.get("/v1/jobs/{job_id}/result")
     async def get_result(job_id: str):
-        job_artifacts.expire_due(job_store)
-        job = job_store.get(job_id)
-        if job is None:
-            raise HTTPException(404, "job not found")
-        if job.status != JobStatus.DONE:
-            raise HTTPException(409, f"job not done (status={job.status.value})")
+        job = _require_done_for_artifact(job_id)
         out = _job_output_dir(job_id, job)
         if out is None or not out.exists():
             raise HTTPException(410, "result expired")
@@ -1023,12 +1043,7 @@ def build_app(
 
     @app.get("/v1/jobs/{job_id}/metadata")
     def get_metadata(job_id: str):
-        job_artifacts.expire_due(job_store)
-        job = job_store.get(job_id)
-        if job is None:
-            raise HTTPException(404, "job not found")
-        if job.status != JobStatus.DONE:
-            raise HTTPException(409, f"job not done (status={job.status.value})")
+        job = _require_done_for_artifact(job_id)
         out = _job_output_dir(job_id, job)
         if out is None or not out.exists():
             raise HTTPException(410, "result expired")
@@ -1040,12 +1055,7 @@ def build_app(
     @app.get("/v1/jobs/{job_id}/pdf")
     def get_pdf(job_id: str):
         """Stream the rendered document.pdf for a completed job."""
-        job_artifacts.expire_due(job_store)
-        job = job_store.get(job_id)
-        if job is None:
-            raise HTTPException(404, "job not found")
-        if job.status != JobStatus.DONE:
-            raise HTTPException(409, f"job not done (status={job.status.value})")
+        job = _require_done_for_artifact(job_id)
         out = _job_output_dir(job_id, job)
         if out is None:
             raise HTTPException(410, "result expired")

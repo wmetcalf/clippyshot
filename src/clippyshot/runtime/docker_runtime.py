@@ -13,6 +13,20 @@ from typing import Iterable, Mapping, Sequence
 
 _log = logging.getLogger("clippyshot.runtime.docker_runtime")
 
+
+class InsecureRuntimeRefused(RuntimeError):
+    """Raised when a secure runtime is required but only an insecure one exists.
+
+    The dispatcher catches this and fails the job (fail-closed) instead of
+    silently processing untrusted input under plain runc.
+    """
+
+
+def _require_secure_runtime() -> bool:
+    val = os.environ.get("CLIPPYSHOT_REQUIRE_SECURE_RUNTIME", "0").strip().lower()
+    return val not in ("", "0", "false", "no")
+
+
 _RUNSC_WARNING = "runsc unavailable; falling back to runc"
 _APPARMOR_WARNING = (
     "clippyshot-soffice AppArmor profile not loaded; worker runs under docker-default"
@@ -22,7 +36,11 @@ _SECCOMP_WARNING = (
 )
 _DEFAULT_WORKER_UID = 10001
 _DEFAULT_WORKER_GID = 10001
-_DEFAULT_WORKDIR = "/job"
+# Working dir for the worker container. Must exist on the read-only rootfs:
+# /tmp is always present (it's the writable tmpfs mount), whereas the old
+# "/job" relied on Docker auto-creating a non-existent workdir before
+# applying --read-only — which works today but is fragile across runtimes.
+_DEFAULT_WORKDIR = "/tmp"
 
 # 64MB was too tight — shutil.copy2(input_path, staged_input) in the
 # runner puts the file into /tmp inside the worker, and a 100MB legitimate
@@ -138,15 +156,30 @@ def select_worker_runtime(
     if forced in ("runc", "runsc"):
         secure = forced == "runsc"
         warnings = [] if secure else [_RUNSC_WARNING]
-        return DockerRuntimeSelection(runtime=forced, secure=secure, warnings=warnings)
+        return _finalize_runtime(
+            DockerRuntimeSelection(runtime=forced, secure=secure, warnings=warnings)
+        )
 
     if "runsc" in runtimes:
-        return DockerRuntimeSelection(runtime="runsc", secure=True, warnings=[])
+        return _finalize_runtime(
+            DockerRuntimeSelection(runtime="runsc", secure=True, warnings=[])
+        )
 
     _log.warning(_RUNSC_WARNING, extra={"available_runtimes": sorted(runtimes)})
-    return DockerRuntimeSelection(
-        runtime="runc", secure=False, warnings=[_RUNSC_WARNING]
+    return _finalize_runtime(
+        DockerRuntimeSelection(runtime="runc", secure=False, warnings=[_RUNSC_WARNING])
     )
+
+
+def _finalize_runtime(selection: DockerRuntimeSelection) -> DockerRuntimeSelection:
+    """Enforce fail-closed policy: refuse an insecure runtime when required."""
+    if not selection.secure and _require_secure_runtime():
+        raise InsecureRuntimeRefused(
+            f"runtime {selection.runtime!r} is not secure (gVisor/runsc "
+            "unavailable) and CLIPPYSHOT_REQUIRE_SECURE_RUNTIME is set; "
+            "refusing to process the job under plain runc"
+        )
+    return selection
 
 
 def build_worker_docker_run_argv(

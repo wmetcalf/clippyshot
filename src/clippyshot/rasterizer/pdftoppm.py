@@ -9,6 +9,7 @@ from pathlib import Path
 from PIL import Image
 from pypdf import PdfReader
 
+from clippyshot._argv import assert_positional as _assert_positional
 from clippyshot.errors import RasterizeError
 from clippyshot.limits import Limits
 from clippyshot.runtime.host_limits import max_concurrent_page_ops
@@ -47,6 +48,7 @@ class PdftoppmRasterizer:
         pdf_parent: Path,
     ) -> None:
         """Run a single pdftoppm invocation over the [first, last] page range."""
+        _assert_positional(sandbox_pdf)
         argv = [
             self._pdftoppm,
             "-png",

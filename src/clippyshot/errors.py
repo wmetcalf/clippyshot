@@ -6,7 +6,13 @@ import re
 
 
 # Strip internal filesystem paths from public-facing error messages.
-_INTERNAL_PATH_RE = re.compile(r"/(?:tmp|sandbox|var|home|opt|usr)/[^\s:;\"']+")
+# Root-agnostic: match any absolute POSIX path of two or more segments
+# (``/var/lib/clippyshot/x``, ``/etc/passwd``, ``/sandbox/in/file``) rather
+# than denylisting specific roots (the old ``/tmp|/var|...`` list silently
+# leaked ``/etc``, ``/proc``, ``/run``, ``/srv`` and anything containing a
+# quote/space). A single ``/`` between words (``and/or``) is not a path and
+# is left untouched because it lacks a trailing segment separator.
+_INTERNAL_PATH_RE = re.compile(r"/(?:[A-Za-z0-9._+-]+/)+[A-Za-z0-9._+-]*")
 
 
 def sanitize_public_error(msg: str) -> str:

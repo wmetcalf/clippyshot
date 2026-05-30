@@ -17,6 +17,27 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from clippyshot._argv import assert_positional as _assert_positional
+
+# Internal zxing format tokens are lowercase snake_case (``qr_code``,
+# ``data_matrix``, ``ean_13``, ``pdf417``), separated by ``,`` and/or ``|``.
+# Validate against this shape so an attacker-supplied ``qr_formats`` can't
+# inject option-like text into the ZXingReader argv.
+_QR_FORMAT_TOKEN_RE = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
+
+
+def validate_formats(formats: str) -> str:
+    """Return a normalized ``formats`` string if safe, else raise ValueError."""
+    tokens = [t.strip() for t in re.split(r"[,|]", formats) if t.strip()]
+    if not tokens:
+        raise ValueError("qr_formats is empty")
+    if len(tokens) > 32:
+        raise ValueError(f"qr_formats has too many tokens ({len(tokens)})")
+    for token in tokens:
+        if len(token) > 40 or not _QR_FORMAT_TOKEN_RE.match(token):
+            raise ValueError(f"qr_formats has invalid token: {token!r}")
+    return ",".join(tokens)
+
 
 @dataclass(frozen=True)
 class QRResult:
@@ -352,6 +373,11 @@ def scan_qr(
     non-fatal per-page `qr_skipped="error"` entry.
     """
     runner = argv_runner or _default_runner
+    try:
+        formats = validate_formats(formats)
+    except ValueError as e:
+        raise ScanError(str(e))
+    _assert_positional(png_path)
     bin_path = _zxing_binary()
     use_json = _zxing_supports_json(bin_path, runner=runner)
     if use_json:

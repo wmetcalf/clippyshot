@@ -46,6 +46,13 @@ class Limits:
     max_width_px: int = 32768
     max_height_px: int = 32768
 
+    # Hard ceilings for the byte/pixel caps. These exist so a hostile or
+    # fat-fingered env var can't silently *disable* a cap (e.g. MAX_WIDTH=0
+    # turning off the decompression-bomb guard) or wrap to a nonsensical
+    # value. 64 GiB / 256k px are far above any legitimate document.
+    _MAX_BYTES_CEILING = 64 * 1024 * 1024 * 1024
+    _MAX_PX_CEILING = 262144
+
     def __post_init__(self) -> None:
         if not 36 <= self.dpi <= 600:
             raise ValueError(f"dpi must be in [36, 600], got {self.dpi}")
@@ -53,6 +60,18 @@ class Limits:
             raise ValueError(f"max_pages must be in [1, 1000], got {self.max_pages}")
         if not 1 <= self.timeout_s <= 600:
             raise ValueError(f"timeout_s must be in [1, 600], got {self.timeout_s}")
+        for name in ("memory_bytes", "tmpfs_bytes", "max_input_bytes"):
+            val = getattr(self, name)
+            if not 1 <= val <= self._MAX_BYTES_CEILING:
+                raise ValueError(
+                    f"{name} must be in [1, {self._MAX_BYTES_CEILING}], got {val}"
+                )
+        for name in ("max_width_px", "max_height_px"):
+            val = getattr(self, name)
+            if not 1 <= val <= self._MAX_PX_CEILING:
+                raise ValueError(
+                    f"{name} must be in [1, {self._MAX_PX_CEILING}], got {val}"
+                )
 
     @classmethod
     def from_env(cls, **overrides) -> "Limits":
@@ -62,6 +81,13 @@ class Limits:
             raw = os.environ.get(env_key)
             if raw is not None:
                 coerce = _ENV_COERCE.get(f.name, int)
-                values[f.name] = coerce(raw)
+                try:
+                    values[f.name] = coerce(raw)
+                except (ValueError, TypeError) as e:
+                    # Fail loudly with the offending var name rather than
+                    # crashing deep in the dataclass with an opaque message.
+                    raise ValueError(
+                        f"invalid value for {env_key}={raw!r}: {e}"
+                    ) from e
         values.update(overrides)
         return cls(**values)

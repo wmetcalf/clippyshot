@@ -173,7 +173,6 @@
         "openat",
         "openat2",
         "pause",
-        "personality",
         "pipe",
         "pipe2",
         "poll",
@@ -246,10 +245,12 @@
         "setgroups",
         "setgroups32",
         "setitimer",
+        "setpgid",
         "setresuid",
         "setresuid32",
         "setresgid",
         "setresgid32",
+        "setsid",
         "setuid",
         "setuid32",
         "set_robust_list",
@@ -263,7 +264,6 @@
         "sigaltstack",
         "signalfd",
         "signalfd4",
-        "socket",
         "socketcall",
         "socketpair",
         "splice",
@@ -327,6 +327,32 @@
           "op": "SCMP_CMP_EQ"
         }
       ]
+    },
+    {
+      "_comment": "personality() restricted to the benign personas docker-default permits (PER_LINUX 0x0, PER_LINUX32 0x08, 0x20, 0x20008, and the 0xffffffff query idiom). This blocks ADDR_NO_RANDOMIZE (disable ASLR) and READ_IMPLIES_EXEC (W^X relax), which only aid exploit reliability against the parser surface this sandbox exists to contain. Multiple entries OR together.",
+      "names": ["personality"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [{ "index": 0, "value": 0, "op": "SCMP_CMP_EQ" }]
+    },
+    {
+      "names": ["personality"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [{ "index": 0, "value": 8, "op": "SCMP_CMP_EQ" }]
+    },
+    {
+      "names": ["personality"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [{ "index": 0, "value": 32, "op": "SCMP_CMP_EQ" }]
+    },
+    {
+      "names": ["personality"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [{ "index": 0, "value": 131080, "op": "SCMP_CMP_EQ" }]
+    },
+    {
+      "names": ["personality"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [{ "index": 0, "value": 4294967295, "op": "SCMP_CMP_EQ" }]
     },
     {
       "_comment": "Block dangerous syscalls with EPERM rather than allowlist miss for better observability",

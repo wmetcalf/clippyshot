@@ -113,6 +113,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Restrictive umask so the rendered PDF + per-page PNGs (derived from
+    # untrusted input) land 0o600/0o700 on the shared job volume rather than
+    # world-readable under a permissive host umask.
+    os.umask(0o077)
     configure_logging(format_="text")
     parser = build_parser()
     args = parser.parse_args(argv)

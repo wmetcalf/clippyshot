@@ -22,6 +22,9 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from clippyshot.libreoffice._safexml import safe_fromstring
+from clippyshot.libreoffice._safezip import ExtractionBudget, ExtractionLimitExceeded
+
 
 _TYPES_NS = "{http://schemas.openxmlformats.org/package/2006/content-types}"
 _WORD_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -67,12 +70,15 @@ def inspect_altchunks(docx_path: Path) -> list[AltChunk]:
         return []
     try:
         with zipfile.ZipFile(docx_path) as zf:
+            # One budget for the whole inspection pass: bounds both per-entry
+            # and cumulative decompressed bytes so a bomb part can't OOM us.
+            budget = ExtractionBudget()
             try:
-                types_xml = zf.read("[Content_Types].xml")
-            except KeyError:
+                types_xml = budget.read(zf, "[Content_Types].xml")
+            except (KeyError, ExtractionLimitExceeded):
                 return []
             try:
-                root = ET.fromstring(types_xml)
+                root = safe_fromstring(types_xml)
             except ET.ParseError:
                 return []
             content_types = {
@@ -82,9 +88,17 @@ def inspect_altchunks(docx_path: Path) -> list[AltChunk]:
                 for override in root.findall(f"{_TYPES_NS}Override")
             }
             try:
-                document_xml = ET.fromstring(zf.read("word/document.xml"))
-                rels_xml = ET.fromstring(zf.read("word/_rels/document.xml.rels"))
-            except (KeyError, ET.ParseError, zipfile.BadZipFile, OSError):
+                document_xml = safe_fromstring(budget.read(zf, "word/document.xml"))
+                rels_xml = safe_fromstring(
+                    budget.read(zf, "word/_rels/document.xml.rels")
+                )
+            except (
+                KeyError,
+                ET.ParseError,
+                zipfile.BadZipFile,
+                OSError,
+                ExtractionLimitExceeded,
+            ):
                 return []
 
             rel_targets: dict[str, str] = {}
@@ -116,8 +130,11 @@ def inspect_altchunks(docx_path: Path) -> list[AltChunk]:
                 if content_type not in _ALTCHUNK_CONTENT_TYPES:
                     continue
                 try:
-                    data = zf.read(part_name.lstrip("/"))
-                except (KeyError, OSError, zipfile.BadZipFile):
+                    data = budget.read(zf, part_name.lstrip("/"))
+                except (KeyError, OSError, zipfile.BadZipFile, ExtractionLimitExceeded):
+                    # Bomb part or cumulative budget exhausted: skip it. The
+                    # original docx still goes to the sandboxed soffice, so we
+                    # lose only the altChunk surfacing, not the render.
                     continue
                 found.append(
                     AltChunk(
