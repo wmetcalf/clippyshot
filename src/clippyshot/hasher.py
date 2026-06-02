@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import io
 
-import imagehash
+import rosetta_squint  # type: ignore[import-untyped]  # ships no py.typed (yet)
 from PIL import Image
 
 from clippyshot.types import PageHashes
@@ -36,7 +36,7 @@ def _downscale_for_hash(img: Image.Image) -> Image.Image:
         return img
     ratio = min(_HASH_MAX_DIM / w, _HASH_MAX_DIM / h)
     new_size = (max(1, int(w * ratio)), max(1, int(h * ratio)))
-    return img.resize(new_size, Image.LANCZOS)
+    return img.resize(new_size, Image.Resampling.LANCZOS)
 
 
 def hash_png_bytes(png_bytes: bytes) -> PageHashes:
@@ -70,8 +70,16 @@ def hash_png_bytes(png_bytes: bytes) -> PageHashes:
     with Image.open(io.BytesIO(png_bytes)) as img:
         img.load()
         thumb = _downscale_for_hash(img)
-        phash = str(imagehash.phash(thumb))
-        chash = str(imagehash.colorhash(thumb, binbits=4))
+        # rosetta-squint computes the hash from encoded image bytes (it decodes
+        # via Pillow internally), so re-encode the downscaled thumbnail to PNG
+        # and hash that. The result is byte-identical to the prior
+        # imagehash.phash/colorhash output on the same thumbnail — this is a
+        # pure hashing-library swap, the downscale mutation is unchanged.
+        buf = io.BytesIO()
+        thumb.save(buf, format="PNG")
+        thumb_png = buf.getvalue()
+        phash = str(rosetta_squint.phash_bytes(thumb_png))
+        chash = str(rosetta_squint.colorhash_bytes(thumb_png, binbits=4))
         if thumb is not img:
             thumb.close()
     is_blank = _is_blank_signature(phash, chash)
