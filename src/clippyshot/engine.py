@@ -121,7 +121,7 @@ def _build_converter():
     from clippyshot.converter import Converter
     from clippyshot.detector import Detector
     from clippyshot.libreoffice.runner import LibreOfficeRunner
-    from clippyshot.rasterizer.pdftoppm import PdftoppmRasterizer
+    from clippyshot.rasterizer import build_rasterizer
     from clippyshot.sandbox.detect import select_sandbox
     from clippyshot.selftest import (
         detect_runtime_apparmor_profile,
@@ -132,7 +132,7 @@ def _build_converter():
     return Converter(
         detector=Detector(),
         runner=LibreOfficeRunner(sandbox=sandbox),
-        rasterizer=PdftoppmRasterizer(sandbox=sandbox),
+        rasterizer=build_rasterizer(sandbox),
         sandbox_backend=sandbox.name,
         sandbox=sandbox,
         runtime_apparmor_profile=detect_runtime_apparmor_profile(),

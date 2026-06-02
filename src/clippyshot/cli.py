@@ -20,7 +20,7 @@ from clippyshot.errors import (
 from clippyshot.libreoffice.runner import LibreOfficeRunner
 from clippyshot.limits import Limits
 from clippyshot.observability import configure_logging, set_sandbox_backend
-from clippyshot.rasterizer.pdftoppm import PdftoppmRasterizer
+from clippyshot.rasterizer import build_rasterizer
 from clippyshot.sandbox.detect import select_sandbox
 from clippyshot.selftest import (
     detect_runtime_apparmor_profile,
@@ -36,7 +36,7 @@ def _build_converter() -> Converter:
     return Converter(
         detector=Detector(),
         runner=LibreOfficeRunner(sandbox=sandbox),
-        rasterizer=PdftoppmRasterizer(sandbox=sandbox),
+        rasterizer=build_rasterizer(sandbox),
         sandbox_backend=sandbox.name,
         sandbox=sandbox,
         runtime_apparmor_profile=detect_runtime_apparmor_profile(),

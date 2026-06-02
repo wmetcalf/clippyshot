@@ -11,7 +11,8 @@ produces a deterministic set of per-page PNGs plus a `metadata.json`
 manifest. Conversion runs LibreOffice headless inside a hardened sandbox
 (`nsjail` preferred, `bwrap` fallback) with macros, scripting, Java,
 network egress, OLE link updates, and remote resource fetching all
-disabled. PDFs are then rasterized via `pdftoppm`.
+disabled. PDFs are then rasterized via **PDFium** (`pypdfium2`) by default,
+or poppler `pdftoppm` (`CLIPPYSHOT_RASTERIZER=pdftoppm`).
 
 The intended use case is taking untrusted user-uploaded documents from a
 web service, rendering them safely on a worker, and serving the result as
@@ -134,7 +135,7 @@ modules wired together by `clippyshot.converter.Converter`:
 | `clippyshot.libreoffice.profile` | Hardened `UserInstallation` generator |
 | `clippyshot.libreoffice.runner` | soffice argv builder + sandbox dispatch |
 | `clippyshot.sandbox.{base,bwrap,nsjail,container,detect}` | Sandbox protocol + three backends + auto-selection |
-| `clippyshot.rasterizer.{base,pdftoppm}` | PDF → per-page PNG via pdftoppm |
+| `clippyshot.rasterizer.{base,pdfium,pdftoppm}` | PDF → per-page PNG via PDFium (default) or pdftoppm |
 | `clippyshot.hasher` | pHash + colorhash + SHA-256 of each rendered page |
 | `clippyshot.converter` | The orchestration layer |
 | `clippyshot.cli` | argparse CLI: `convert`, `selftest`, `serve`, `version` |
@@ -177,7 +178,7 @@ flowchart LR
     subgraph worker["Worker container (runsc)"]
         cs[ContainerSandbox]
         cs --- soff[LibreOffice]
-        cs --- rast[pdftoppm]
+        cs --- rast[PDFium]
         cs --- scan[ZXing + tesseract]
     end
     client -->|HTTPS| api
@@ -223,7 +224,7 @@ flowchart LR
     api[clippyshot serve]
     subgraph sbx["bwrap or nsjail (per job)"]
         soff[LibreOffice]
-        rast[pdftoppm]
+        rast[PDFium]
         scan[ZXing + tesseract]
     end
     client -->|HTTP/S| api
@@ -239,7 +240,7 @@ flowchart LR
     upload[Upload] --> detect[Magika + libmagic]
     detect --> soffice[LibreOffice]
     soffice --> pdf[PDF]
-    pdf --> rast[pdftoppm]
+    pdf --> rast[PDFium]
     rast --> pages[Per-page PNGs]
     pages --> hash[Hash / trim]
     pages --> qr[QR scan]
@@ -310,6 +311,7 @@ names use the prefix `CLIPPYSHOT_` with the suffix shown below:
 | `CLIPPYSHOT_TIMEOUT` | `60` | Per-conversion soffice timeout (seconds) |
 | `CLIPPYSHOT_MAX_PAGES` | `50` | Page count cap (truncates beyond this) |
 | `CLIPPYSHOT_DPI` | `150` | Rasterization DPI |
+| `CLIPPYSHOT_RASTERIZER` | `pdfium` | PDF→PNG engine: `pdfium` (PDFium/pypdfium2, ~2× faster) or `pdftoppm` (poppler) |
 | `CLIPPYSHOT_MAX_INPUT` | `104857600` | Max accepted upload size (100 MiB) |
 | `CLIPPYSHOT_MEM` | `1073741824` | Per-conversion RSS cap (1 GiB) |
 | `CLIPPYSHOT_TMPFS` | `536870912` | Per-conversion tmpfs cap (512 MiB) |
@@ -455,8 +457,9 @@ The HTTP server exposes Prometheus metrics on `/metrics`:
 ClippyShot is MIT-licensed — see [LICENSE](LICENSE).
 
 The Docker image bundles LibreOffice (MPL-2.0), bubblewrap (LGPL-2.0),
-nsjail (Apache-2.0), poppler-utils (GPL-2.0), and other open-source
-components. Each is invoked as a separate process and not linked into
-ClippyShot itself, so ClippyShot's source remains MIT. See
+nsjail (Apache-2.0), PDFium via pypdfium2 (BSD-3-Clause/Apache-2.0),
+poppler-utils (GPL-2.0), and other open-source components. Each is invoked
+as a separate process and not linked into ClippyShot itself, so ClippyShot's
+source remains MIT. See
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for the full list with
 upstream sources and notes on redistribution obligations.
