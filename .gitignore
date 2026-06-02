@@ -31,3 +31,15 @@ CLAUDE.md
 
 # LibreOffice lock files that may appear while tests are running.
 .~lock.*#
+
+# Editor config + env files written by tooling (clippyshot-compose writes
+# deploy/docker/.env).
+.vscode/
+.env
+
+# Local scratch / unrelated checkouts that live in the working tree but are
+# not part of the project.
+/dflash/
+/msi-ec/
+/org/
+/ec-dump-turbo.txt
