@@ -45,7 +45,6 @@ from blastbox.contract import (
     Warning,
     register_node_type,
 )
-from blastbox.contract.nodes import _Node
 from blastbox.limits import Limits as BlastboxLimits
 from blastbox.worker.engine import DetonationResult
 

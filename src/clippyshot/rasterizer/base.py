@@ -123,8 +123,11 @@ class ShardingRasterizer(ABC):
         max_pages: int,
         page_sizes_mm: list[tuple[float, float]] | None = None,
     ) -> list[RasterizedPage]:
-        pdf_path = Path(pdf_path)
-        out_dir = Path(out_dir)
+        # Resolve to absolute paths before deriving sandbox bind mounts: a
+        # relative pdf_path would make pdf_path.parent resolve to "." (the cwd),
+        # which we'd then bind-mount read-only into the sandbox.
+        pdf_path = Path(pdf_path).resolve()
+        out_dir = Path(out_dir).resolve()
         out_dir.mkdir(parents=True, exist_ok=True)
 
         sandbox_pdf = _SANDBOX_IN / pdf_path.name
@@ -203,7 +206,7 @@ class ShardingRasterizer(ABC):
                 src.replace(dst)
             with Image.open(dst) as img:
                 w_px, h_px = img.size
-            w_mm, h_mm = page_sizes[idx - 1] if idx - 1 < len(page_sizes) else (0.0, 0.0)
+            w_mm, h_mm = page_sizes[idx - 1] if 0 <= idx - 1 < len(page_sizes) else (0.0, 0.0)
             renamed.append(
                 RasterizedPage(
                     index=idx,
@@ -229,10 +232,16 @@ class ShardingRasterizer(ABC):
         reader = PdfReader(str(pdf))
         out: list[tuple[float, float]] = []
         for page in reader.pages:
-            box = page.mediabox
-            w_pt = float(box.width)
-            h_pt = float(box.height)
-            w_mm = (w_pt / _PT_PER_INCH) * _MM_PER_INCH
-            h_mm = (h_pt / _PT_PER_INCH) * _MM_PER_INCH
+            # A malformed PDF (derived from untrusted input via soffice) can
+            # yield a missing/None mediabox; fall back to unknown (0,0) rather
+            # than crash the whole conversion.
+            try:
+                box = page.mediabox
+                w_pt = float(box.width)
+                h_pt = float(box.height)
+                w_mm = (w_pt / _PT_PER_INCH) * _MM_PER_INCH
+                h_mm = (h_pt / _PT_PER_INCH) * _MM_PER_INCH
+            except (AttributeError, TypeError, ValueError):
+                w_mm, h_mm = 0.0, 0.0
             out.append((w_mm, h_mm))
         return out

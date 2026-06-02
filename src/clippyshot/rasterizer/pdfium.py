@@ -38,7 +38,9 @@ class PdfiumRasterizer(ShardingRasterizer):
     ) -> None:
         super().__init__(sandbox, rasterize_timeout_s)
         self._pypdfium2 = pypdfium2_path
-        self._venv_root = Path(venv_root)
+        # Resolve symlinks: a venv's sys.prefix is often a symlink, and
+        # bwrap/nsjail bind mounts want the real path.
+        self._venv_root = Path(venv_root).resolve()
 
     def _extra_ro_mounts(self) -> list[Mount]:
         # bwrap/nsjail curate the rootfs and only expose system dirs; the
