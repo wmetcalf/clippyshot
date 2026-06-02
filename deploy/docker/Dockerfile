@@ -117,7 +117,8 @@ RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin clippy \
     && mkdir -p /var/lib/clippyshot \
     && chown clippy:clippy /var/lib/clippyshot
 
-# Install ClippyShot into a venv at /opt/clippyshot.
+# Install ClippyShot into a venv at /opt/clippyshot. The `blastbox` dependency
+# (the detonation framework) resolves from PyPI like everything else.
 WORKDIR /tmp/build
 COPY pyproject.toml /tmp/build/pyproject.toml
 COPY src /tmp/build/src

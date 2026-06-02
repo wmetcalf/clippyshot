@@ -1,15 +1,15 @@
-"""Integration test: ClippyShotEngine round-trip through the detonator framework.
+"""Integration test: ClippyShotEngine round-trip through the blastbox framework.
 
 Proves end-to-end: real document → ClippyShotEngine → run_detonation →
 validate_worker_output → host-accepted Envelope with sha-verified artifacts.
 
 Marked ``integration`` — requires a working LibreOffice + sandbox on the host.
-Run with: .venv/bin/pytest tests/integration/test_detonator_roundtrip.py -v -m integration
+Run with: .venv/bin/pytest tests/integration/test_blastbox_roundtrip.py -v -m integration
 
 Design note
 -----------
 ``ClippyShotPage`` (a ``Page`` subclass) is exported from ``clippyshot.engine``
-and registered in the detonator node-type union.  It is usable for in-process
+and registered in the blastbox node-type union.  It is usable for in-process
 typed trees.  However, when the harness serialises the payload to JSON and the
 host re-parses it, pydantic's discriminated-union rebuild does not update the
 concrete ``EmbeddedResource.children`` annotation.  The engine therefore emits
@@ -27,15 +27,15 @@ from pathlib import Path
 
 import pytest
 
-# Import engine FIRST so ClippyShotPage is registered before any detonator
+# Import engine FIRST so ClippyShotPage is registered before any blastbox
 # type parsing happens in this process.
 from clippyshot.engine import ClippyShotEngine, ClippyShotPage
 
-from detonator.contract import Page, find_by_type
-from detonator.errors import OutputTrustError
-from detonator.host.trust import validate_worker_output
-from detonator.limits import Limits
-from detonator.worker.harness import run_detonation
+from blastbox.contract import Page, find_by_type
+from blastbox.errors import OutputTrustError
+from blastbox.host.trust import validate_worker_output
+from blastbox.limits import Limits
+from blastbox.worker.harness import run_detonation
 
 pytestmark = [pytest.mark.integration]
 
@@ -53,7 +53,7 @@ def _sha256_file(path: Path) -> str:
 @pytest.fixture(scope="module")
 def detonation_output(tmp_path_factory):
     """Run the full detonation once and return (output_dir, input_sha256)."""
-    out = tmp_path_factory.mktemp("detonator-out")
+    out = tmp_path_factory.mktemp("blastbox-out")
     engine = ClippyShotEngine()
     limits = Limits()
 
@@ -188,7 +188,7 @@ def test_clippyshot_page_in_process():
     that the registered subclass works correctly for callers that build typed
     in-process trees.
     """
-    from detonator.contract import ArtifactRef, Dimensions, Hash
+    from blastbox.contract import ArtifactRef, Dimensions, Hash
 
     page = ClippyShotPage(
         index=0,

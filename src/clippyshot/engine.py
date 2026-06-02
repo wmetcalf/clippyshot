@@ -1,7 +1,7 @@
-"""ClippyShot detonator Engine implementation.
+"""ClippyShot blastbox Engine implementation.
 
-Wraps the ClippyShot conversion pipeline as a detonator ``Engine``, mapping
-the per-page PNG output + metadata dict to the detonator contract types.
+Wraps the ClippyShot conversion pipeline as a blastbox ``Engine``, mapping
+the per-page PNG output + metadata dict to the blastbox contract types.
 
 Design note — engine-typed node subclass
 -----------------------------------------
@@ -33,7 +33,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from detonator.contract import (
+from blastbox.contract import (
     ArtifactRef,
     DeclaredArtifact,
     Detection,
@@ -45,9 +45,9 @@ from detonator.contract import (
     Warning,
     register_node_type,
 )
-from detonator.contract.nodes import _Node
-from detonator.limits import Limits as DetonatorLimits
-from detonator.worker.engine import DetonationResult
+from blastbox.contract.nodes import _Node
+from blastbox.limits import Limits as BlastboxLimits
+from blastbox.worker.engine import DetonationResult
 
 # ─── ClippyShotPage: exported typed node (in-process use) ───────────────────
 # Registered so callers can walk typed in-process trees.  NOT used as a child
@@ -167,10 +167,10 @@ def _scanner_record(page_rec: dict) -> Record:
 
 
 class ClippyShotEngine:
-    """Detonator Engine wrapping the ClippyShot LibreOffice pipeline.
+    """Blastbox Engine wrapping the ClippyShot LibreOffice pipeline.
 
     ``detonate()`` calls ``Converter.convert()`` and maps the result to the
-    detonator contract types.  The converter is built lazily on first call.
+    blastbox contract types.  The converter is built lazily on first call.
     """
 
     name: str = "clippyshot"
@@ -188,12 +188,12 @@ class ClippyShotEngine:
         self,
         input: Path,
         outdir: Path,
-        limits: DetonatorLimits,
+        limits: BlastboxLimits,
     ) -> DetonationResult:
         """Run the ClippyShot pipeline and return a typed ``DetonationResult``.
 
         Per-page PNGs are written to ``outdir`` by the converter.  This method
-        maps the resulting metadata dict to the detonator contract:
+        maps the resulting metadata dict to the blastbox contract:
 
         - Each page → ``Page`` node with ``hashes`` + a ``Record`` child for
           scanner data (QR / OCR).  ``Page`` is used instead of
@@ -208,7 +208,7 @@ class ClippyShotEngine:
         from clippyshot.converter import ConvertOptions
         from clippyshot.limits import Limits as CSLimits
 
-        # Map detonator Limits.timeout_s → ClippyShot Limits (valid range: [1, 600]).
+        # Map blastbox Limits.timeout_s → ClippyShot Limits (valid range: [1, 600]).
         cs_timeout = max(1, min(600, limits.timeout_s))
         cs_limits = CSLimits(timeout_s=cs_timeout)
         cs_opts = ConvertOptions(

@@ -23,7 +23,7 @@ dependencies = [
     "pyzipper>=0.3.6",
     "python-magic>=0.4.27",
     "olefile>=0.46",
-    "detonator",
+    "blastbox>=0.1.0",
 ]
 
 [project.optional-dependencies]
