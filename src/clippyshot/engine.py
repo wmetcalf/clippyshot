@@ -198,13 +198,24 @@ class ClippyShotEngine:
         change for the docker/sandbox tier."""
         if os.environ.get("CLIPPYSHOT_WARM_UNO", "").lower() not in ("1", "true", "yes"):
             return
+        import atexit
+        import logging
+
         from clippyshot.libreoffice.uno import UnoServer
 
         server = UnoServer()
         try:
             server.start()
-        except Exception:
-            return  # non-fatal: detonate() falls back to cold conversion
+        except Exception as exc:
+            # Non-fatal: detonate() falls back to cold. Log so warm-tier
+            # misconfiguration (missing unoserver, soffice failure) is diagnosable.
+            logging.getLogger("clippyshot.engine").warning(
+                "warm-UNO warmup failed; falling back to cold conversion: %s", exc
+            )
+            return
+        # Reap a spawned server if the interpreter exits before reap (adopted
+        # servers we don't own are a no-op on stop()).
+        atexit.register(server.stop)
         self._uno_server = server
 
     def _get_converter(self):

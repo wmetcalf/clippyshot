@@ -91,8 +91,12 @@ def _port_listening(host: str, port: int, timeout: float = 0.5) -> bool:
         return False
 
 
+def _is_loopback(host: str) -> bool:
+    return host in ("localhost", "::1") or host.startswith("127.")
+
+
 class UnoServer:
-    """A persistent LibreOffice UNO server (``unoserver --daemon``).
+    """A persistent LibreOffice UNO server (foreground ``unoserver``).
 
     Bound to **loopback only** — the URP ``--accept`` socket is new attack surface,
     so it never listens on a routable interface. Started once in ``warmup()``, polled
@@ -116,6 +120,11 @@ class UnoServer:
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
+        if not _is_loopback(host):
+            raise ValueError(
+                f"UnoServer must bind loopback only (the URP socket is attack "
+                f"surface); refusing host {host!r}"
+            )
         self._bin = unoserver_bin
         self._host = host
         self._port = port
@@ -220,10 +229,17 @@ def convert_via_uno(
         unoconvert_bin, input_path, output_path, label,
         host=server.host, port=server.port,
     )
+    # Fail closed: drop any stale output first so a no-op/partial conversion can't
+    # pass the non-empty check below as a false success.
+    if output_path.exists():
+        output_path.unlink()
     try:
         proc = run(argv, capture_output=True, timeout=timeout_s)
     except subprocess.TimeoutExpired as exc:
         raise LibreOfficeError(f"unoconvert timed out after {timeout_s}s") from exc
+    except OSError as exc:
+        # e.g. unoconvert missing / not executable — fall back to cold, don't crash.
+        raise LibreOfficeError(f"failed to execute unoconvert: {exc}") from exc
     if proc.returncode != 0:
         stderr = proc.stderr or b""
         detail = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else str(stderr)

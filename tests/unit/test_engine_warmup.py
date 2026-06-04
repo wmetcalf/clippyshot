@@ -26,6 +26,9 @@ def test_warmup_starts_server_when_enabled(monkeypatch):
         def start(self):
             started.append(True)
 
+        def stop(self):
+            pass
+
     monkeypatch.setattr(
         "clippyshot.libreoffice.uno.UnoServer", lambda *a, **k: FakeServer()
     )

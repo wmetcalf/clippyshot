@@ -247,3 +247,41 @@ def test_convert_via_uno_timeout_raises(tmp_path):
 
     with pytest.raises(LibreOfficeError, match="timed out"):
         convert_via_uno(_server(), tmp_path / "a.docx", tmp_path / "a.pdf", "docx", run=fake_run)
+
+
+# ---------------------------------------------------------------------------
+# PR-review hardening: loopback enforcement, OSError fallback, stale-output.
+# ---------------------------------------------------------------------------
+
+
+def test_unoserver_rejects_non_loopback_host():
+    with pytest.raises(ValueError, match="loopback only"):
+        UnoServer(host="0.0.0.0")
+    with pytest.raises(ValueError, match="loopback only"):
+        UnoServer(host="10.0.0.5")
+    UnoServer(host="127.0.0.1")  # ok
+    UnoServer(host="localhost")  # ok
+
+
+def test_convert_via_uno_oserror_wrapped_as_libreoffice_error(tmp_path):
+    def boom(argv, **kw):
+        raise FileNotFoundError("unoconvert: command not found")
+
+    with pytest.raises(LibreOfficeError, match="failed to execute unoconvert"):
+        convert_via_uno(UnoServer(), tmp_path / "a.docx", tmp_path / "a.pdf", "docx", run=boom)
+
+
+def test_convert_via_uno_unlinks_stale_output(tmp_path):
+    out = tmp_path / "a.pdf"
+    out.write_bytes(b"STALE")  # pre-existing output from a prior run
+
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen["existed_at_run"] = out.exists()  # should be False (unlinked first)
+        out.write_bytes(b"%PDF new")
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    convert_via_uno(UnoServer(), tmp_path / "a.docx", out, "docx", run=fake_run)
+    assert seen["existed_at_run"] is False
+    assert out.read_bytes() == b"%PDF new"
