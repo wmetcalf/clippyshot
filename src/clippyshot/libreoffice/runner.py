@@ -9,6 +9,7 @@ from pathlib import Path
 
 from clippyshot.errors import LibreOfficeEmptyOutputError, LibreOfficeError
 from clippyshot.libreoffice.profile import HardenedProfile
+from clippyshot.libreoffice.uno import UnoServer, convert_via_uno
 from clippyshot.limits import Limits
 from clippyshot.sandbox.base import Mount, Sandbox, SandboxRequest
 
@@ -51,10 +52,17 @@ class LibreOfficeRunner:
     """Build the soffice invocation and dispatch it through a Sandbox."""
 
     def __init__(
-        self, sandbox: Sandbox, soffice_path: str = "/usr/bin/soffice"
+        self,
+        sandbox: Sandbox,
+        soffice_path: str = "/usr/bin/soffice",
+        uno_server: UnoServer | None = None,
     ) -> None:
         self._sandbox = sandbox
         self._soffice = soffice_path
+        # When set + ready (the FC warm tier, where unoserver shares this
+        # filesystem), convert_to_pdf tries unoconvert first and falls back to the
+        # cold sandbox path on any failure. None on the bare-metal/docker tier.
+        self._uno_server = uno_server
         # Populated by ``convert_to_pdf`` when the final staged form of
         # the input was an OOXML spreadsheet. The converter reads this
         # immediately after the call to surface sheet names in metadata.
@@ -421,6 +429,33 @@ class LibreOfficeRunner:
                     filters_to_try.append("calc_pdf_Export")
             if pdf_filter != "writer_pdf_Export":
                 filters_to_try.append("writer_pdf_Export")
+
+            # Optimistic warm-UNO fast path. When a ready unoserver shares this
+            # filesystem (the FC warm tier — soffice boot already paid), convert via
+            # unoconvert: same LibreOffice engine + filters as the cold path, with no
+            # per-job soffice boot. On ANY failure, fall through to the untouched cold
+            # sandbox-retry loop below (a UNO hiccup must never fail the job).
+            if self._uno_server is not None and self._uno_server.is_ready():
+                warm_pdf = output_dir / (input_path.stem + ".pdf")
+                try:
+                    convert_via_uno(self._uno_server, staged_input, warm_pdf, label)
+                except LibreOfficeError as exc:
+                    import logging as _logging
+
+                    _logging.getLogger("clippyshot.libreoffice.runner").warning(
+                        "warm unoconvert failed (%s); falling back to cold soffice", exc
+                    )
+                else:
+                    if staged_input.suffix.lower() in (".xlsx", ".xlsm"):
+                        try:
+                            from clippyshot.libreoffice.sheet_prep import (
+                                read_sheet_list,
+                            )
+
+                            self.last_run_sheets = read_sheet_list(staged_input)
+                        except Exception:
+                            self.last_run_sheets = []
+                    return warm_pdf
 
             last_error = None
             for attempt, filt in enumerate(filters_to_try):

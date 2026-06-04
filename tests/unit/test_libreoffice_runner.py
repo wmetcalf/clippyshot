@@ -341,3 +341,76 @@ def test_runner_does_not_fall_back_to_raw_input_after_html_altchunk_reroute(
         runner.convert_to_pdf(src, out, Limits(), "docx")
 
     assert [Path(req.argv[-1]).name for req in sb.requests] == ["input.html"]
+
+
+# ---------------------------------------------------------------------------
+# Warm-UNO optimistic fast path: when a ready unoserver is wired in, the
+# soffice->PDF step goes through unoconvert; on ANY failure it falls back to the
+# untouched cold sandbox path. With no server, the cold path is unchanged.
+# ---------------------------------------------------------------------------
+
+
+class _ReadyUno:
+    host = "127.0.0.1"
+    port = 2003
+
+    def is_ready(self) -> bool:
+        return True
+
+
+def test_warm_uno_fast_path_used_and_skips_cold_sandbox(tmp_path: Path, monkeypatch):
+    src = tmp_path / "input.docx"
+    src.write_bytes(b"x")
+    out = tmp_path / "out"
+    out.mkdir()
+    sb = FakeSandbox()
+
+    seen = {}
+
+    def fake_convert(server, inp, outp, label, **kw):
+        seen["label"] = label
+        Path(outp).write_bytes(b"%PDF warm\n%%EOF\n")
+
+    monkeypatch.setattr("clippyshot.libreoffice.runner.convert_via_uno", fake_convert)
+
+    pdf = LibreOfficeRunner(sandbox=sb, uno_server=_ReadyUno()).convert_to_pdf(
+        src, out, Limits(), "docx"
+    )
+
+    assert pdf == out / "input.pdf"
+    assert pdf.read_bytes() == b"%PDF warm\n%%EOF\n"
+    assert seen["label"] == "docx"
+    assert sb.last_request is None  # cold soffice path was NOT taken
+
+
+def test_warm_uno_failure_falls_back_to_cold(tmp_path: Path, monkeypatch):
+    from clippyshot.errors import LibreOfficeError
+
+    src = tmp_path / "input.docx"
+    src.write_bytes(b"x")
+    out = tmp_path / "out"
+    out.mkdir()
+    sb = FakeSandbox()
+
+    def boom(server, inp, outp, label, **kw):
+        raise LibreOfficeError("unoconvert exploded")
+
+    monkeypatch.setattr("clippyshot.libreoffice.runner.convert_via_uno", boom)
+
+    pdf = LibreOfficeRunner(sandbox=sb, uno_server=_ReadyUno()).convert_to_pdf(
+        src, out, Limits(), "docx"
+    )
+
+    assert pdf == out / "input.pdf"
+    assert sb.last_request is not None             # fell back to cold soffice
+    assert pdf.read_bytes().startswith(b"%PDF-1.4")  # FakeSandbox's cold PDF
+
+
+def test_no_uno_server_uses_cold_path(tmp_path: Path):
+    src = tmp_path / "input.docx"
+    src.write_bytes(b"x")
+    out = tmp_path / "out"
+    out.mkdir()
+    sb = FakeSandbox()
+    LibreOfficeRunner(sandbox=sb, uno_server=None).convert_to_pdf(src, out, Limits(), "docx")
+    assert sb.last_request is not None  # cold path (no warm server present)
