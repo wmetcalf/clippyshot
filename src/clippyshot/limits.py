@@ -17,13 +17,18 @@ _ENV_MAP = {
     "disclose_security_internals": "DISCLOSE_SECURITY_INTERNALS",
     "max_width_px": "MAX_WIDTH",
     "max_height_px": "MAX_HEIGHT",
+    "rasterizer": "RASTERIZER",
 }
 
 # Map field name → coerce function for env-var parsing.
 _ENV_COERCE: dict[str, object] = {
     "skip_blanks": lambda s: s.lower() not in ("0", "false", "no"),
     "disclose_security_internals": lambda s: s.lower() not in ("0", "false", "no"),
+    "rasterizer": lambda s: s.strip().lower(),
 }
+
+# PDF-to-PNG rasterizer backends, selectable via CLIPPYSHOT_RASTERIZER.
+_RASTERIZERS = ("pdfium", "pdftoppm")
 
 
 @dataclass(frozen=True)
@@ -45,6 +50,7 @@ class Limits:
     disclose_security_internals: bool = False
     max_width_px: int = 32768
     max_height_px: int = 32768
+    rasterizer: str = "pdfium"
 
     # Hard ceilings for the byte/pixel caps. These exist so a hostile or
     # fat-fingered env var can't silently *disable* a cap (e.g. MAX_WIDTH=0
@@ -72,6 +78,10 @@ class Limits:
                 raise ValueError(
                     f"{name} must be in [1, {self._MAX_PX_CEILING}], got {val}"
                 )
+        if self.rasterizer not in _RASTERIZERS:
+            raise ValueError(
+                f"rasterizer must be one of {_RASTERIZERS}, got {self.rasterizer!r}"
+            )
 
     @classmethod
     def from_env(cls, **overrides) -> "Limits":

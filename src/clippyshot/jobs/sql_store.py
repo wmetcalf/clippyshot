@@ -538,7 +538,8 @@ class SqlJobStore:
     ) -> list[dict]:
         """Return pages whose colorhash falls within the given bin distances.
 
-        imagehash's colorhash encodes 14 4-bit bins in hex (binbits=4):
+        colorhash (rosetta-squint, byte-exact with imagehash) encodes 14
+        4-bit bins in hex (binbits=4):
             0–1:   fraction bins (black, gray)
             2–7:   6 faint-color hue bins
             8–13:  6 bright-color hue bins

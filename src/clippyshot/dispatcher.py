@@ -29,7 +29,7 @@ _DEFAULT_WORKER_COMMAND = ("worker",)
 def _phash_hex_to_int8(hex_str: str) -> int:
     """Convert a 16-char hex pHash to a signed int64 suitable for Postgres BIGINT.
 
-    imagehash emits the phash as unsigned 64-bit hex (e.g. "ff00aa...");
+    the phash is unsigned 64-bit hex (e.g. "ff00aa...");
     Postgres BIGINT is signed two's-complement, so values with the high
     bit set must be reinterpreted as negative to fit. The same mapping
     gets applied on query so round-trips are exact.

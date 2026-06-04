@@ -48,7 +48,7 @@ from clippyshot.limits import Limits
 from clippyshot.observability import configure_logging, get_logger, set_sandbox_backend
 from clippyshot.ocr import validate_lang as _validate_ocr_lang
 from clippyshot.qr import validate_formats as _validate_qr_formats
-from clippyshot.rasterizer.pdftoppm import PdftoppmRasterizer
+from clippyshot.rasterizer import build_rasterizer
 from clippyshot.sandbox.detect import select_sandbox
 from clippyshot.selftest import (
     detect_runtime_apparmor_profile,
@@ -367,7 +367,7 @@ def _default_converter_factory() -> Converter:
     return Converter(
         detector=Detector(),
         runner=LibreOfficeRunner(sandbox=sandbox),
-        rasterizer=PdftoppmRasterizer(sandbox=sandbox),
+        rasterizer=build_rasterizer(sandbox),
         sandbox_backend=sandbox.name,
         sandbox=sandbox,
         runtime_apparmor_profile=detect_runtime_apparmor_profile(),
