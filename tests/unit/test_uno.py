@@ -106,9 +106,9 @@ class _PortGate:
         return self.calls > self.true_after
 
 
-def test_unoserver_argv_loopback_only():
+def test_unoserver_argv_loopback_only_foreground():
     argv = UnoServer("unoserver", host="127.0.0.1", port=2003).argv()
-    assert "--daemon" in argv
+    assert "--daemon" not in argv  # foreground so the Popen handle IS the server
     assert argv[argv.index("--interface") + 1] == "127.0.0.1"
     assert argv[argv.index("--port") + 1] == "2003"
 
@@ -118,20 +118,35 @@ def test_unoserver_argv_includes_user_installation_when_set():
     assert argv[argv.index("--user-installation") + 1] == "/tmp/uno"
 
 
-def test_start_blocks_until_port_listens_then_ready():
+def test_start_spawns_and_waits_when_nothing_running():
     proc = _FakeProc()
-    gate = _PortGate(true_after=2)  # not listening for 2 polls, then up
+    spawned: list = []
+    gate = _PortGate(true_after=2)  # adopt-check False, one failed poll, then up
     sleeps: list[float] = []
     server = UnoServer(
-        popen=lambda argv: proc,
+        popen=lambda argv: (spawned.append(argv), proc)[1],
         port_check=gate,
         sleep=sleeps.append,
-        monotonic=lambda: 0.0,  # never advances → deadline never hit; loop exits on port up
+        monotonic=lambda: 0.0,  # never advances → loop exits only when port is up
     )
     server.start()
-    assert gate.calls == 3            # polled until listening
-    assert sleeps == [0.1, 0.1]       # slept between the two failed polls
+    assert len(spawned) == 1          # spawned exactly one foreground unoserver
+    assert sleeps == [0.1]            # polled once before it came up
     assert server.is_ready() is True
+
+
+def test_start_adopts_already_running_server_without_spawning():
+    spawned: list = []
+    server = UnoServer(
+        popen=lambda argv: (spawned.append(argv), _FakeProc())[1],
+        port_check=lambda h, p: True,   # already serving (snapshot / rootfs-started)
+        sleep=lambda s: None,
+        monotonic=lambda: 0.0,
+    )
+    server.start()
+    assert spawned == []                # adopted; did NOT spawn a second server
+    assert server.is_ready() is True
+    server.stop()                       # no-op (we don't own the adopted process)
 
 
 def test_start_raises_if_unoserver_exits_early():
@@ -159,31 +174,32 @@ def test_start_times_out_when_port_never_listens():
         server.start()
 
 
-def test_start_is_idempotent():
-    calls = []
+def test_start_is_idempotent_after_spawn():
+    spawned = []
+    gate = _PortGate(true_after=1)  # adopt-check False, first readiness poll True
     server = UnoServer(
-        popen=lambda argv: (calls.append(1), _FakeProc())[1],
-        port_check=lambda h, p: True,
+        popen=lambda argv: (spawned.append(1), _FakeProc())[1],
+        port_check=gate,
         sleep=lambda s: None,
         monotonic=lambda: 0.0,
     )
     server.start()
     server.start()
-    assert len(calls) == 1  # second start is a no-op
+    assert len(spawned) == 1  # second start is a no-op (we already own the proc)
 
 
-def test_stop_terminates_running_server():
+def test_stop_terminates_a_spawned_server():
     proc = _FakeProc()
+    gate = _PortGate(true_after=1)  # adopt-check False → spawn; then ready
     server = UnoServer(
         popen=lambda argv: proc,
-        port_check=lambda h, p: True,
+        port_check=gate,
         sleep=lambda s: None,
         monotonic=lambda: 0.0,
     )
     server.start()
     server.stop()
-    assert proc.poll() == -15        # SIGTERM delivered
-    assert server.is_ready() is False
+    assert proc.poll() == -15        # SIGTERM delivered to the spawned server
 
 
 # ---------------------------------------------------------------------------

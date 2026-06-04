@@ -136,9 +136,11 @@ class UnoServer:
         return self._port
 
     def argv(self) -> list[str]:
+        # Foreground (NOT --daemon): we want the Popen handle to BE the server so
+        # stop()/poll() control its lifecycle. --daemon double-forks and detaches,
+        # leaving us tracking a launcher that has already exited.
         argv = [
             self._bin,
-            "--daemon",
             "--interface", self._host,
             "--port", str(self._port),
         ]
@@ -147,11 +149,17 @@ class UnoServer:
         return argv
 
     def start(self) -> None:
-        """Launch unoserver and block until the UNO port accepts a connection.
-        Idempotent: a second call while already running is a no-op. Raises
-        :class:`LibreOfficeError` if unoserver exits early or never becomes ready."""
+        """Ensure a warm UNO server is listening. Idempotent.
+
+        If the port is already serving — e.g. unoserver was started by the FC
+        rootfs init and captured in the snapshot — **adopt** it (no second spawn,
+        nothing to manage). Otherwise spawn unoserver in the foreground and block
+        until the UNO port accepts a connection. Raises :class:`LibreOfficeError`
+        if a spawned unoserver exits early or never becomes ready."""
         if self._proc is not None:
             return
+        if self._port_check(self._host, self._port):
+            return  # adopt an already-running server (snapshot / rootfs-started)
         self._proc = self._popen(self.argv())
         self._wait_ready()
 
@@ -172,11 +180,12 @@ class UnoServer:
         )
 
     def is_ready(self) -> bool:
-        return (
-            self._proc is not None
-            and self._proc.poll() is None
-            and self._port_check(self._host, self._port)
-        )
+        # If we spawned it and it has since exited, it's not ready. Otherwise the
+        # real signal is whether the UNO port responds — which also covers an
+        # adopted server we did not spawn (the snapshot / rootfs case).
+        if self._proc is not None and self._proc.poll() is not None:
+            return False
+        return self._port_check(self._host, self._port)
 
     def stop(self) -> None:
         """Terminate the server (SIGTERM, then SIGKILL after a 5 s grace period)."""

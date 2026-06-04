@@ -27,9 +27,10 @@ Usage::
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field
 
@@ -47,6 +48,9 @@ from blastbox.contract import (
 )
 from blastbox.limits import Limits as BlastboxLimits
 from blastbox.worker.engine import DetonationResult
+
+if TYPE_CHECKING:
+    from clippyshot.libreoffice.uno import UnoServer
 
 # ─── ClippyShotPage: exported typed node (in-process use) ───────────────────
 # Registered so callers can walk typed in-process trees.  NOT used as a child
@@ -115,8 +119,12 @@ def _focused_id(index: int) -> str:
     return f"p{index}-focused"
 
 
-def _build_converter():
-    """Build a ClippyShot Converter the same way ``worker._build_converter()`` does."""
+def _build_converter(uno_server: UnoServer | None = None):
+    """Build a ClippyShot Converter the same way ``worker._build_converter()`` does.
+
+    ``uno_server`` (the warm tier) is threaded into the LibreOffice runner so the
+    soffice→PDF step goes through unoconvert when a server is ready; None keeps the
+    cold path."""
     from clippyshot.converter import Converter
     from clippyshot.detector import Detector
     from clippyshot.libreoffice.runner import LibreOfficeRunner
@@ -130,7 +138,7 @@ def _build_converter():
     sandbox = select_sandbox()
     return Converter(
         detector=Detector(),
-        runner=LibreOfficeRunner(sandbox=sandbox),
+        runner=LibreOfficeRunner(sandbox=sandbox, uno_server=uno_server),
         rasterizer=build_rasterizer(sandbox),
         sandbox_backend=sandbox.name,
         sandbox=sandbox,
@@ -177,10 +185,31 @@ class ClippyShotEngine:
 
     def __init__(self) -> None:
         self._converter = None  # lazy
+        self._uno_server: UnoServer | None = None  # set by warmup() in the warm tier
+
+    def warmup(self) -> None:
+        """Pre-pay LibreOffice startup for the warm tier (blastbox warm-pool seam).
+
+        With ``CLIPPYSHOT_WARM_UNO=1`` (the FC snapshot / warm-pool tier), ensure a
+        persistent unoserver is listening *before* any input arrives — adopting one
+        the FC rootfs already started, or spawning one. Best-effort: a failure here
+        leaves ``_uno_server`` None and ``detonate()`` converts via the cold soffice
+        path, so a warm hiccup never fails the slot. Off by default → no behaviour
+        change for the docker/sandbox tier."""
+        if os.environ.get("CLIPPYSHOT_WARM_UNO", "").lower() not in ("1", "true", "yes"):
+            return
+        from clippyshot.libreoffice.uno import UnoServer
+
+        server = UnoServer()
+        try:
+            server.start()
+        except Exception:
+            return  # non-fatal: detonate() falls back to cold conversion
+        self._uno_server = server
 
     def _get_converter(self):
         if self._converter is None:
-            self._converter = _build_converter()
+            self._converter = _build_converter(uno_server=self._uno_server)
         return self._converter
 
     def detonate(
