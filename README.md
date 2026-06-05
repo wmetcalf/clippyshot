@@ -14,6 +14,15 @@ network egress, OLE link updates, and remote resource fetching all
 disabled. PDFs are then rasterized via **PDFium** (`pypdfium2`) by default,
 or poppler `pdftoppm` (`CLIPPYSHOT_RASTERIZER=pdftoppm`).
 
+By default each job cold-starts `soffice --convert-to`. With
+`CLIPPYSHOT_WARM_UNO=1` the runner instead converts through a persistent
+`unoserver` (the warm-UNO path, `clippyshot.libreoffice.uno`), paying the
+~750 ms soffice boot once rather than per job — output is pixel/byte-identical
+to the cold path (validated across calc, impress, and draw families), and any
+warm failure falls back to cold `--convert-to`. This path is what the
+[blastbox](https://github.com/wmetcalf/blastbox) Firecracker warm-snapshot tier
+drives; it is inert unless explicitly enabled.
+
 The intended use case is taking untrusted user-uploaded documents from a
 web service, rendering them safely on a worker, and serving the result as
 images.
@@ -133,7 +142,8 @@ modules wired together by `clippyshot.converter.Converter`:
 |---|---|
 | `clippyshot.detector` | Magika-primary content-type detection with extension fallback |
 | `clippyshot.libreoffice.profile` | Hardened `UserInstallation` generator |
-| `clippyshot.libreoffice.runner` | soffice argv builder + sandbox dispatch |
+| `clippyshot.libreoffice.runner` | soffice argv builder + sandbox dispatch (+ optional warm-UNO fast-path) |
+| `clippyshot.libreoffice.uno` | warm `unoserver` lifecycle + `unoconvert` conversion (parity-preserving; opt-in) |
 | `clippyshot.sandbox.{base,bwrap,nsjail,container,detect}` | Sandbox protocol + three backends + auto-selection |
 | `clippyshot.rasterizer.{base,pdfium,pdftoppm}` | PDF → per-page PNG via PDFium (default) or pdftoppm |
 | `clippyshot.hasher` | pHash + colorhash + SHA-256 of each rendered page |
