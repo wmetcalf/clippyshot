@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -27,7 +26,6 @@ from clippyshot.selftest import (
     detect_soffice_apparmor_profile,
     run_selftest,
 )
-from clippyshot.worker import run_worker
 
 
 def _build_converter() -> Converter:
@@ -89,24 +87,6 @@ def _selftest_cmd(_: argparse.Namespace) -> int:
     return run_selftest()
 
 
-def _serve_cmd(args: argparse.Namespace) -> int:
-    import uvicorn
-
-    from clippyshot.api import build_app
-
-    app = build_app(
-        job_store_kind=args.job_store,
-        redis_url=args.redis_url,
-        database_url=args.database_url,
-    )
-    uvicorn.run(app, host=args.host, port=args.port, workers=1, log_level="info")
-    return 0
-
-
-def _worker_cmd(args: argparse.Namespace) -> int:
-    return run_worker(args)
-
-
 def _version_cmd(_: argparse.Namespace) -> int:
     print(f"clippyshot {__version__}")
     return 0
@@ -141,24 +121,11 @@ def build_parser() -> argparse.ArgumentParser:
     ps = sub.add_parser("selftest", help="run a deployment health check")
     ps.set_defaults(func=_selftest_cmd)
 
-    psv = sub.add_parser("serve", help="run the HTTP API")
-    psv.add_argument("--host", default="127.0.0.1")
-    psv.add_argument("--port", type=int, default=8000)
-    psv.add_argument("--job-store", choices=["memory", "redis", "sql"], default="sql")
-    psv.add_argument("--redis-url", default="redis://localhost:6379/0")
-    psv.add_argument(
-        "--database-url",
-        default=os.environ.get("CLIPPYSHOT_DATABASE_URL", "sqlite:///./clippyshot-jobs.db"),
-    )
-    psv.set_defaults(func=_serve_cmd)
-
-    pw = sub.add_parser("worker", help="process one mounted job directory")
-    pw.add_argument("--job-dir", required=True, help="mounted job directory")
-    pw.add_argument("--input", help="input file path inside the job directory")
-    pw.add_argument("--output", help="output directory path inside the job directory")
-    pw.add_argument("--job-id", help="optional job identifier for logging")
-    pw.add_argument("--quiet", action="store_true")
-    pw.set_defaults(func=_worker_cmd)
+    # The HTTP API + dispatcher + worker now run on blastbox.host:
+    #   blastbox serve --allowed-engines clippyshot   (BLASTBOX_INGRESS_EXTENSION=clippyshot.blastbox_ingress:make_extension)
+    #   blastbox dispatch                             (BLASTBOX_ENGINES=clippyshot=<cold-worker-image>)
+    #   python -m blastbox.worker.cold                (BLASTBOX_ENGINE=clippyshot.engine:ClippyShotEngine)
+    # ClippyShot's CLI keeps only the in-process pipeline commands.
 
     pv = sub.add_parser("version")
     pv.set_defaults(func=_version_cmd)
