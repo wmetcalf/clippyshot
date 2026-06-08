@@ -167,3 +167,14 @@ def test_routes_404_for_unknown_job(tmp_path):
     jid = str(uuid.uuid4())
     assert client.get(f"/v1/jobs/{jid}/pdf").status_code == 404
     assert client.get(f"/v1/jobs/{jid}/pages/1.png").status_code == 404
+
+
+def test_web_ui_served_at_root(tmp_path):
+    """The packaged web UI is served via the StaticUI seam on the extension
+    (per-engine UI) — GET / returns the ClippyShot index.html, not a 404."""
+    client, _ = _make_client(tmp_path)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")
+    body = resp.text.lower()
+    assert "<!doctype" in body or "<html" in body

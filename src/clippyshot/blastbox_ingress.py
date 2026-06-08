@@ -18,12 +18,17 @@ split, and the latter is an image-hashing concern that belongs to ClippyShot's
 
 from __future__ import annotations
 
+from pathlib import Path as _FsPath
+
 from fastapi import APIRouter, Path, Request
 from fastapi.responses import FileResponse
 
-from blastbox.host.ingress.extension import IngressExtension
+from blastbox.host.ingress.extension import IngressExtension, StaticUI
 
 router = APIRouter()
+
+# ClippyShot's packaged web UI (served at GET / + /assets via the StaticUI seam).
+_STATIC_DIR = _FsPath(__file__).resolve().parent / "static"
 
 
 @router.get("/v1/jobs/{job_id}/pdf")
@@ -71,6 +76,12 @@ def make_extension() -> IngressExtension:
     """Factory resolved by ``BLASTBOX_INGRESS_EXTENSION``.
 
     Returns an :class:`IngressExtension` carrying ClippyShot's typed-artifact
-    routers, mounted on the shared blastbox ingress by ``build_app``.
+    routers AND its packaged web UI, mounted on the shared blastbox ingress by
+    ``build_app`` (the UI at ``GET /`` + ``/assets``; per-engine UI seam).
     """
-    return IngressExtension(routers=(router,))
+    static_ui = (
+        StaticUI(directory=str(_STATIC_DIR))
+        if (_STATIC_DIR / "index.html").is_file()
+        else None
+    )
+    return IngressExtension(routers=(router,), static_ui=static_ui)
