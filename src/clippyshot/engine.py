@@ -50,7 +50,7 @@ from blastbox.limits import Limits as BlastboxLimits
 from blastbox.worker.engine import DetonationResult
 
 if TYPE_CHECKING:
-    from clippyshot.libreoffice.uno import UnoServer
+    from clippyshot.libreoffice.uno import WarmConverter
 
 # ─── ClippyShotPage: exported typed node (in-process use) ───────────────────
 # Registered so callers can walk typed in-process trees.  NOT used as a child
@@ -119,7 +119,7 @@ def _focused_id(index: int) -> str:
     return f"p{index}-focused"
 
 
-def _build_converter(uno_server: UnoServer | None = None):
+def _build_converter(uno_server: WarmConverter | None = None):
     """Build a ClippyShot Converter the same way ``worker._build_converter()`` does.
 
     ``uno_server`` (the warm tier) is threaded into the LibreOffice runner so the
@@ -185,32 +185,48 @@ class ClippyShotEngine:
 
     def __init__(self) -> None:
         self._converter = None  # lazy
-        self._uno_server: UnoServer | None = None  # set by warmup() in the warm tier
+        self._uno_server: WarmConverter | None = None  # set by warmup() in the warm tier
 
     def warmup(self) -> None:
         """Pre-pay LibreOffice startup for the warm tier (blastbox warm-pool seam).
 
         With ``CLIPPYSHOT_WARM_UNO=1`` (the FC snapshot / warm-pool tier), ensure a
-        persistent unoserver is listening *before* any input arrives — adopting one
-        the FC rootfs already started, or spawning one. Best-effort: a failure here
-        leaves ``_uno_server`` None and ``detonate()`` converts via the cold soffice
-        path, so a warm hiccup never fails the slot. Off by default → no behaviour
-        change for the docker/sandbox tier."""
+        persistent warm soffice is listening *before* any input arrives — adopting one
+        the rootfs/snapshot already started, or spawning one. Best-effort: a failure
+        here leaves ``_uno_server`` None and ``detonate()`` converts via the cold
+        soffice path, so a warm hiccup never fails the slot. Off by default → no
+        behaviour change for the docker/sandbox tier.
+
+        Transport (``CLIPPYSHOT_WARM_UNO_TRANSPORT``): ``socket`` (default) uses the TCP
+        ``unoserver`` (the FC tier — loopback is available there); ``pipe`` uses
+        ``soffice --accept=pipe`` (a UDS — required by the gVisor C/R tier, whose bare
+        runsc bundle has no loopback, and whose acceptor survives checkpoint/restore via
+        the accept-retry LD_PRELOAD shim)."""
         if os.environ.get("CLIPPYSHOT_WARM_UNO", "").lower() not in ("1", "true", "yes"):
             return
         import atexit
         import logging
 
-        from clippyshot.libreoffice.uno import UnoServer
+        transport = os.environ.get("CLIPPYSHOT_WARM_UNO_TRANSPORT", "socket").strip().lower()
+        server: WarmConverter
+        if transport == "pipe":
+            from clippyshot.libreoffice.uno_pipe import SofficePipeServer
 
-        server = UnoServer()
+            server = SofficePipeServer()
+        else:
+            from clippyshot.libreoffice.uno import UnoServer
+
+            server = UnoServer()
         try:
             server.start()
         except Exception as exc:
             # Non-fatal: detonate() falls back to cold. Log so warm-tier
-            # misconfiguration (missing unoserver, soffice failure) is diagnosable.
+            # misconfiguration (missing unoserver/soffice, transport mismatch) is
+            # diagnosable.
             logging.getLogger("clippyshot.engine").warning(
-                "warm-UNO warmup failed; falling back to cold conversion: %s", exc
+                "warm-UNO warmup failed (transport=%s); falling back to cold conversion: %s",
+                transport,
+                exc,
             )
             return
         # Reap a spawned server if the interpreter exits before reap (adopted

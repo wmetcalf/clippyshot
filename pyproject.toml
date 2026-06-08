@@ -60,3 +60,10 @@ markers = [
     "docker: requires docker daemon",
 ]
 asyncio_mode = "auto"
+
+[[tool.mypy.overrides]]
+# pyuno (uno, com.sun.star.*) is provided by LibreOffice's interpreter at runtime and is
+# absent in the type-check/dev env. It is used only by the executed-not-imported pipe client
+# (clippyshot/libreoffice/_pipe_convert.py).
+module = ["uno", "com.sun.star.*"]
+ignore_missing_imports = true

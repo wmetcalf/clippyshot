@@ -22,8 +22,22 @@ import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Protocol
 
 from clippyshot.errors import LibreOfficeError
+
+
+class WarmConverter(Protocol):
+    """Structural type for a warm conversion server. Both :class:`UnoServer`
+    (FC tier: TCP ``unoserver``) and ``SofficePipeServer`` (gVisor C/R tier:
+    ``soffice --accept=pipe``) satisfy it, so the runner + engine stay
+    transport-agnostic — they only call ``is_ready()`` + ``convert()``."""
+
+    def is_ready(self) -> bool: ...
+
+    def convert(
+        self, input_path: Path, output_path: Path, label: str, *, timeout_s: float = ...
+    ) -> None: ...
 
 # Filter selection MUST mirror ``LibreOfficeRunner.convert_to_pdf`` so warm output is
 # identical to the cold ``--convert-to`` path. The cold path encodes filter options
@@ -208,6 +222,14 @@ class UnoServer:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+
+    def convert(
+        self, input_path: Path, output_path: Path, label: str, *, timeout_s: float = 120.0
+    ) -> None:
+        """Convert one document via this warm server (the polymorphic warm-converter
+        entry point; ``SofficePipeServer`` has the same signature). Honors the
+        cold-fallback contract of :func:`convert_via_uno` — raises on any hiccup."""
+        convert_via_uno(self, input_path, output_path, label, timeout_s=timeout_s)
 
 
 def convert_via_uno(
