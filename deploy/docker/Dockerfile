@@ -38,8 +38,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
-    CLIPPYSHOT_DATABASE_URL=sqlite:////var/lib/clippyshot/clippyshot-jobs.db \
-    CLIPPYSHOT_JOB_ROOT=/var/lib/clippyshot/jobs
+    BLASTBOX_DATABASE_URL=sqlite:////var/lib/clippyshot/clippyshot-jobs.db \
+    BLASTBOX_JOB_ROOT=/var/lib/clippyshot/jobs
 
 # LibreOffice 25.8 via the official LibreOffice PPA. Ubuntu 24.04 LTS ships
 # LO 24.2.x in its package archive and stays on that major version for the
@@ -117,14 +117,17 @@ RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin clippy \
     && mkdir -p /var/lib/clippyshot \
     && chown clippy:clippy /var/lib/clippyshot
 
-# Install ClippyShot into a venv at /opt/clippyshot. The `blastbox` dependency
-# (the detonation framework) resolves from PyPI like everything else.
+# Install ClippyShot + the host extra into a venv at /opt/clippyshot. The
+# `clippyshot[host]` extra pulls `blastbox[host]` (the detonation framework's
+# ingress + dispatcher) from PyPI, putting the `blastbox` console script
+# (serve/dispatch) + fastapi/uvicorn/psycopg on PATH. The cold WORKER image
+# (Dockerfile.clippyshot-cold-worker, blastbox repo) needs only core, not [host].
 WORKDIR /tmp/build
 COPY pyproject.toml /tmp/build/pyproject.toml
 COPY src /tmp/build/src
 RUN python3 -m venv /opt/clippyshot \
     && /opt/clippyshot/bin/pip install --upgrade pip \
-    && /opt/clippyshot/bin/pip install /tmp/build \
+    && /opt/clippyshot/bin/pip install '/tmp/build[host]' \
     && rm -rf /tmp/build
 
 ENV PATH=/opt/clippyshot/bin:$PATH
@@ -133,8 +136,13 @@ USER clippy
 WORKDIR /var/lib/clippyshot
 VOLUME ["/var/lib/clippyshot"]
 
+# Image-default healthcheck = the pipeline self-test (engine health). The
+# compose `api` service overrides this with an HTTP probe of /v1/healthz.
 HEALTHCHECK --interval=30s --timeout=15s --start-period=20s --retries=3 \
     CMD ["clippyshot", "selftest"]
 
-ENTRYPOINT ["/usr/bin/tini", "--", "clippyshot"]
-CMD ["serve", "--host", "0.0.0.0", "--port", "8000"]
+# Default to the blastbox ingress; compose overrides `command` per service
+# (api → blastbox serve, dispatcher → blastbox dispatch). The CLI `clippyshot`
+# (convert/selftest/version) is still on PATH for one-shot in-process use.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["blastbox", "serve", "--host", "0.0.0.0", "--port", "8000", "--allowed-engines", "clippyshot"]
