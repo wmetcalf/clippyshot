@@ -13,8 +13,7 @@ from pypdf import PdfReader
 
 from clippyshot._argv import assert_positional as _assert_positional
 from clippyshot.errors import RasterizeError
-from clippyshot.limits import Limits
-from clippyshot.runtime.host_limits import max_concurrent_page_ops
+from clippyshot.limits import Limits, max_concurrent_page_ops
 from clippyshot.sandbox.base import Mount, Sandbox, SandboxRequest
 from clippyshot.types import RasterizedPage
 

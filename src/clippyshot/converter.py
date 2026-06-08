@@ -751,7 +751,7 @@ class Converter:
                 # budget (same helper the rasterizer uses) — each worker in
                 # this pool loads a full-page RGB buffer for hash/trim/focus,
                 # so N-way parallelism costs ~N × page_size RAM.
-                from clippyshot.runtime.host_limits import max_concurrent_page_ops
+                from clippyshot.limits import max_concurrent_page_ops
                 max_workers = (
                     min(len(pages), (_os.cpu_count() or 2), max_concurrent_page_ops())
                     if pages else 1

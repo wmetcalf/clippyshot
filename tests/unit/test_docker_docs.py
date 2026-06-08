@@ -25,12 +25,15 @@ def test_readme_runtime_example_sets_tmpfs_owner_for_db():
     assert "--tmpfs /var/lib/clippyshot:rw,nosuid,size=64m,uid=10001,gid=10001" in readme
 
 
-def test_runtime_dockerfile_keeps_worker_invocation_available():
+def test_runtime_dockerfile_runs_on_blastbox_host():
     dockerfile = Path("deploy/docker/Dockerfile").read_text()
 
-    assert 'ENTRYPOINT ["/usr/bin/tini", "--", "clippyshot"]' in dockerfile
-    assert 'CMD ["serve", "--host", "0.0.0.0", "--port", "8000"]' in dockerfile
-    assert "CLIPPYSHOT_JOB_ROOT=/var/lib/clippyshot/jobs" in dockerfile
+    # Generic tini entrypoint; default to the blastbox ingress (compose overrides
+    # command per service). The host stack arrives via the clippyshot[host] extra.
+    assert 'ENTRYPOINT ["/usr/bin/tini", "--"]' in dockerfile
+    assert 'CMD ["blastbox", "serve"' in dockerfile
+    assert "pip install '/tmp/build[host]'" in dockerfile
+    assert "BLASTBOX_JOB_ROOT=/var/lib/clippyshot/jobs" in dockerfile
 
 
 def test_runtime_apparmor_profile_does_not_mix_exec_modifiers():
