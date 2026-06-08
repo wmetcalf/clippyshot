@@ -5,8 +5,9 @@ and asserts the product routes (``/pdf`` + per-page PNG variants) serve the fixe
 artifact files from a DONE job's output dir — reusing the core's confinement via
 ``app.state.serve_artifact_file``.
 
-The DONE-job layout (``job_root/jobs/<id>/output`` + a sealed ``metadata.json``)
-mirrors ``blastbox/tests/host/ingress/test_app.py::_make_done_job``.
+Artifacts + a sealed ``metadata.json`` live under ``<job_root>/<id>/output`` — and
+this test passes ``job_root=tmp_path/"jobs"``, so the on-disk path is
+``tmp_path/jobs/<id>/output`` (mirroring ``blastbox/tests/host/ingress/test_app.py::_make_done_job``).
 """
 
 from __future__ import annotations
@@ -46,7 +47,8 @@ def _make_client(tmp_path: Path) -> tuple[TestClient, InMemoryJobStore]:
 def _make_done_job(tmp_path: Path, store: InMemoryJobStore) -> tuple[Job, Path]:
     """Create a DONE clippyshot job with document.pdf + page-001.png on disk.
 
-    Layout mirrors blastbox's own _make_done_job: job_root/jobs/<id>/output.
+    Output goes under ``<job_root>/<id>/output``; the test's ``job_root`` is
+    ``tmp_path/"jobs"`` (mirrors blastbox's own _make_done_job).
     """
     job = Job.new(engine="clippyshot", filename="test.docx")
     output_dir = tmp_path / "jobs" / job.job_id / "output"
