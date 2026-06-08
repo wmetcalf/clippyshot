@@ -18,7 +18,7 @@ split, and the latter is an image-hashing concern that belongs to ClippyShot's
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Path, Request
 from fastapi.responses import FileResponse
 
 from blastbox.host.ingress.extension import IngressExtension
@@ -38,7 +38,7 @@ def get_pdf(job_id: str, request: Request) -> FileResponse:
 
 
 @router.get("/v1/jobs/{job_id}/pages/{idx}.png")
-def get_page(job_id: str, idx: int, request: Request) -> FileResponse:
+def get_page(job_id: str, request: Request, idx: int = Path(..., ge=1)) -> FileResponse:
     """Serve a rendered page PNG."""
     return request.app.state.serve_artifact_file(
         job_id,
@@ -48,7 +48,7 @@ def get_page(job_id: str, idx: int, request: Request) -> FileResponse:
 
 
 @router.get("/v1/jobs/{job_id}/pages/trimmed/{idx}.png")
-def get_page_trimmed(job_id: str, idx: int, request: Request) -> FileResponse:
+def get_page_trimmed(job_id: str, request: Request, idx: int = Path(..., ge=1)) -> FileResponse:
     """Serve the trimmed version of a page (solid-color bottom removed)."""
     return request.app.state.serve_artifact_file(
         job_id,
@@ -58,7 +58,7 @@ def get_page_trimmed(job_id: str, idx: int, request: Request) -> FileResponse:
 
 
 @router.get("/v1/jobs/{job_id}/pages/focused/{idx}.png")
-def get_page_focused(job_id: str, idx: int, request: Request) -> FileResponse:
+def get_page_focused(job_id: str, request: Request, idx: int = Path(..., ge=1)) -> FileResponse:
     """Serve the focused version of a page (solid margins trimmed on all sides)."""
     return request.app.state.serve_artifact_file(
         job_id,

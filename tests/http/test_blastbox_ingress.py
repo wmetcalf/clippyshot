@@ -138,6 +138,19 @@ def test_trimmed_and_focused_served_when_present(tmp_path):
     assert rf.content == b"FOCUSED"
 
 
+def test_page_idx_below_one_is_422(tmp_path):
+    client, store = _make_client(tmp_path)
+    job, _ = _make_done_job(tmp_path, store)
+    # idx is Path(ge=1): a zero/negative page index (would format to a malformed
+    # page filename) is rejected at the route boundary before any disk lookup.
+    for path in (
+        f"/v1/jobs/{job.job_id}/pages/0.png",
+        f"/v1/jobs/{job.job_id}/pages/trimmed/0.png",
+        f"/v1/jobs/{job.job_id}/pages/focused/0.png",
+    ):
+        assert client.get(path).status_code == 422
+
+
 def test_pdf_route_409_when_not_done(tmp_path):
     """The core DONE-gate (via serve_artifact_file) applies to product routes too."""
     client, store = _make_client(tmp_path)
