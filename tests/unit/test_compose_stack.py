@@ -34,7 +34,11 @@ def test_compose_stack_api_runs_blastbox_serve_socket_free_on_shared_storage():
     compose = Path("deploy/docker/docker-compose.yml").read_text()
     api = _api_block(compose)
 
-    assert "clippyshot-data:/var/lib/clippyshot" in api
+    # job_root is a host-CONSISTENT bind (host path == container path), NOT a
+    # named volume — so dispatcher-launched workers can bind-mount job dirs by
+    # host path. (See the docker-in-docker note in the compose.)
+    assert "${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}:${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}" in api
+    assert "clippyshot-data:" not in compose
     assert "/var/run/docker.sock" not in api
     assert "ports:" in api
     assert '"${CLIPPYSHOT_PORT:-8001}:8000"' in compose
@@ -51,7 +55,7 @@ def test_compose_stack_dispatcher_runs_blastbox_dispatch_with_socket_and_worker_
     dispatcher = _dispatcher_block(compose)
 
     assert compose.count("/var/run/docker.sock:/var/run/docker.sock") == 1
-    assert "clippyshot-data:/var/lib/clippyshot" in dispatcher
+    assert "${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}:${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}" in dispatcher
     assert "/var/run/docker.sock:/var/run/docker.sock" in dispatcher
     assert 'group_add:' in dispatcher
     assert '"${DOCKER_GID:-984}"' in dispatcher

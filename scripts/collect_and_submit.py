@@ -7,8 +7,12 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-SOURCE = os.path.expanduser("~/cstorage/mbzdls")
-API = "http://127.0.0.1:8000"
+SOURCE = os.environ.get("CLIPPYSHOT_CORPUS", os.path.expanduser("~/cstorage/mbzdls"))
+# Default to the compose host port (8001). Override with CLIPPYSHOT_API to submit
+# to a remote stack, e.g. CLIPPYSHOT_API=http://172.18.101.15:8001 (toolz2).
+API = os.environ.get("CLIPPYSHOT_API", "http://127.0.0.1:8001")
+# blastbox.host ingress REQUIRES an engine form field (the bespoke api.py did not).
+ENGINE = os.environ.get("CLIPPYSHOT_ENGINE_NAME", "clippyshot")
 N_PER_TYPE = int(sys.argv[1]) if len(sys.argv) > 1 else 50
 
 WANTED_EXTS = {
@@ -76,7 +80,7 @@ for line in proc.stdout:
         r = subprocess.run(
             ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}",
              "-X", "POST", f"{API}/v1/jobs",
-             "-F", f"file=@{path}", "--max-time", "10"],
+             "-F", f"file=@{path}", "-F", f"engine={ENGINE}", "--max-time", "10"],
             capture_output=True, text=True, timeout=15
         )
         if r.stdout.strip() == "202":
