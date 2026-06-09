@@ -10,7 +10,11 @@
 services:
   dispatcher-gvisor:
     image: ${CLIPPYSHOT_IMAGE:-clippyshot:dev}
-    command: ["blastbox", "dispatch"]   # image default is the API server; run the dispatch loop
+    # Clear stale runsc state + checkpoint on startup, THEN run the dispatch loop. The C/R
+    # snapshot is per-process and rebuilt fresh; a leftover checkpoint.img from a prior run
+    # makes `runsc checkpoint` fail "file exists" (it won't overwrite), so the sidecar could
+    # not survive a restart without this. (Image default command is the API server.)
+    command: ["sh", "-c", "rm -rf /var/lib/blastbox/gvisor-snapshot /var/lib/blastbox/gvisor-base-* 2>/dev/null; rm -rf /var/lib/blastbox/gvisor-root/* 2>/dev/null; exec blastbox dispatch"]
     restart: unless-stopped
     # The image default healthcheck (`clippyshot selftest`) runs the COLD container sandbox,
     # which refuses to start as root (this sidecar runs as uid 0 for runsc). It's the wrong
