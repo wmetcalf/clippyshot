@@ -365,10 +365,32 @@ class ClippyShotEngine:
         # wins last via the override (preserving the [1, 600] clamp).
         cs_timeout = max(1, min(600, limits.timeout_s))
         cs_limits = CSLimits.from_env(timeout_s=cs_timeout)
+
+        # Per-engine scanner args from the CLIPPYSHOT_* env namespace. The blastbox
+        # dispatcher forwards job.params → worker extra_env for keys matching
+        # ^[A-Z][A-Z0-9_]*$ (CLIPPYSHOT_* is allowed), so the UI's QR/OCR toggles
+        # arrive here as env vars. Defaults preserve the framework-proof behaviour:
+        # QR on, OCR off. Values are validated/clamped (untrusted client params).
+        def _flag(name: str, default: bool) -> bool:
+            v = os.environ.get(name)
+            return default if v is None else v.strip().lower() in ("1", "true", "yes", "on")
+
+        ocr_lang = (os.environ.get("CLIPPYSHOT_OCR_LANG", "") or "").strip() or "eng+Latin"
+        if not re.fullmatch(r"[A-Za-z0-9_+\-]+", ocr_lang):
+            ocr_lang = "eng+Latin"
+        try:
+            ocr_psm = int(os.environ.get("CLIPPYSHOT_OCR_PSM", "3"))
+        except (TypeError, ValueError):
+            ocr_psm = 3
+        ocr_psm = min(13, max(0, ocr_psm))
+
         cs_opts = ConvertOptions(
             limits=cs_limits,
-            qr_enabled=True,
-            ocr_enabled=False,  # OCR is opt-in; keep fast for framework proof
+            qr_enabled=_flag("CLIPPYSHOT_QR", True),
+            ocr_enabled=_flag("CLIPPYSHOT_OCR", False),
+            ocr_all=_flag("CLIPPYSHOT_OCR_ALL", False),
+            ocr_lang=ocr_lang,
+            ocr_psm=ocr_psm,
         )
 
         converter = self._get_converter()

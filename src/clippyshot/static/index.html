@@ -272,9 +272,14 @@ async function submitFile(file) {
 
   const fd = new FormData();
   fd.append('file', file);
-  fd.append('qr', document.getElementById('opt-qr').checked ? '1' : '0');
-  fd.append('ocr', document.getElementById('opt-ocr').checked ? '1' : '0');
-  fd.append('ocr_all', document.getElementById('opt-ocr-all').checked ? '1' : '0');
+  fd.append('engine', 'clippyshot');
+  // Per-engine scanner args: the blastbox ingress takes engine + params[], and the
+  // dispatcher forwards matching params → worker env. ClippyShot reads its
+  // CLIPPYSHOT_* namespace (engine.py), so the QR/OCR toggles ride that path.
+  const onoff = (id) => document.getElementById(id).checked ? '1' : '0';
+  fd.append('params', 'CLIPPYSHOT_QR=' + onoff('opt-qr'));
+  fd.append('params', 'CLIPPYSHOT_OCR=' + onoff('opt-ocr'));
+  fd.append('params', 'CLIPPYSHOT_OCR_ALL=' + onoff('opt-ocr-all'));
 
   try {
     // Use async jobs API so we can poll status
