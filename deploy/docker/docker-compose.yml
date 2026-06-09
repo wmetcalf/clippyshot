@@ -128,6 +128,8 @@ services:
     group_add:
       - "${DOCKER_GID:-984}"
     tmpfs:
+      # Pure cold dispatcher — no warm scratch here (FC warm runs in the dispatcher-fc
+      # sidecar with its own large /tmp; gVisor in dispatcher-gvisor). Keep this minimal.
       - /tmp:rw,nosuid,size=64m
     volumes:
       # Host-CONSISTENT path, NOT a named volume: the dispatcher launches workers

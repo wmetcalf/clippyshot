@@ -1,0 +1,58 @@
+# Firecracker warm-pool SIDECAR — a dedicated, socket-less warm dispatcher.
+#   ./clippyshot-compose -f docker-compose.yml -f docker-compose.firecracker.yml up -d dispatcher-fc
+#
+# FC's isolation is hardware (host KVM), so this needs ONLY /dev/kvm + the kvm group —
+# it keeps cap_drop=ALL + read_only + no-new-privileges, holds NO docker socket / no ports.
+# BLASTBOX_DISPATCH_WARM_ONLY makes it claim-gate on free warm slots and never cold-fall-back,
+# so overflow stays queued for the hardened cold dispatcher. This confines the KVM privilege
+# to a single-purpose box, OFF the socket-holding main dispatcher.
+services:
+  dispatcher-fc:
+    image: ${CLIPPYSHOT_IMAGE:-clippyshot:dev}
+    command: ["blastbox", "dispatch"]
+    restart: unless-stopped
+    # Image default healthcheck (`clippyshot selftest`) is the wrong probe for a warm-only
+    # dispatcher; liveness is covered by restart: unless-stopped.
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    devices:
+      - /dev/kvm
+    group_add:
+      - "${KVM_GID:-994}"
+    environment:
+      - BLASTBOX_DATABASE_URL=postgresql://${POSTGRES_USER:-clippyshot}:${POSTGRES_PASSWORD:-clippyshot-dev}@postgres:5432/${POSTGRES_DB:-clippyshot}
+      - BLASTBOX_JOB_ROOT=${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}/jobs
+      - BLASTBOX_ENGINES=clippyshot=${CLIPPYSHOT_WORKER_IMAGE:-clippyshot-cold-worker:dev}
+      # --- sidecar primitive ---
+      - BLASTBOX_DISPATCH_WARM_ONLY=1
+      - BLASTBOX_POOL_RUNTIME=firecracker
+      - BLASTBOX_POOL_WARM_SNAPSHOT=1
+      - BLASTBOX_POOL_WARM_SIZE=${BLASTBOX_FC_WARM_SIZE:-16}
+      - BLASTBOX_POOL_CEILING=${BLASTBOX_FC_CEILING:-16}
+      - BLASTBOX_POOL_BURST_SIZE=0
+      # --- FC config ---
+      - BLASTBOX_FC_BIN=/var/lib/blastbox-fc/firecracker
+      - BLASTBOX_FC_KERNEL=/var/lib/blastbox-fc/vmlinux
+      - BLASTBOX_FC_ROOTFS=/var/lib/blastbox-fc/rootfs.ext4
+      - BLASTBOX_FC_VCPU=${BLASTBOX_FC_VCPU:-2}
+      - BLASTBOX_FC_MEM_MIB=${BLASTBOX_FC_MEM_MIB:-2048}
+      - BLASTBOX_FC_OUTDISK_MIB=${BLASTBOX_FC_OUTDISK_MIB:-600}
+    volumes:
+      # job_root (host-consistent, same as the main dispatcher) — read the staged input.
+      - "${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}/jobs:${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}/jobs"
+      # FC artifacts (firecracker binary + vmlinux + rootfs.ext4), read-only.
+      - "/home/coz/clippyshot-fc:/var/lib/blastbox-fc:ro"
+    tmpfs:
+      # FC warm-base memory snapshot (BLASTBOX_FC_SCRATCH defaults to /tmp/blastbox-fc-slots,
+      # not env-overridable) + per-slot outdisks. tmpfs = fast warm restores; sized for 16 slots.
+      - /tmp:rw,exec,nosuid,size=20g
+    networks:
+      - backend
