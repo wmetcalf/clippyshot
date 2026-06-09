@@ -1,10 +1,12 @@
 """Warm-soffice over a UNO **pipe** — the gVisor C/R warm transport.
 
-The TCP ``unoserver`` path (``uno.py``) needs loopback, which a bare ``runsc``
-bundle lacks (no CNI configures ``lo``; gVisor doesn't implement ``SIOCSIFADDR``),
-and its acceptor does not survive gVisor checkpoint/restore. A warm
-``soffice --accept=pipe`` (Unix-domain pipe) needs **no network** and — with the
-accept-retry ``LD_PRELOAD`` shim (``deploy/gvisor/accept_retry.c``) — **survives
+The FC tier's TCP ``unoserver`` (``uno.py``, binds ``127.0.0.1:2003``) cannot run
+under the gVisor worker: its seccomp policy permits only ``AF_UNIX``/``AF_LOCAL``
+sockets — every networking-capable address family is blocked as defence-in-depth on
+top of ``--network=none`` (``deploy/seccomp/clippyshot.seccomp.json``) — so an
+``AF_INET`` ``socket()`` fails before it can bind. A warm ``soffice --accept=pipe``
+uses an ``AF_UNIX`` named pipe (no network socket) and — with the accept-retry
+``LD_PRELOAD`` shim (``deploy/gvisor/accept_retry.c``) — is verified to **survive
 C/R**: the shim retries the acceptor's EINTR-interrupted ``accept()`` on restore;
 the client just retries ``connect()``. Conversion is byte-identical to the cold
 ``soffice --convert-to`` path (same LibreOffice engine + the same

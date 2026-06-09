@@ -256,10 +256,10 @@ class ClippyShotEngine:
         behaviour change for the docker/sandbox tier.
 
         Transport (``CLIPPYSHOT_WARM_UNO_TRANSPORT``): ``socket`` (default) uses the TCP
-        ``unoserver`` (the FC tier — loopback is available there); ``pipe`` uses
-        ``soffice --accept=pipe`` (a UDS — required by the gVisor C/R tier, whose bare
-        runsc bundle has no loopback, and whose acceptor survives checkpoint/restore via
-        the accept-retry LD_PRELOAD shim)."""
+        ``unoserver`` (the FC tier); ``pipe`` uses ``soffice --accept=pipe`` (an AF_UNIX
+        socket — required by the gVisor C/R tier, whose worker seccomp policy permits only
+        AF_UNIX sockets so the TCP unoserver can't bind, and whose UDS acceptor survives
+        checkpoint/restore via the accept-retry LD_PRELOAD shim)."""
         if os.environ.get("CLIPPYSHOT_WARM_UNO", "").lower() not in ("1", "true", "yes"):
             return
         import atexit
