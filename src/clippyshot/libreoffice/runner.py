@@ -478,7 +478,18 @@ class LibreOfficeRunner:
                     return warm_pdf
 
             last_error = None
+            # L2: one cumulative wall-clock budget across the WHOLE filter×name fallback, so a
+            # doc that times out the first attempt can't walk every remaining filter/name combo
+            # at limits.timeout_s each (the per-call cap bounds ONE attempt, not the product).
+            # The first attempt always runs; once the budget is spent we stop trying more.
+            # The outer worker_timeout_s SIGKILL remains the hard backstop.
+            import time as _time
+
+            _fallback_deadline = _time.monotonic() + max(1, limits.timeout_s)
             for attempt, filt in enumerate(filters_to_try):
+                if attempt > 0 and _time.monotonic() >= _fallback_deadline:
+                    last_error = last_error or "soffice fallback budget exhausted"
+                    break
                 # Clean output dir between attempts
                 for old_pdf in output_dir.glob("*.pdf"):
                     old_pdf.unlink()
@@ -500,6 +511,8 @@ class LibreOfficeRunner:
                     name_attempts.append((original_staged_input, original_name))
 
                 for name_idx, (attempt_input, attempt_name) in enumerate(name_attempts):
+                    if name_idx > 0 and _time.monotonic() >= _fallback_deadline:
+                        break  # L2: cumulative fallback budget spent
                     sandbox_input = Path("/sandbox/in") / attempt_name
                     argv = [
                         self._soffice,

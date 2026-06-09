@@ -136,13 +136,24 @@ def parse_memory_gb(spec: str) -> float:
         return 0.0
 
 
-def max_concurrent_page_ops(worker_memory_spec: str | None = None) -> int:
+def max_concurrent_page_ops(
+    worker_memory_spec: str | None = None, per_page_peak_mb: float | None = None
+) -> int:
     """Bound parallel page-level operations by the worker's memory budget.
 
     Used by both the rasterizer (shard count) and the converter's per-page
     fan-out (hash/trim/focus/scanners). Both load the full page image into
     memory; running too many at once on a memory-constrained worker risks an
     OOM-kill by the cgroup.
+
+    ``per_page_peak_mb`` lets a caller that knows the ACTUAL largest page (the
+    rasterizer reads per-page mediaboxes) push the peak estimate ABOVE the
+    ``_PER_PAGE_PEAK_MB`` default — a 14400pt page at 150 DPI is ~2.7 GB, ~13×
+    the heuristic — so an oversized page collapses concurrency to 1 instead of
+    fanning out N concurrent multi-GB renders. It only ever RAISES the estimate
+    (never relaxes the conservative default for normal pages). The cold tier's
+    cgroup OOM-kills cleanly either way; this protects the gVisor warm tier,
+    which runs without a per-worker memory cgroup.
     """
     mem_gb = parse_memory_gb(
         worker_memory_spec
@@ -152,5 +163,6 @@ def max_concurrent_page_ops(worker_memory_spec: str | None = None) -> int:
     # Leave half the worker memory for the Python runtime, LibreOffice, and
     # transient allocations.
     usable_mb = max(1.0, mem_gb * 1024.0 * 0.5)
-    mem_cap = max(1, int(usable_mb // _PER_PAGE_PEAK_MB))
+    peak_mb = max(float(_PER_PAGE_PEAK_MB), per_page_peak_mb or 0.0)
+    mem_cap = max(1, int(usable_mb // peak_mb))
     return max(1, min(_ABSOLUTE_PAGE_OP_CEILING, mem_cap))

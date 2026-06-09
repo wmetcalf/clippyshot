@@ -44,17 +44,25 @@ def _build_converter() -> Converter:
 
 
 def _convert_cmd(args: argparse.Namespace) -> int:
-    limits = Limits.from_env(
-        timeout_s=args.timeout,
-        max_pages=args.max_pages,
-        dpi=args.dpi,
-    )
-    # Apply CLI overrides that from_env doesn't accept directly.
-    limits = dataclasses.replace(
-        limits,
-        skip_blanks=args.skip_blanks,
-        disclose_security_internals=args.disclose_security_internals,
-    )
+    # Splat ONLY the flags the user actually passed (default=None) so an unset flag falls through
+    # to the CLIPPYSHOT_* env var via from_env, then the dataclass default (L4). Passing the
+    # argparse defaults unconditionally clobbered the env.
+    overrides: dict = {}
+    if args.timeout is not None:
+        overrides["timeout_s"] = args.timeout
+    if args.max_pages is not None:
+        overrides["max_pages"] = args.max_pages
+    if args.dpi is not None:
+        overrides["dpi"] = args.dpi
+    limits = Limits.from_env(**overrides)
+    # Apply CLI-only flags that from_env doesn't accept directly — only when explicitly passed.
+    replace_kw: dict = {}
+    if args.skip_blanks is not None:
+        replace_kw["skip_blanks"] = args.skip_blanks
+    if args.disclose_security_internals is not None:
+        replace_kw["disclose_security_internals"] = args.disclose_security_internals
+    if replace_kw:
+        limits = dataclasses.replace(limits, **replace_kw)
     options = ConvertOptions(limits=limits)
     out_dir = Path(args.outdir)
     try:
@@ -99,18 +107,22 @@ def build_parser() -> argparse.ArgumentParser:
     pc = sub.add_parser("convert", help="convert a single document")
     pc.add_argument("input")
     pc.add_argument("-o", "--outdir", default="out")
-    pc.add_argument("--dpi", type=int, default=150)
-    pc.add_argument("--max-pages", type=int, default=50)
-    pc.add_argument("--timeout", type=int, default=60)
+    # default=None so an unset flag falls through to CLIPPYSHOT_* env (via Limits.from_env) and
+    # then the dataclass default — flag > env > default. With argparse defaults the flag value
+    # would always clobber the env (L4). The dataclass defaults are dpi=150/max_pages=50/
+    # timeout_s=60/skip_blanks=True.
+    pc.add_argument("--dpi", type=int, default=None)
+    pc.add_argument("--max-pages", type=int, default=None)
+    pc.add_argument("--timeout", type=int, default=None)
     pc.add_argument("--json", action="store_true", help="emit metadata.json on stdout")
     pc.add_argument("--quiet", action="store_true")
     pc.add_argument("--skip-blanks", dest="skip_blanks", action="store_true",
-                    default=False, help="drop blank pages from the output")
+                    default=None, help="drop blank pages from the output")
     pc.add_argument(
         "--disclose-security-internals",
         dest="disclose_security_internals",
         action="store_true",
-        default=False,
+        default=None,
         help=(
             "include sandbox backend name and AppArmor profile names in "
             "metadata.json security block (default: redacted)"

@@ -27,6 +27,25 @@ _SANDBOX_IN = Path("/sandbox/in")
 _SANDBOX_OUT = Path("/sandbox/out")
 
 
+def _max_page_peak_mb(
+    page_sizes_mm: list[tuple[float, float]] | None, dpi: int
+) -> float:
+    """Worst-case in-RAM RGBA buffer (MB) of the LARGEST page at ``dpi``.
+
+    Returns 0.0 when page sizes are unknown (callers then fall back to the
+    default per-page heuristic). 4 bytes/px (RGBA) is the conservative peak; the
+    PNG encoder also holds the decoded buffer during the giant-page render.
+    """
+    if not page_sizes_mm:
+        return 0.0
+    peak = 0.0
+    for w_mm, h_mm in page_sizes_mm:
+        w_px = (w_mm / _MM_PER_INCH) * dpi
+        h_px = (h_mm / _MM_PER_INCH) * dpi
+        peak = max(peak, w_px * h_px * 4.0 / (1024.0 * 1024.0))
+    return peak
+
+
 @runtime_checkable
 class Rasterizer(Protocol):
     name: str
@@ -146,7 +165,13 @@ class ShardingRasterizer(ABC):
         #     the worker's cgroup.
         cpus = os.cpu_count() or 2
         cpu_budget = max(1, cpus // 2)
-        mem_budget = max_concurrent_page_ops()
+        # Size-aware memory budget: a page rendered from an oversized mediabox (e.g. a
+        # 14400pt SinglePageSheets sheet → ~30000px → ~2.7 GB RGBA) costs far more than the
+        # 200 MB/page heuristic, so derive the peak from the ACTUAL largest page and let it
+        # collapse the shard count to 1 — N concurrent multi-GB renders would otherwise exhaust
+        # a host without a per-worker memory cgroup (the gVisor warm tier).
+        peak_mb = _max_page_peak_mb(page_sizes_mm, dpi)
+        mem_budget = max_concurrent_page_ops(per_page_peak_mb=peak_mb)
         shard_count = min(cpu_budget, mem_budget, max_pages)
         if max_pages < _MIN_PAGES_FOR_SHARDING or shard_count <= 1:
             # Single-shot fast path: one invocation for the whole range.

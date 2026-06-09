@@ -71,5 +71,12 @@ class PdfiumRasterizer(ShardingRasterizer):
             "--format", "png",
             "--output", str(out_dir),
             "--prefix", "page-",
+            # Render serially WITHIN this invocation. The outer ShardingRasterizer already
+            # parallelises across page-range subprocesses; pypdfium2's own default multiprocessing
+            # would multiply that — each internal worker holds a full-page RGBA buffer, so on an
+            # oversized page (~2.7 GB each) the internal fan-out is a host-memory-exhaustion
+            # multiplier (measured ~+425% RSS). One render per shard keeps the aggregate bounded
+            # by the size-aware shard_count.
+            "--processes", "1",
             "--", str(sandbox_pdf),
         ]
