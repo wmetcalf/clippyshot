@@ -41,6 +41,9 @@ services:
       - BLASTBOX_ENGINES=clippyshot=${CLIPPYSHOT_WORKER_IMAGE:-clippyshot-cold-worker:dev}
       # --- sidecar primitive ---
       - BLASTBOX_DISPATCH_WARM_ONLY=1
+      # Concurrency MUST match warm_size — the warm dispatch path blocks until the job
+      # finishes, so N threads are needed to keep N slots busy (default 1 starves the pool).
+      - BLASTBOX_DISPATCH_CONCURRENCY=${BLASTBOX_GVISOR_WARM_SIZE:-4}
       - BLASTBOX_POOL_RUNTIME=gvisor
       - BLASTBOX_POOL_WARM_SIZE=${BLASTBOX_GVISOR_WARM_SIZE:-4}
       - BLASTBOX_POOL_CEILING=${BLASTBOX_GVISOR_CEILING:-8}
