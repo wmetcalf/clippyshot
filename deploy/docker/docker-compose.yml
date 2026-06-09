@@ -95,6 +95,11 @@ services:
       # EngineSpec registry: NAME=image:tag. The worker image is built separately
       # from the blastbox repo's Dockerfile.clippyshot-cold-worker (see README).
       - BLASTBOX_ENGINES=clippyshot=${CLIPPYSHOT_WORKER_IMAGE:-clippyshot-cold-worker:dev}
+      # Per-engine forwardable-param allowlist (default-deny). Only these client
+      # job.params reach the worker as env — ClippyShot's scanner toggles, which the
+      # engine re-validates/clamps. Blocks client override of other CLIPPYSHOT_* the
+      # worker reads (sandbox selection / insecure-fallback / resource limits).
+      - BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS=${BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS:-CLIPPYSHOT_OCR,CLIPPYSHOT_OCR_ALL,CLIPPYSHOT_QR,CLIPPYSHOT_OCR_LANG,CLIPPYSHOT_OCR_PSM}
       # Concurrency: empty = 1 dispatch loop. Set to fan out claim+launch.
       - BLASTBOX_DISPATCH_CONCURRENCY=${BLASTBOX_DISPATCH_CONCURRENCY:-}
       - BLASTBOX_WORKER_TIMEOUT_S=${BLASTBOX_WORKER_TIMEOUT_S:-300}
