@@ -27,6 +27,7 @@ Usage::
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -451,6 +452,19 @@ class ClippyShotEngine:
 
         # ── Payload root ─────────────────────────────────────────────────────
         render = meta.get("render", {})
+        # Embed the FULL clippyshot metadata (legacy metadata.json schema) as a
+        # single JSON string so the host UI can render the complete detail view:
+        # detection extras (magika_label/mime, libmagic_mime, agreed_with_extension),
+        # render stats (dpi, blank_pages, duration_ms timings, sheet inventory) and
+        # per-page derivative stats (trimmed + focused: removed_percent,
+        # background_color, dimensions). The typed envelope only carries a thin
+        # slice of this; the JSON string carries the rest losslessly. A scalar
+        # string adds no node-count/depth pressure (the depth guard is
+        # string-aware). Fail-open: a serialization hiccup must never fail the job.
+        try:
+            metadata_json = json.dumps(meta, default=str)
+        except (TypeError, ValueError):
+            metadata_json = ""
         payload = EmbeddedResource(
             embedded_path="/",
             content_type=det.get("mime") or "application/octet-stream",
@@ -462,6 +476,7 @@ class ClippyShotEngine:
                     "page_count_rendered": render.get("page_count_rendered", 0),
                     "truncated": bool(render.get("truncated", False)),
                     "clippyshot_version": meta.get("clippyshot_version", ""),
+                    "clippyshot_metadata": metadata_json,
                 }
             ),
             children=list(page_nodes),

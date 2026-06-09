@@ -424,7 +424,74 @@ async function loadResult(jobId, opts) {
   try {
     const r = await fetch(API+'/v1/jobs/'+jobId+'/metadata');
     if (!r.ok) return;
-    const meta = await r.json();
+    let meta = await r.json();
+
+    // --- compat shim: the backend now returns the blastbox ENVELOPE (engine/status/detected/
+    // artifacts/payload), but this UI was written for the legacy clippyshot metadata.json schema
+    // (input/render/pages). Old-schema responses (with meta.render present) pass through untouched.
+    if (meta && meta.payload && meta.render === undefined) {
+      const env = meta;
+      const pm = (env.payload.metadata && env.payload.metadata.fields) || {};
+
+      // The original upload filename lives in the job store (the untrusted input
+      // file is deleted post-conversion), so always pull it from the job record.
+      let jobInfo = {};
+      try { const jr = await fetch(API+'/v1/jobs/'+jobId); if (jr.ok) jobInfo = await jr.json(); } catch (e) {}
+
+      // Preferred path: the engine embeds the FULL legacy metadata.json as a JSON
+      // string in the payload record. Parse it and use it directly — this carries
+      // the complete detail view (detection extras: magika/libmagic/extension-match;
+      // render stats: dpi/blank_pages/duration_ms/sheets; per-page trimmed AND
+      // focused stats: removed_percent/background_color/dimensions) that the thin
+      // typed envelope drops.
+      let full = null;
+      if (typeof pm.clippyshot_metadata === 'string' && pm.clippyshot_metadata) {
+        try { full = JSON.parse(pm.clippyshot_metadata); } catch (e) { full = null; }
+      }
+
+      if (full && (full.render || full.pages)) {
+        full.input = full.input || {};
+        full.input.detected = full.input.detected || env.detected || {};
+        if (jobInfo.filename) full.input.filename = jobInfo.filename;
+        full.input.sha256 = full.input.sha256 || env.input_sha256;
+        meta = full;                                   // legacy schema → every card + page renders fully
+      } else {
+        // Fallback for jobs sealed before the embed (no clippyshot_metadata field):
+        // remap the thin envelope so pages still render, with reduced detail.
+        const kids = env.payload.children || [];
+        const arts = env.artifacts || [];
+        const pad = (i) => 'page-' + String(i).padStart(3, '0');
+        const hasArt = (suffix) => (i) => arts.some(a => a.path === pad(i) + suffix);
+        const hasTrim = hasArt('-trimmed.png'), hasFocus = hasArt('-focused.png');
+        env.input = {
+          filename: jobInfo.filename,
+          size_bytes: undefined,            // untrusted input is deleted post-conversion
+          sha256: env.input_sha256,
+          detected: env.detected || {},
+        };
+        env.render = {
+          page_count_total: pm.page_count_total,
+          page_count_rendered: pm.page_count_rendered,
+          truncated: pm.truncated,
+          blank_pages: [],
+          dpi: undefined,
+          duration_ms: {},
+        };
+        env.pages = kids.filter((c) => c && c._type === 'page').map((c) => {
+          const h = (c.hashes || []).reduce((o, x) => (o[x.algo] = x.value, o), {});
+          const rec = (c.children || []).find((x) => x && x._type === 'record');
+          const sf = (rec && rec.fields) || {};
+          return {
+            index: c.index,
+            trimmed: hasTrim(c.index) ? { phash: h.phash } : null,
+            focused: hasFocus(c.index) ? {} : null,
+            phash: h.phash, colorhash: h.colorhash, sha256: h.sha256,
+            qr: (sf.qr_count > 0) ? { count: sf.qr_count } : null,
+            ocr: (sf.ocr_text || sf.ocr_char_count) ? { text: sf.ocr_text, char_count: sf.ocr_char_count } : null,
+          };
+        });
+      }
+    }
 
     // Input card
     const inp = meta.input || {};
