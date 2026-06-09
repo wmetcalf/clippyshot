@@ -1,7 +1,16 @@
 """Tests for ClippyShotEngine.warmup() — the warm-tier server seam."""
 from __future__ import annotations
 
+import pytest
+
 from clippyshot.engine import ClippyShotEngine
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_warm_profile(tmp_path, monkeypatch):
+    # warmup() writes the hardened LO profile to CLIPPYSHOT_WARM_PROFILE_DIR; redirect it to a
+    # tmp dir so tests don't write into /tmp/.clippyshot-warm-profile.
+    monkeypatch.setenv("CLIPPYSHOT_WARM_PROFILE_DIR", str(tmp_path / "warm-profile"))
 
 
 def test_warmup_noop_when_env_unset(monkeypatch):
@@ -50,6 +59,63 @@ def test_warmup_is_nonfatal_on_start_failure(monkeypatch):
     )
     eng = ClippyShotEngine()
     eng.warmup()  # must NOT raise — falls back to cold
+    assert eng._uno_server is None
+
+
+def test_warmup_writes_and_passes_hardened_profile(monkeypatch, tmp_path):
+    # SECURITY (H1): the warm server must boot with the hardened LO profile (macro/Basic/Java
+    # lockdown), captured warm in the snapshot — not LibreOffice defaults.
+    monkeypatch.setenv("CLIPPYSHOT_WARM_UNO", "1")
+    prof = tmp_path / "wp"
+    monkeypatch.setenv("CLIPPYSHOT_WARM_PROFILE_DIR", str(prof))
+    captured = {}
+
+    class FakeServer:
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def convert(self, *a):
+            pass
+
+    def _factory(*a, **k):
+        captured["user_installation"] = k.get("user_installation")
+        return FakeServer()
+
+    monkeypatch.setattr("clippyshot.libreoffice.uno.UnoServer", _factory)
+    eng = ClippyShotEngine()
+    eng.warmup()
+    xcu = prof / "user" / "registrymodifications.xcu"
+    assert xcu.exists(), "warmup() must write the hardened profile before starting the server"
+    body = xcu.read_text()
+    assert "DisableMacrosExecution" in body and "MacroSecurityLevel" in body
+    assert captured["user_installation"] == "file://%s" % prof.resolve()
+
+
+def test_warmup_fails_closed_when_profile_unwritable(monkeypatch):
+    # If the hardened profile can't be written, warmup() must NOT start an unhardened server —
+    # it falls back to the cold path (which writes its own per-job hardened profile).
+    monkeypatch.setenv("CLIPPYSHOT_WARM_UNO", "1")
+    started = []
+
+    class FakeServer:
+        def start(self):
+            started.append(True)
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr("clippyshot.libreoffice.uno.UnoServer", lambda *a, **k: FakeServer())
+
+    def _boom(self):
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr("clippyshot.libreoffice.profile.HardenedProfile.write", _boom)
+    eng = ClippyShotEngine()
+    eng.warmup()  # must NOT raise
+    assert started == [], "must not start an unhardened warm server"
     assert eng._uno_server is None
 
 

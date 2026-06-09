@@ -589,9 +589,10 @@ CLIPPYSHOT_SANDBOX=nsjail .venv/bin/clippyshot convert input.docx -o out/
 CLIPPYSHOT_SANDBOX=bwrap  .venv/bin/clippyshot convert input.docx -o out/
 ```
 
-For `bwrap` on a host that hasn't installed `python3-seccomp`, you also
-need `CLIPPYSHOT_WARN_ON_INSECURE=1` — the backend refuses to activate
-without the BPF filter otherwise.
+`bwrap` applies **no seccomp syscall filter** (not implemented — it runs
+namespaces + cap-drop + AppArmor only), so it always reports insecure on the
+seccomp axis and needs `CLIPPYSHOT_WARN_ON_INSECURE=1` to activate. Prefer the
+`nsjail` backend, which enforces a real seccomp filter via its KAFEL policy.
 
 ### Run the API server locally (nsjail backend)
 
@@ -611,8 +612,10 @@ Notes:
   rlimits, and KAFEL-based seccomp via `--seccomp_policy
   /etc/clippyshot/seccomp.policy` (denylist-style — blocks only the
   dangerous syscalls, same philosophy as Docker's default).
-- `bwrap` gives you the same namespace model with a libseccomp BPF
-  filter. Slightly faster to spin up than nsjail; fewer knobs.
+- `bwrap` gives you the same namespace model + cap-drop + AppArmor, but
+  **no seccomp syscall filter** (not implemented). Slightly faster to spin up
+  than nsjail; fewer knobs — but always insecure on the seccomp axis, so prefer
+  `nsjail` for untrusted input.
 - Both refuse to activate when any of their security probes fail
   (AppArmor missing, seccomp unavailable, etc.); set
   `CLIPPYSHOT_WARN_ON_INSECURE=1` to override.

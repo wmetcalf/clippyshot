@@ -122,6 +122,31 @@ def test_zip_bomb_with_docx_extension_is_rejected(tmp_path: Path):
     }
 
 
+def test_zip_bomb_unknown_magika_with_allowlisted_ext_is_rejected(tmp_path, monkeypatch):
+    """L1: a zip-bomb Magika can't classify ('unknown') but whose extension is an allowlisted
+    OOXML type must STILL hit the structural bomb gate — not get accepted-with-warning and burn
+    a full sandboxed convert slot."""
+    import zipfile
+    from types import SimpleNamespace
+
+    bomb = tmp_path / "bomb.xlsx"
+    with zipfile.ZipFile(bomb, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        zf.writestr("[Content_Types].xml", b"<x/>")  # OOXML marker present...
+        zf.writestr("payload.bin", b"A" * (10 * 1024 * 1024))  # ...but ratio >> 100 (a bomb)
+    detector = Detector()
+    monkeypatch.setattr(
+        detector._magika,
+        "identify_path",
+        lambda p: SimpleNamespace(
+            output=SimpleNamespace(label="unknown", mime_type="application/octet-stream"),
+            score=0.0,
+        ),
+    )
+    with pytest.raises(DetectionError) as ei:
+        detector.detect(bomb)
+    assert ei.value.reason == "ooxml_structural_check_failed"
+
+
 def test_zip_without_content_types_xml_is_rejected(tmp_path: Path):
     """A zip that doesn't contain [Content_Types].xml is not a valid OOXML
     container (H-3)."""

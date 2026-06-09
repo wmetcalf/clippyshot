@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 from clippyshot.errors import SandboxError, SandboxUnavailable
-from clippyshot.sandbox.base import Sandbox, SandboxRequest
+from clippyshot.sandbox.base import SandboxRequest
 from clippyshot.types import SandboxResult
 
 
@@ -125,29 +125,26 @@ class BwrapSandbox:
                 "note=set_--pids-limit_256_in_docker_or_configure_k8s_pod_PID_limit"
             )
 
-        # Seccomp: bwrap expects a pre-built BPF program fed via --seccomp
-        # <fd>. Building that program requires the libseccomp Python
-        # bindings. If they are not available we continue without a filter
-        # and log a WARN — the nsjail backend (preferred in production)
-        # still enforces seccomp via its KAFEL policy file.
-        self._seccomp_active = _LIBSECCOMP_AVAILABLE
-        if self._seccomp_active:
-            _log.info("bwrap_seccomp_enabled library=libseccomp-python")
-        else:
-            # ERROR, not WARN: with no BPF filter the bwrap backend runs
-            # untrusted soffice behind namespaces+caps only. select_sandbox
-            # refuses this in auto mode, but an operator who set
-            # CLIPPYSHOT_WARN_ON_INSECURE=1 (e.g. for the container backend)
-            # would otherwise unlock this degraded bwrap mode silently. Make
-            # it loud so it can't be missed in logs. Install python3-libseccomp.
-            _log.error(
-                "bwrap_seccomp_unavailable reason=libseccomp_python_not_available "
-                "impact=soffice_runs_without_syscall_filter "
-                "fix=install_python3-libseccomp note=nsjail_backend_has_seccomp_via_KAFEL"
-            )
+        # Seccomp: bwrap expects a pre-built BPF program fed via --seccomp <fd>. This backend
+        # NEVER builds that program and NEVER passes --seccomp (the imported `seccomp` library
+        # is unused — see _build_argv). So the untrusted soffice/pdfium child runs behind
+        # namespaces + cap-drop + AppArmor but with NO syscall filter, regardless of whether
+        # python3-libseccomp happens to be importable. Report it honestly and UNCONDITIONALLY
+        # as insecure on the seccomp axis so the security gate (select_sandbox) can never
+        # mistake bwrap for fully secure just because the library imported. Use the nsjail
+        # backend for real in-process seccomp (KAFEL), or opt into bwrap explicitly with
+        # CLIPPYSHOT_WARN_ON_INSECURE.
+        # TODO: build a real libseccomp BPF program + pass bwrap --seccomp/--add-seccomp-fd,
+        # then this can become conditional on the filter actually being attached.
+        self._seccomp_active = False
+        _log.error(
+            "bwrap_seccomp_not_implemented impact=soffice_runs_without_syscall_filter "
+            "fix=use_nsjail_backend_or_set_CLIPPYSHOT_WARN_ON_INSECURE "
+            "note=nsjail_backend_has_seccomp_via_KAFEL"
+        )
         self._insecurity_reasons: list[str] = []
-        if not self._seccomp_active:
-            self._insecurity_reasons.append("seccomp_missing")
+        # bwrap applies no seccomp filter -> always insecure on the seccomp axis.
+        self._insecurity_reasons.append("seccomp_missing")
         if not self._aa_exec:
             self._insecurity_reasons.append("apparmor_missing")
         if not self._cgroup_pids_supported:

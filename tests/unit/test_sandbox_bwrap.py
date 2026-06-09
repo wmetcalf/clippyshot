@@ -144,21 +144,22 @@ def test_bwrap_apply_rlimits_includes_nofile():
 
 
 @needs_bwrap
-def test_bwrap_seccomp_reports_inactive_on_hosts_without_libseccomp(monkeypatch):
-    """Without the Python libseccomp bindings, seccomp_active must be False.
-
-    We cannot import the bindings in the test environment (they ship via
-    the distro's python3-libseccomp package, not PyPI), so the default
-    state on a dev host is seccomp_active=False. The nsjail backend
-    still enforces seccomp via its KAFEL policy file — this is a
-    bwrap-only gap that's logged at WARN by the constructor.
+@pytest.mark.parametrize("libseccomp_importable", [False, True])
+def test_bwrap_never_self_certifies_secure_without_a_filter(monkeypatch, libseccomp_importable):
+    """bwrap attaches NO seccomp filter (it never passes --seccomp), so it must report
+    seccomp_active=False, secure=False, and a "seccomp_missing" insecurity reason — REGARDLESS
+    of whether python3-libseccomp happens to be importable. The libseccomp_importable=True case
+    is the security regression being guarded: importing the library is not the same as attaching
+    a filter, and the gate must never mistake bwrap for fully secure.
     """
     import clippyshot.sandbox.bwrap as bwrap_mod
 
-    # Force the flag to False regardless of the host's state.
-    monkeypatch.setattr(bwrap_mod, "_LIBSECCOMP_AVAILABLE", False)
+    monkeypatch.setattr(bwrap_mod, "_LIBSECCOMP_AVAILABLE", libseccomp_importable)
     monkeypatch.setattr(bwrap_mod.shutil, "which", lambda name: (
         "/usr/bin/aa-exec" if name == "aa-exec" else "/usr/bin/bwrap"
     ))
     sb = BwrapSandbox()
     assert sb.seccomp_active is False
+    assert sb.seccomp_source == "none"
+    assert "seccomp_missing" in sb.insecurity_reasons
+    assert sb.secure is False  # no syscall filter -> never fully secure

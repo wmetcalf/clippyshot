@@ -265,16 +265,40 @@ class ClippyShotEngine:
         import atexit
         import logging
 
+        from clippyshot.libreoffice.profile import HardenedProfile
+
+        # SECURITY: the warm soffice/unoserver MUST boot with the same hardened LibreOffice
+        # profile the cold path writes (MacroSecurityLevel=3, DisableMacrosExecution=true, no
+        # Basic, no Java, no remote) — otherwise the warm tier parses untrusted documents with
+        # LibreOffice's permissive defaults, defeating the control that lets ClippyShot ACCEPT
+        # macro-enabled formats. Written here, before the snapshot is taken and before any
+        # untrusted input exists, so the lockdown is baked into the warm process captured in the
+        # FC/gVisor snapshot at zero per-job cost.
+        profile_dir = Path(
+            os.environ.get("CLIPPYSHOT_WARM_PROFILE_DIR", "/tmp/.clippyshot-warm-profile")
+        )
+        try:
+            HardenedProfile(profile_dir).write()
+            user_installation: str | None = HardenedProfile(profile_dir).url()
+        except OSError as exc:
+            # Fail CLOSED for a security control: if the hardened profile can't be written, do
+            # NOT start an unhardened warm server — leave _uno_server None so detonate() uses the
+            # cold path (which writes its own hardened profile per job).
+            logging.getLogger("clippyshot.engine").warning(
+                "warm-UNO: could not write hardened profile (%s); staying on cold path", exc
+            )
+            return
+
         transport = os.environ.get("CLIPPYSHOT_WARM_UNO_TRANSPORT", "socket").strip().lower()
         server: WarmConverter
         if transport == "pipe":
             from clippyshot.libreoffice.uno_pipe import SofficePipeServer
 
-            server = SofficePipeServer()
+            server = SofficePipeServer(user_installation=user_installation)
         else:
             from clippyshot.libreoffice.uno import UnoServer
 
-            server = UnoServer()
+            server = UnoServer(user_installation=user_installation)
         try:
             server.start()
         except Exception as exc:
@@ -332,8 +356,14 @@ class ClippyShotEngine:
         from clippyshot.limits import Limits as CSLimits
 
         # Map blastbox Limits.timeout_s → ClippyShot Limits (valid range: [1, 600]).
+        # Funnel through from_env() so the server path honours every CLIPPYSHOT_* tunable
+        # (DPI, MAX_PAGES, MAX_WIDTH/HEIGHT, SKIP_BLANKS, RSS/tmpfs caps) — not just timeout.
+        # This is now the ONLY limits-construction point for the server (the bespoke api.py/
+        # worker.py were removed when ClippyShot moved onto blastbox.host), so without it the
+        # per-document page-count + pixel caps were silently unenforced. The blastbox timeout
+        # wins last via the override (preserving the [1, 600] clamp).
         cs_timeout = max(1, min(600, limits.timeout_s))
-        cs_limits = CSLimits(timeout_s=cs_timeout)
+        cs_limits = CSLimits.from_env(timeout_s=cs_timeout)
         cs_opts = ConvertOptions(
             limits=cs_limits,
             qr_enabled=True,
