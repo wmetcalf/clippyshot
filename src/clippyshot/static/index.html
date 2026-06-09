@@ -562,12 +562,16 @@ async function loadResult(jobId, opts) {
         const jdata = await jr.json();
         if (jdata.worker_runtime) {
           const rt = jdata.worker_runtime;
-          const isGvisor = rt === 'runsc';
-          const label = isGvisor ? 'gVisor (runsc)' : rt;
-          const color = isGvisor ? '#3fb950' : '#d29922';
-          secRows.unshift(['worker_runtime',
-            '<span style="color:'+color+'">'+esc(label)+'</span>'
-            + (isGvisor ? ' <span style="color:#8b949e;font-size:.72rem">syscall-level sandbox</span>' : ' <span style="color:#d29922;font-size:.72rem">namespace only</span>')]);
+          const isWarm = rt === 'warm';
+          const isGvisor = isWarm || rt === 'runsc';  // warm slots restore under gVisor C/R
+          const type = isWarm ? 'warm' : 'cold';
+          const detail = isWarm ? 'warm pool · gVisor C/R'
+            : (rt === 'runsc' ? 'gVisor (runsc)' : esc(rt));
+          const color = isWarm ? '#58a6ff' : (isGvisor ? '#3fb950' : '#d29922');
+          secRows.unshift(['Worker',
+            '<span style="color:'+color+';font-weight:600">'+type+'</span>'
+            + ' <span style="color:#8b949e;font-size:.72rem">'+detail
+            + (isGvisor ? ' · syscall-level sandbox' : ' · namespace only')+'</span>']);
         }
         if (jdata.security_warnings && jdata.security_warnings.length) {
           secRows.push(['warnings',
