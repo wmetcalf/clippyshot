@@ -42,6 +42,22 @@ def _cp(rc):
     return subprocess.CompletedProcess(args=[], returncode=rc, stdout=b"", stderr=b"")
 
 
+@pytest.mark.parametrize("basename_fmt", ["OSL_PIPE_{euid}_{name}", "OSL_PIPE_{name}"])
+def test_default_socket_check_accepts_both_pipe_basenames(tmp_path, monkeypatch, basename_fmt):
+    # Regression: LibreOffice 25.8 under runsc creates the accept pipe at
+    # ``$TMPDIR/OSL_PIPE_<name>`` (NO euid prefix); older builds use
+    # ``OSL_PIPE_<euid>_<name>``. Checking only the euid form silently failed the warmup
+    # readiness poll, so every "warm" job fell back to cold. Both forms must be recognized.
+    import os
+
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    s = SofficePipeServer(pipe_name="clippyshot")
+    assert s._default_socket_check() is False  # nothing there yet
+    sock = tmp_path / basename_fmt.format(euid=os.geteuid(), name="clippyshot")
+    sock.write_text("")  # the acceptor socket appears
+    assert s._default_socket_check() is True
+
+
 def test_argv_uses_accept_pipe_not_tcp():
     argv = SofficePipeServer(pipe_name="px").argv()
     assert argv[0] == "soffice"

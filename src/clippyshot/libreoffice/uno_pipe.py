@@ -80,9 +80,15 @@ class SofficePipeServer:
         self._proc: subprocess.Popen | None = None
 
     def _default_socket_check(self) -> bool:
-        # soffice creates the named accept pipe at ``$TMPDIR/OSL_PIPE_<euid>_<name>``.
+        # soffice creates the named accept pipe under ``$TMPDIR``. The socket basename is
+        # build-dependent: some LibreOffice builds prefix the euid (``OSL_PIPE_<euid>_<name>``),
+        # others use the bare name (``OSL_PIPE_<name>`` — observed on LO 25.8 under runsc/uid
+        # 65532). Accept EITHER form; checking only the euid-prefixed name silently failed the
+        # readiness poll on builds that omit it, so warmup always timed out and fell back to cold.
         tmpdir = os.environ.get("TMPDIR", "/tmp")
-        return os.path.exists(os.path.join(tmpdir, f"OSL_PIPE_{os.geteuid()}_{self._pipe}"))
+        return os.path.exists(
+            os.path.join(tmpdir, f"OSL_PIPE_{os.geteuid()}_{self._pipe}")
+        ) or os.path.exists(os.path.join(tmpdir, f"OSL_PIPE_{self._pipe}"))
 
     @property
     def pipe_name(self) -> str:

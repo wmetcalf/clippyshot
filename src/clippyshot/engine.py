@@ -170,6 +170,64 @@ def _scanner_record(page_rec: dict) -> Record:
     )
 
 
+# ─── Warm-tier priming ──────────────────────────────────────────────────────
+
+# Minimal flat-ODF (single-XML) documents — used to warm the Impress/Draw paths without
+# shipping binary fixtures. A flat presentation/drawing imports + exports through the same
+# LibreOffice app + PDF-export filter a real .pptx/.odp / .odg/.vsdx does, minus only the
+# binary-OOXML import code (a fraction of the warmup). Validated to convert under LO 25.8/runsc.
+_PRIME_FODP = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+    'xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" office:version="1.3" '
+    'office:mimetype="application/vnd.oasis.opendocument.presentation">'
+    '<office:body><office:presentation><draw:page draw:name="p1"/>'
+    "</office:presentation></office:body></office:document>\n"
+).encode()
+_PRIME_FODG = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+    'xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" office:version="1.3" '
+    'office:mimetype="application/vnd.oasis.opendocument.graphics">'
+    '<office:body><office:drawing><draw:page draw:name="p1"/>'
+    "</office:drawing></office:body></office:document>\n"
+).encode()
+
+# Throwaway documents converted during warmup() to load LibreOffice's document framework
+# + PDF-export filters BEFORE the warm snapshot is checkpointed. ONE entry per export-filter
+# family (writer/calc/impress/draw) — because in the disposable one-job-per-restore model every
+# slot is restored from the SAME snapshot, so the snapshot must have ALL families warm or e.g.
+# an .xlsx slot pays the Calc warmup the docx prime never covered. The shared framework cost
+# (~3.5s) is paid once by the first (txt) prime; each later family prime is sub-second.
+# (filename, bytes, detection-label → pdf_filter_for_label family).
+_WARM_PRIME_DOCS: tuple[tuple[str, bytes, str], ...] = (
+    ("clippyshot-prime.txt", b"clippyshot warm prime\n", "txt"),  # writer_pdf_Export
+    ("clippyshot-prime.csv", b"a,b,c\n1,2,3\n", "csv"),  # calc_pdf_Export
+    ("clippyshot-prime.fodp", _PRIME_FODP, "fodp"),  # impress_pdf_Export
+    ("clippyshot-prime.fodg", _PRIME_FODG, "fodg"),  # draw_pdf_Export
+)
+
+
+def _prime_warm_server(server: "WarmConverter") -> None:
+    """Run throwaway conversions against a freshly-started warm server so its filters are
+    loaded before the snapshot is taken. Best-effort — never raises (priming is an
+    optimization; a failure just means the first real convert pays the warmup once)."""
+    import logging
+    import tempfile
+
+    log = logging.getLogger("clippyshot.engine")
+    with tempfile.TemporaryDirectory(prefix="clippyshot-prime-") as td:
+        tdir = Path(td)
+        for name, data, label in _WARM_PRIME_DOCS:
+            src = tdir / name
+            src.write_bytes(data)
+            dst = tdir / (name + ".pdf")
+            try:
+                server.convert(src, dst, label)
+            except Exception as exc:  # noqa: BLE001
+                log.info("warm prime convert (%s) skipped: %s", label, exc)
+
+
 # ─── Engine ─────────────────────────────────────────────────────────────────
 
 
@@ -232,6 +290,16 @@ class ClippyShotEngine:
         # Reap a spawned server if the interpreter exits before reap (adopted
         # servers we don't own are a no-op on stop()).
         atexit.register(server.stop)
+        # Prime the conversion path BEFORE the warm snapshot is taken. A freshly-started
+        # soffice/unoserver is *listening* but its document framework + import/export filters
+        # are unloaded, so the FIRST real conversion pays a ~3-4s warmup (measured 4.65s vs
+        # 0.7s steady on gVisor C/R). In the disposable one-job-per-restore model that first
+        # convert is the ONLY convert, so without priming the warm tier is barely faster than
+        # cold. Running a throwaway conversion here — captured warm in the FC/gVisor snapshot —
+        # makes the first post-restore conversion steady-state. Best-effort + opt-out
+        # (CLIPPYSHOT_WARM_PRIME=0): a priming failure must never fail the slot.
+        if os.environ.get("CLIPPYSHOT_WARM_PRIME", "1").lower() in ("1", "true", "yes"):
+            _prime_warm_server(server)
         self._uno_server = server
 
     def _get_converter(self):

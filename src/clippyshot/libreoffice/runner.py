@@ -437,17 +437,35 @@ class LibreOfficeRunner:
             # (UnoServer | SofficePipeServer), both exposing is_ready()/convert(). On ANY
             # failure, fall through to the untouched cold sandbox-retry loop below (a warm
             # hiccup must never fail the job).
-            if self._uno_server is not None and self._uno_server.is_ready():
+            import os as _os
+
+            def _warm_diag(msg: str) -> None:
+                # Opt-in warm/cold-decision breadcrumb (set CLIPPYSHOT_WARM_DIAG_FILE to an
+                # absolute path). No-op by default so it leaves no stray file in normal output.
+                p = _os.environ.get("CLIPPYSHOT_WARM_DIAG_FILE")
+                if not p:
+                    return
+                try:
+                    Path(p).write_text(msg)
+                except OSError:
+                    pass
+
+            _server = self._uno_server
+            _warm_ready = _server is not None and _server.is_ready()
+            _warm_diag(f"server={_server is not None} ready={_warm_ready}\n")
+            if _warm_ready and _server is not None:
                 warm_pdf = output_dir / (input_path.stem + ".pdf")
                 try:
-                    self._uno_server.convert(staged_input, warm_pdf, label)
+                    _server.convert(staged_input, warm_pdf, label)
                 except LibreOfficeError as exc:
+                    _warm_diag(f"WARM_FAIL: {str(exc)[:600]}\n")
                     import logging as _logging
 
                     _logging.getLogger("clippyshot.libreoffice.runner").warning(
                         "warm convert failed (%s); falling back to cold soffice", exc
                     )
                 else:
+                    _warm_diag("WARM_OK\n")
                     if staged_input.suffix.lower() in (".xlsx", ".xlsm"):
                         try:
                             from clippyshot.libreoffice.sheet_prep import (
