@@ -446,7 +446,11 @@ class LibreOfficeRunner:
                 if not p:
                     return
                 try:
-                    Path(p).write_text(msg)
+                    # Append: _warm_diag is called multiple times per conversion (server
+                    # status, then WARM_OK/WARM_FAIL) — overwriting would drop the earlier
+                    # breadcrumbs and leave only the last line.
+                    with Path(p).open("a") as _f:
+                        _f.write(msg)
                 except OSError:
                     pass
 

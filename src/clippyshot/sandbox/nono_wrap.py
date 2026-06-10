@@ -49,6 +49,10 @@ _NONO_QUIET_ENV = {"NONO_NO_UPDATE_CHECK": "1", "NONO_NO_SAVE_PROMPT": "1"}
 _DEFAULT_STATE_DIR = "/var/lib/clippyshot/nono-state"
 
 
+# landlock_create_ruleset syscall number is arch-specific.
+_LANDLOCK_CREATE_RULESET_NR = {"x86_64": 444, "amd64": 444, "aarch64": 244, "arm64": 244}
+
+
 def landlock_available() -> bool:
     """Best-effort probe: is Landlock usable on this kernel/runtime?
 
@@ -56,13 +60,18 @@ def landlock_available() -> bool:
     returns the ABI version (>0) where Landlock is present, or ``-1``/ENOSYS where it
     is not (notably **inside the gVisor Sentry**, which does not implement the
     ``landlock_*`` syscalls). Lets the inner-nono layer fail fast on a tier that
-    can't enforce it rather than erroring mid-conversion. x86_64 syscall number.
+    can't enforce it rather than erroring mid-conversion. The syscall number is
+    arch-specific (444 on x86_64, 244 on aarch64); unknown arches ⇒ treat as unavailable.
     """
     try:
         import ctypes
+        import platform
 
+        nr = _LANDLOCK_CREATE_RULESET_NR.get(platform.machine().lower())
+        if nr is None:
+            return False
         libc = ctypes.CDLL(None, use_errno=True)
-        return libc.syscall(444, None, 0, 1) > 0
+        return libc.syscall(nr, None, 0, 1) > 0
     except Exception:  # noqa: BLE001 — any probe failure ⇒ treat as unavailable
         return False
 

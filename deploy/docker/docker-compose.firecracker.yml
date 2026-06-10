@@ -58,7 +58,8 @@ services:
       # job_root (host-consistent, same as the main dispatcher) — read the staged input.
       - "${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}/jobs:${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}/jobs"
       # FC artifacts (firecracker binary + vmlinux + rootfs.ext4), read-only.
-      - "/home/coz/clippyshot-fc:/var/lib/blastbox-fc:ro"
+      # Host dir is operator-configurable (override CLIPPYSHOT_FC_DIR in the env/.env).
+      - "${CLIPPYSHOT_FC_DIR:-/var/lib/clippyshot-fc}:/var/lib/blastbox-fc:ro"
     tmpfs:
       # FC warm-base memory snapshot (BLASTBOX_FC_SCRATCH defaults to /tmp/blastbox-fc-slots,
       # not env-overridable) + per-slot outdisks. tmpfs = fast warm restores; sized for 16 slots.

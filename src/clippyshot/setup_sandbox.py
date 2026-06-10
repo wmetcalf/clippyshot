@@ -82,8 +82,20 @@ def diagnose() -> SetupReport:
 
 
 def default_profile_dir() -> Path:
-    """Repo `deploy/apparmor/` (this file is src/clippyshot/setup_sandbox.py)."""
-    return Path(__file__).resolve().parents[2] / "deploy" / "apparmor"
+    """Where the clippyshot-{bwrap,nsjail} profiles live.
+
+    Prefers the repo layout (`deploy/apparmor/`, the common bare-metal/dev case where
+    setup-sandbox is most useful); falls back to a packaged install location. Pass
+    `--profile-dir` to override either."""
+    candidates = (
+        Path(__file__).resolve().parents[2] / "deploy" / "apparmor",  # repo / editable install
+        Path("/etc/clippyshot/apparmor"),                              # packaged install
+        Path("/usr/share/clippyshot/apparmor"),
+    )
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return candidates[0]  # repo path — the report surfaces "not found" + suggests --profile-dir
 
 
 def commands_for(actions: list[ProfileAction], profile_dir: Path) -> list[list[str]]:

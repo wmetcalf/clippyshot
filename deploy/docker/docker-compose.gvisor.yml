@@ -75,9 +75,10 @@ services:
       - "/usr/bin/runsc:/usr/bin/runsc:ro"
       # the gVisor warm OCI rootfs (built on current code; accept-retry shim baked in).
       # NON-nested path (not under the state mount) so runsc's gofer sees it populated.
-      - "/home/coz/clippyshot-gvisor/rootfs:/opt/gvisor-rootfs:ro"
+      # Host dir is operator-configurable (override CLIPPYSHOT_GVISOR_DIR in the env/.env).
+      - "${CLIPPYSHOT_GVISOR_DIR:-/var/lib/clippyshot-gvisor}/rootfs:/opt/gvisor-rootfs:ro"
       # writable state: runsc --root + the warm-base checkpoint/snapshot + per-slot dirs.
-      - "/home/coz/clippyshot-gvisor/state:/var/lib/blastbox"
+      - "${CLIPPYSHOT_GVISOR_DIR:-/var/lib/clippyshot-gvisor}/state:/var/lib/blastbox"
     tmpfs:
       - /tmp:rw,exec,nosuid,size=2g
     networks:
