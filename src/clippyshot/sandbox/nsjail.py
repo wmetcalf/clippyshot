@@ -239,7 +239,7 @@ class NsjailSandbox:
         # Strict AppArmor profile for the child process. nsjail calls
         # aa_change_onexec() with this name before execve(), so the profile
         # must already be loaded on the host kernel (see deploy/apparmor/).
-        if self._proc_apparmor_supported:
+        if self._proc_apparmor_supported and req.attach_apparmor:
             argv += ["--proc_apparmor", self._apparmor_profile]
 
         argv += ["--", *req.argv]

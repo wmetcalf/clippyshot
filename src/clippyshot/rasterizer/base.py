@@ -99,6 +99,12 @@ class ShardingRasterizer(ABC):
         """Extra environment for the render subprocess. Default: none."""
         return {}
 
+    def _attach_apparmor(self) -> bool:
+        """Whether to attach the soffice AppArmor profile to the render subprocess.
+        Default True. A backend that runs a binary the soffice profile doesn't cover
+        (e.g. pdfium reading its bundled libpdfium under sys.prefix) overrides to False."""
+        return True
+
     def _run_range(
         self,
         *,
@@ -127,6 +133,7 @@ class ShardingRasterizer(ABC):
                 dpi=dpi,
             ),
             env=self._env(),
+            attach_apparmor=self._attach_apparmor(),
         )
         result = self._sandbox.run(req)
         if result.killed or result.exit_code != 0:

@@ -274,7 +274,7 @@ class BwrapSandbox:
         # errors out with a clear message instead of silently running
         # unconfined — we rely on that loud failure at runtime.
         inner = list(req.argv)
-        if self._aa_exec is not None:
+        if self._aa_exec is not None and req.attach_apparmor:
             inner = [self._aa_exec, "-p", self._apparmor_profile, "--", *inner]
         argv += inner
         return argv
