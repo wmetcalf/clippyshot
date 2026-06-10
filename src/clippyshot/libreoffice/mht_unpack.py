@@ -604,7 +604,9 @@ def unpack_mht(mht_path: Path, out_dir: Path) -> Path | None:
             payload = part.get_payload(decode=True)
         except Exception:
             continue
-        if not payload:
+        # decode=True yields bytes for a leaf part (or None); narrow to bytes so the
+        # downstream sha1/write_bytes see a concrete buffer, and skip anything else.
+        if not isinstance(payload, bytes) or not payload:
             continue
         # First text/html wins: Word always emits exactly one, and edge
         # cases (forwarded chains, etc.) should render the top document.
@@ -648,7 +650,10 @@ def unpack_mht(mht_path: Path, out_dir: Path) -> Path | None:
 
     charset = html_part.get_content_charset() or "utf-8"
     try:
-        html = html_part.get_payload(decode=True).decode(charset, errors="replace")
+        html_bytes = html_part.get_payload(decode=True)
+        if not isinstance(html_bytes, bytes):
+            return None
+        html = html_bytes.decode(charset, errors="replace")
     except Exception:
         return None
 

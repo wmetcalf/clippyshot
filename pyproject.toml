@@ -67,3 +67,8 @@ asyncio_mode = "auto"
 # (clippyshot/libreoffice/_pipe_convert.py).
 module = ["uno", "com.sun.star.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# olefile ships no type stubs (used for OLE structural sniffing in detector/sheet_prep).
+module = ["olefile"]
+ignore_missing_imports = true

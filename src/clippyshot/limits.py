@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, fields
 
 
@@ -21,7 +22,7 @@ _ENV_MAP = {
 }
 
 # Map field name → coerce function for env-var parsing.
-_ENV_COERCE: dict[str, object] = {
+_ENV_COERCE: dict[str, Callable[[str], object]] = {
     "skip_blanks": lambda s: s.lower() not in ("0", "false", "no"),
     "disclose_security_internals": lambda s: s.lower() not in ("0", "false", "no"),
     "rasterizer": lambda s: s.strip().lower(),

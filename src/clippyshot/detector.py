@@ -269,7 +269,7 @@ _ODF_LABELS = frozenset({"odt", "ods", "odp", "odg"})
 
 # libmagic MIME → our canonical label mapping
 _LIBMAGIC_MIME_TO_LABEL: dict[str, str] = {}
-_LIBMAGIC_MIME_PATTERNS: list[tuple[str, str]] = [
+_LIBMAGIC_MIME_PATTERNS: list[tuple[str, str | None]] = [
     # OOXML (detected by content types inside the zip)
     ("presentationml", "pptx"),
     ("wordprocessingml", "docx"),
@@ -411,7 +411,7 @@ def _check_ole_content(path: Path) -> list[str]:
     document content stream (PowerPoint Document, WordDocument, Workbook)
     is almost certainly a macro-only payload — there's nothing to render.
     """
-    warnings = []
+    warnings: list[str] = []
     try:
         import olefile
 

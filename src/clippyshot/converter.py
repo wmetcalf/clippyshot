@@ -630,10 +630,10 @@ class Converter:
                     raise ConversionError(f"rasterize failed: {e}", cause=e) from e
                 
                 # Check rendered dimensions against limits.
-                for page in pages:
-                    if page.width_px > options.limits.max_width_px or page.height_px > options.limits.max_height_px:
+                for rp in pages:
+                    if rp.width_px > options.limits.max_width_px or rp.height_px > options.limits.max_height_px:
                         raise RasterizeError(
-                            f"page {page.index} dimensions {page.width_px}x{page.height_px} "
+                            f"page {rp.index} dimensions {rp.width_px}x{rp.height_px} "
                             f"exceed limits {options.limits.max_width_px}x{options.limits.max_height_px}"
                         )
 
