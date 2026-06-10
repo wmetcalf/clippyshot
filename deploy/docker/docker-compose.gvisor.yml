@@ -52,7 +52,14 @@ services:
       - BLASTBOX_GVISOR_ROOT=/var/lib/blastbox/gvisor-root
       - BLASTBOX_GVISOR_ROOTFS=/opt/gvisor-rootfs
       - BLASTBOX_GVISOR_NETWORK=none
-      - BLASTBOX_GVISOR_PLATFORM=ptrace      # no /dev/kvm needed — the point of gVisor
+      # systrap (gVisor's modern default: seccomp+signals, NO /dev/kvm — same isolation as
+      # ptrace, just far fewer syscall round-trips). ptrace makes every guest syscall a
+      # ptrace stop, which murders syscall-/futex-heavy workloads: tesseract OCR on dense
+      # pages ran so slowly it blew the per-page OCR deadline and got SIGKILLed (exit -9),
+      # silently dropping OCR on this tier. systrap renders the same pages fast enough to
+      # finish in time (verified: tesseract -9 went 14/24 -> 0/24, OCR'd pages 10 -> 16).
+      # Checkpoint/restore confirmed working under systrap on this runsc (release-20260511).
+      - BLASTBOX_GVISOR_PLATFORM=systrap
       - BLASTBOX_GVISOR_WARM_ARGV=["/opt/clippyshot/bin/python3","/opt/blastbox/run_warm.py"]
       - BLASTBOX_GVISOR_LD_PRELOAD=/opt/clippyshot/accept-retry.so
       - BLASTBOX_GVISOR_EXTRA_ENV=["CLIPPYSHOT_SANDBOX=container","CLIPPYSHOT_WARN_ON_INSECURE=1","CLIPPYSHOT_WARM_UNO=1"]
