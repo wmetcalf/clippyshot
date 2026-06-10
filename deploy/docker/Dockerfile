@@ -10,6 +10,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
         autoconf \
         bison \
         ca-certificates \
+        curl \
         flex \
         g++ \
         gcc \
@@ -26,6 +27,20 @@ RUN git clone --depth 1 --branch ${NSJAIL_REF} https://github.com/google/nsjail.
     && cd /src/nsjail \
     && make \
     && install -D nsjail /out/nsjail
+
+# nono — the optional inner Landlock wrapper (clippyshot.sandbox.nono_wrap). Pinned +
+# sha256-verified release. Used opt-in via CLIPPYSHOT_INNER_NONO on tiers whose kernel
+# exposes Landlock (runc cold + the Firecracker guest); the gVisor Sentry returns ENOSYS,
+# so it is NOT enabled there (select_sandbox fails fast if it is). ~0.61.1 is the version
+# the perf-reversal + enforcement were validated on; bump NONO_REF/NONO_SHA256 together.
+ARG NONO_REF=0.61.1
+ARG NONO_SHA256=9186323e1deda74bda886ab57ae3cff820bc85861a9dd691b898a4d309bffa93
+RUN curl -fsSL -o /tmp/nono.tgz \
+        "https://github.com/always-further/nono/releases/download/v${NONO_REF}/nono-v${NONO_REF}-x86_64-unknown-linux-gnu.tar.gz" \
+    && echo "${NONO_SHA256}  /tmp/nono.tgz" | sha256sum -c - \
+    && tar xzf /tmp/nono.tgz -C /tmp \
+    && install -D /tmp/nono /out/nono \
+    && rm -f /tmp/nono.tgz
 
 
 #####################
@@ -103,6 +118,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /out/nsjail /usr/local/bin/nsjail
+# Optional inner Landlock wrapper (opt-in via CLIPPYSHOT_INNER_NONO); resolved by
+# clippyshot.sandbox.nono_wrap on PATH. No-op unless explicitly enabled.
+COPY --from=builder /out/nono /usr/local/bin/nono
 
 # Deploy the seccomp policy to a stable path that the nsjail backend
 # looks up at runtime (src/clippyshot/sandbox/nsjail.py:_SECCOMP_POLICY_CANDIDATES).
