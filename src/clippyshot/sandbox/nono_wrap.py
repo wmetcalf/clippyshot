@@ -49,6 +49,24 @@ _NONO_QUIET_ENV = {"NONO_NO_UPDATE_CHECK": "1", "NONO_NO_SAVE_PROMPT": "1"}
 _DEFAULT_STATE_DIR = "/var/lib/clippyshot/nono-state"
 
 
+def landlock_available() -> bool:
+    """Best-effort probe: is Landlock usable on this kernel/runtime?
+
+    Calls ``landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`` —
+    returns the ABI version (>0) where Landlock is present, or ``-1``/ENOSYS where it
+    is not (notably **inside the gVisor Sentry**, which does not implement the
+    ``landlock_*`` syscalls). Lets the inner-nono layer fail fast on a tier that
+    can't enforce it rather than erroring mid-conversion. x86_64 syscall number.
+    """
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.syscall(444, None, 0, 1) > 0
+    except Exception:  # noqa: BLE001 — any probe failure ⇒ treat as unavailable
+        return False
+
+
 def _resolve_bin(raw: str | None) -> str | None:
     """Resolve a nono spec to an absolute existing file, or ``None``.
 

@@ -3,13 +3,18 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Callable
 
 from clippyshot.errors import SandboxUnavailable
 from clippyshot.sandbox.base import Sandbox
 from clippyshot.sandbox.bwrap import BwrapSandbox
 from clippyshot.sandbox.container import ContainerSandbox
-from clippyshot.sandbox.nono_wrap import NonoWrap, NonoWrappedSandbox
+from clippyshot.sandbox.nono_wrap import (
+    NonoWrap,
+    NonoWrappedSandbox,
+    landlock_available,
+)
 from clippyshot.sandbox.nsjail import NsjailSandbox
 
 
@@ -54,7 +59,18 @@ def select_sandbox(
     nsjail/bwrap/container alike.
     """
     if inner_wrap is None and _env_truthy("CLIPPYSHOT_INNER_NONO"):
-        inner_wrap = NonoWrap()
+        profile = os.environ.get("CLIPPYSHOT_INNER_NONO_PROFILE", "").strip()
+        inner_wrap = NonoWrap(profile=Path(profile) if profile else None)
+
+    # Fail fast on a tier that can't enforce Landlock (e.g. the gVisor Sentry returns
+    # ENOSYS) rather than letting nono error mid-conversion. runc + the FC guest support
+    # Landlock; gVisor C/R does not — don't enable the inner layer there.
+    if inner_wrap is not None and not landlock_available():
+        raise SandboxUnavailable(
+            "inner nono layer requested (CLIPPYSHOT_INNER_NONO / inner_wrap) but Landlock "
+            "is unavailable on this kernel/runtime (the gVisor Sentry does not implement it); "
+            "disable inner-nono on this tier — runc and the Firecracker guest support it"
+        )
 
     def _wrap(sb: Sandbox) -> Sandbox:
         return NonoWrappedSandbox(sb, inner_wrap) if inner_wrap is not None else sb

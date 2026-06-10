@@ -136,5 +136,26 @@ def test_select_sandbox_wraps_only_when_requested(monkeypatch: pytest.MonkeyPatc
 def test_select_sandbox_env_trigger(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "container")
     monkeypatch.setenv("CLIPPYSHOT_INNER_NONO", "1")
+    monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: True)
     wrapped = select_sandbox(_container_factory=lambda: _FakeSandbox())
     assert isinstance(wrapped, NonoWrappedSandbox)
+
+
+def test_select_sandbox_inner_nono_profile_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "container")
+    monkeypatch.setenv("CLIPPYSHOT_INNER_NONO", "1")
+    monkeypatch.setenv("CLIPPYSHOT_INNER_NONO_PROFILE", "/etc/clippyshot/soffice.nono.json")
+    monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: True)
+    wrapped = select_sandbox(_container_factory=lambda: _FakeSandbox())
+    assert isinstance(wrapped, NonoWrappedSandbox)
+    assert wrapped.wrap.profile == Path("/etc/clippyshot/soffice.nono.json")
+
+
+def test_select_sandbox_fails_fast_without_landlock(monkeypatch: pytest.MonkeyPatch) -> None:
+    from clippyshot.errors import SandboxUnavailable
+
+    monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "container")
+    # gVisor Sentry case: inner-nono requested but Landlock returns ENOSYS.
+    monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: False)
+    with pytest.raises(SandboxUnavailable, match="Landlock is unavailable"):
+        select_sandbox(inner_wrap=NonoWrap(bin=_BIN), _container_factory=lambda: _FakeSandbox())
