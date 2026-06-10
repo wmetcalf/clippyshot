@@ -1,6 +1,7 @@
 """Rasterizer protocol + shared sharding base for CLI-backed rasterizers."""
 from __future__ import annotations
 
+import logging
 import os
 import re
 from abc import ABC, abstractmethod
@@ -16,6 +17,8 @@ from clippyshot.errors import RasterizeError
 from clippyshot.limits import Limits, max_concurrent_page_ops
 from clippyshot.sandbox.base import Mount, Sandbox, SandboxRequest
 from clippyshot.types import RasterizedPage
+
+_log = logging.getLogger(__name__)
 
 _PT_PER_INCH = 72.0
 _MM_PER_INCH = 25.4
@@ -221,9 +224,43 @@ class ShardingRasterizer(ABC):
         # ourselves if not provided.
         page_sizes = page_sizes_mm if page_sizes_mm is not None else self._page_sizes_mm(pdf_path)
 
-        renamed: list[RasterizedPage] = []
+        # Collapse to AT MOST ONE file per absolute page index BEFORE building pages.
+        # Each shard writes page-<abs-index>.png (pypdfium2 zero-pads to the document's
+        # page count, so indices are unique in the normal case). But two differently-named
+        # files can parse to the SAME index — e.g. page-1.png + page-01.png, or a rare
+        # stray/partial render artifact observed only under heavy host contention (16
+        # concurrent runc workers). Left alone, that yields two RasterizedPages with the
+        # same index, which fails host-side sealing with "duplicate artifact id" and loses
+        # the WHOLE conversion. Deduplicate deterministically here: keep the largest file
+        # for the index (a complete render dominates a partial), delete the rest. The
+        # document's page count is fixed, so a second file for an existing index is the
+        # anomaly to drop — not a distinct page.
+        by_index: dict[int, Path] = {}
+        dropped: list[str] = []
         for src in produced:
             idx = self._index_from_name(src.name)
+            prev = by_index.get(idx)
+            if prev is None:
+                by_index[idx] = src
+                continue
+            keep, drop = (
+                (src, prev) if src.stat().st_size > prev.stat().st_size else (prev, src)
+            )
+            by_index[idx] = keep
+            dropped.append(drop.name)
+            try:
+                drop.unlink()
+            except OSError:
+                pass
+        if dropped:
+            _log.warning(
+                "%s: collapsed %d duplicate-index page file(s) (kept largest per index): %s",
+                self.name, len(dropped), dropped,
+            )
+
+        renamed: list[RasterizedPage] = []
+        for idx in sorted(by_index):
+            src = by_index[idx]
             new_name = f"page-{idx:03d}.png"
             dst = out_dir / new_name
             if src != dst:
@@ -241,7 +278,6 @@ class ShardingRasterizer(ABC):
                     height_mm=round(h_mm, 2),
                 )
             )
-        renamed.sort(key=lambda p: p.index)
         return renamed
 
     @staticmethod

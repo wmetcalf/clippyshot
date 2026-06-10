@@ -134,6 +134,41 @@ def test_rasterize_ignores_derivative_pngs_with_non_numeric_suffixes(tmp_path: P
     assert (tmp_path / "out" / "page-001-focused.png").exists()
 
 
+def test_rasterize_dedupes_duplicate_index_keeping_largest(tmp_path: Path):
+    """Two files parsing to the SAME page index (page-1.png + page-01.png, or a rare
+    stray/partial render artifact seen only under heavy host contention) must collapse
+    to ONE page per index — otherwise host-side sealing fails with 'duplicate artifact
+    id' and loses the whole conversion. The larger (complete) file is kept; the stray
+    is deleted."""
+    import io
+
+    from PIL import Image as _Image
+
+    buf = io.BytesIO()
+    _Image.new("RGB", (8, 8), "white").save(buf, "PNG")
+    big_png = buf.getvalue()
+    assert len(big_png) > len(_TINY_PNG)
+
+    class DupIndexSandbox(FakeSandbox):
+        def run(self, req):
+            out_host = next(
+                m.host_path for m in req.rw_mounts if m.sandbox_path == Path("/sandbox/out")
+            )
+            (out_host / "page-01.png").write_bytes(_TINY_PNG)   # small, parses to idx 1
+            (out_host / "page-1.png").write_bytes(big_png)      # large, idx 1 (the keeper)
+            (out_host / "page-2.png").write_bytes(big_png)      # idx 2
+            return SandboxResult(exit_code=0, stdout=b"", stderr=b"", duration_ms=1, killed=False)
+
+    r = PdftoppmRasterizer(sandbox=DupIndexSandbox())
+    pages = r.rasterize(FIXTURE, tmp_path / "out", dpi=150, max_pages=10)
+
+    assert [p.index for p in pages] == [1, 2]               # exactly one page per index
+    out = tmp_path / "out"
+    assert (out / "page-001.png").read_bytes() == big_png   # kept the larger of the idx-1 pair
+    assert not (out / "page-1.png").exists()                # stray collapsed away
+    assert not (out / "page-01.png").exists()
+
+
 # --- PDFium backend -------------------------------------------------------
 
 
