@@ -399,12 +399,19 @@ def _process_page_scanners(
                         "duration_ms": result.duration_ms,
                     }
                 except Exception as e:
-                    ocr_obj["skipped"] = "timeout" if "timeout" in str(e).lower() else "error"
-                    warnings.append({
-                        "code": "ocr_scan_error",
-                        "page": page_record.get("index"),
-                        "message": str(e)[:500],
-                    })
+                    if "timeout" in str(e).lower():
+                        # OCR ran out of time (per-page deadline / remaining budget) — the
+                        # same class as the pre-launch "timeout_budget" skip, NOT a scanner
+                        # failure. Record a clean skip with NO ocr_scan_error warning (slow
+                        # tiers on dense pages hit this; a warning on it is just noise).
+                        ocr_obj["skipped"] = "timeout"
+                    else:
+                        ocr_obj["skipped"] = "error"
+                        warnings.append({
+                            "code": "ocr_scan_error",
+                            "page": page_record.get("index"),
+                            "message": str(e)[:500],
+                        })
 
     return qr_list, qr_skipped, ocr_obj, warnings
 

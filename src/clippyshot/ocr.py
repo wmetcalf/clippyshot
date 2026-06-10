@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import subprocess
 import time
 from dataclasses import dataclass
@@ -147,6 +148,14 @@ def run_ocr(
     except FileNotFoundError:
         raise OCRError("tesseract binary not installed — install the tesseract-ocr package")
     if exit_code != 0:
+        if exit_code == -signal.SIGKILL:
+            # The sandbox SIGKILLs tesseract when its per-page deadline (= the remaining
+            # OCR budget) elapses — see ContainerSandbox, which returns -SIGKILL on timeout.
+            # That's a deadline/timeout, NOT a tesseract crash, so surface it as a timeout:
+            # the converter then records skipped="timeout" (a clean budget outcome) instead
+            # of a scary ocr_scan_error. Slow tiers (e.g. gVisor warm on dense pages) hit
+            # this; it is not a failure to flag.
+            raise OCRError(f"tesseract timeout (deadline {timeout_s}s) on {png_path.name}")
         raise OCRError(
             f"tesseract exited {exit_code} on {png_path.name}: "
             f"{stderr.strip()[:500]}"
