@@ -393,8 +393,36 @@ class ClippyShotEngine:
             ocr_psm=ocr_psm,
         )
 
+        from clippyshot.errors import DetectionError
+
         converter = self._get_converter()
-        result = converter.convert(input, outdir, cs_opts)
+        try:
+            result = converter.convert(input, outdir, cs_opts)
+        except DetectionError as exc:
+            # A detector rejection (oversized / unsupported / structural-sanity fail) is a
+            # legitimate verdict, not a pipeline error. Surface it as status="rejected" — the
+            # dispatcher keeps such a job DONE (dispatch.py gates only engine_error) — instead
+            # of letting it reach the harness as a generic engine_error/FAILED. Restores the
+            # documented "input rejected" outcome for the server path.
+            reason = str(exc)[:2000]
+            return DetonationResult(
+                payload=EmbeddedResource(
+                    embedded_path="/",
+                    content_type="application/octet-stream",
+                    depth=0,
+                    metadata=Record(fields={"label": "rejected", "reason": reason}),
+                    children=[],
+                ),
+                artifacts=[],
+                detected=Detection(
+                    label="unknown",
+                    mime="application/octet-stream",
+                    confidence=0.0,
+                    source="clippyshot",
+                ),
+                warnings=[Warning(code="rejected", message=reason)],
+                status="rejected",
+            )
         meta = result.metadata
 
         # ── Detection ───────────────────────────────────────────────────────

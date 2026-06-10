@@ -177,3 +177,31 @@ def test_warmup_priming_failure_is_nonfatal(monkeypatch):
     eng = ClippyShotEngine()
     eng.warmup()  # must NOT raise
     assert eng._uno_server is srv  # warm tier stays active despite priming failure
+
+
+def test_detonate_maps_detection_error_to_rejected(tmp_path):
+    """A detector rejection (DetectionError out of converter.convert) must surface as
+    status='rejected' (the dispatcher keeps such a job DONE), NOT propagate to the harness
+    as a generic engine_error/FAILED. Restores the 'input rejected' contract on the server path."""
+    from blastbox.limits import Limits as BlastboxLimits
+
+    from clippyshot.engine import ClippyShotEngine
+    from clippyshot.errors import DetectionError
+
+    class _RejectingConverter:
+        def convert(self, *a, **k):
+            raise DetectionError("unsupported_type", "magika=iso")
+
+    eng = ClippyShotEngine()
+    eng._converter = _RejectingConverter()  # _get_converter returns this (lazy field)
+    inp = tmp_path / "in.bin"
+    inp.write_bytes(b"x")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    res = eng.detonate(inp, out, BlastboxLimits(timeout_s=30))
+
+    assert res.status == "rejected"
+    assert res.artifacts == []
+    assert any(w.code == "rejected" for w in res.warnings)
+    assert "unsupported_type" in res.warnings[0].message

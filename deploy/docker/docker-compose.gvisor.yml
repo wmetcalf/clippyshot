@@ -39,6 +39,11 @@ services:
       - BLASTBOX_DATABASE_URL=postgresql://${POSTGRES_USER:-clippyshot}:${POSTGRES_PASSWORD:-clippyshot-dev}@postgres:5432/${POSTGRES_DB:-clippyshot}
       - BLASTBOX_JOB_ROOT=${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}/jobs
       - BLASTBOX_ENGINES=clippyshot=${CLIPPYSHOT_WORKER_IMAGE:-clippyshot-cold-worker:dev}
+      # Per-engine forwardable-param allowlist (default-deny). MUST mirror the cold
+      # dispatcher — without it, _sanitize_params falls back to denylist-only on this warm
+      # tier and a hostile job's `params` reaches the worker's CLIPPYSHOT_* knobs (resource
+      # limits + DISCLOSE_SECURITY_INTERNALS). Shared override var keeps all tiers in lockstep.
+      - BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS=${BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS:-CLIPPYSHOT_OCR,CLIPPYSHOT_OCR_ALL,CLIPPYSHOT_QR,CLIPPYSHOT_OCR_LANG,CLIPPYSHOT_OCR_PSM}
       # --- sidecar primitive ---
       - BLASTBOX_DISPATCH_WARM_ONLY=1
       # Concurrency MUST match warm_size — the warm dispatch path blocks until the job
