@@ -1,7 +1,6 @@
 """Unit tests for the per-page image selection helper used by QR/OCR."""
 from __future__ import annotations
 
-from pathlib import Path
 
 from clippyshot.converter import select_scan_image
 

@@ -3,8 +3,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = [pytest.mark.integration]
-
 from clippyshot.converter import ConvertOptions
 from clippyshot.limits import Limits
 from tests.conftest import (
@@ -13,6 +11,8 @@ from tests.conftest import (
     needs_pdftoppm,
     needs_soffice,
 )
+
+pytestmark = [pytest.mark.integration]
 
 SAFE = FIXTURES_DIR / "safe"
 

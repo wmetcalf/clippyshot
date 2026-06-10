@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import pytest
 
 from clippyshot.trimmer import trim_bottom_solid
 

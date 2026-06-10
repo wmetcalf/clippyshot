@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 from clippyshot.errors import SandboxError, SandboxUnavailable
-from clippyshot.sandbox.base import Sandbox, SandboxRequest
+from clippyshot.sandbox.base import SandboxRequest
 from clippyshot.sandbox.bwrap import _apply_rlimits
 from clippyshot.types import SandboxResult
 

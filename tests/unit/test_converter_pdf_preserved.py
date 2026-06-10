@@ -1,9 +1,7 @@
 """Verify the converter preserves the intermediate PDF as output_dir/document.pdf."""
 from __future__ import annotations
 
-from pathlib import Path
 
-import pytest
 
 from clippyshot.converter import _copy_pdf_to_output
 

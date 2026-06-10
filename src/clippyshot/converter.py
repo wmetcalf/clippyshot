@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import tempfile
 import time
@@ -136,7 +137,6 @@ def _mediabox_mm(page) -> tuple[float, float]:
 # `Do` invokes an XObject (form or image). `BI` starts an inline image.
 # These are matched as whole-word tokens — we search with leading whitespace
 # + trailing whitespace/newline to avoid catching substrings of other words.
-import re
 _NON_TEXT_OPS_RE = re.compile(rb"(?m)(?:^|\s)(?:Do|BI|f|F|S|B|b|f\*|B\*|b\*)(?:$|\s)")
 
 
