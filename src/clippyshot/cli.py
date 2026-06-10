@@ -100,6 +100,32 @@ def _version_cmd(_: argparse.Namespace) -> int:
     return 0
 
 
+def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
+    from clippyshot import setup_sandbox as ss
+
+    rep = ss.diagnose()
+    print("Sandbox host check:")
+    print(f"  apparmor_restrict_unprivileged_userns = {'1 (ACTIVE)' if rep.restrict_active else '0/absent'}")
+    for note in rep.notes:
+        print(f"  {note}")
+    if not rep.actions:
+        print("\nNothing to do — the namespace backends are usable (or unaffected).")
+        return 0
+    profile_dir = Path(args.profile_dir) if args.profile_dir else ss.default_profile_dir()
+    if not profile_dir.is_dir():
+        print(f"\nprofile dir not found: {profile_dir} (pass --profile-dir)", file=sys.stderr)
+        return 2
+    if args.apply:
+        print(f"\nLoading {len(rep.actions)} scoped profile(s) via sudo "
+              "(you'll be prompted for your password):")
+        return ss.apply(rep.actions, profile_dir)
+    print(f"\n{len(rep.actions)} scoped AppArmor profile(s) to load. Re-run with --apply to "
+          "load them (sudo), or run:\n")
+    for cmd in ss.commands_for(rep.actions, profile_dir):
+        print("  " + " ".join(cmd))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="clippyshot")
     sub = p.add_subparsers(dest="command", required=True)
@@ -141,6 +167,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     pv = sub.add_parser("version")
     pv.set_defaults(func=_version_cmd)
+
+    pss = sub.add_parser(
+        "setup-sandbox",
+        help="detect (and with --apply, load) the scoped AppArmor userns profiles for bwrap/nsjail",
+    )
+    pss.add_argument("--apply", action="store_true",
+                     help="load the needed profiles via sudo (interactive); default just prints them")
+    pss.add_argument("--profile-dir", default=None,
+                     help="directory holding the clippyshot-{bwrap,nsjail} profiles (default: repo deploy/apparmor)")
+    pss.set_defaults(func=_setup_sandbox_cmd)
     return p
 
 
