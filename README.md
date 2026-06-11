@@ -242,7 +242,7 @@ flowchart LR
     api -.->|fork + sandbox| sbx
 ```
 
-No Docker dependency. FastAPI forks a fresh `bwrap` (or `nsjail`) subprocess per conversion with its own user/mount/PID/IPC/UTS/cgroup/network namespaces, dropped caps, seccomp-BPF (bwrap) or KAFEL (nsjail), rlimits, and `aa-exec clippyshot-soffice` attached. On Ubuntu 24.04+ this needs the shipped `clippyshot-{bwrap,nsjail,soffice}` AppArmor profiles loaded once; see `deploy/apparmor/README.md`.
+No Docker dependency. FastAPI forks a fresh `bwrap` (or `nsjail`) subprocess per conversion with its own user/mount/PID/IPC/UTS/cgroup/network namespaces, dropped caps, seccomp-BPF (bwrap) or KAFEL (nsjail), rlimits, and the `clippyshot-soffice` AppArmor profile attached to soffice (the pdfium rasterizer opts out — that profile can't describe its venv). On Ubuntu 24.04+ this needs the shipped `clippyshot-{bwrap,nsjail,soffice}` AppArmor profiles loaded once — run **`clippyshot setup-sandbox`** to detect what's needed and `clippyshot setup-sandbox --apply` to load the scoped userns profiles via sudo (or load them by hand per `deploy/apparmor/README.md`).
 
 ### Shared pipeline (all modes)
 
@@ -313,20 +313,21 @@ Additional input-handling hardening on the HTTP entry point:
 
 ## Configuration
 
-All limits are set via `clippyshot.limits.Limits.from_env()`. The env var
-names use the prefix `CLIPPYSHOT_` with the suffix shown below:
+All limits are set via `clippyshot.limits.Limits.from_env()`. **[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)
+is the full reference** (every `CLIPPYSHOT_*` knob by group); the most common ones:
 
 | Env var | Default | Effect |
 |---|---|---|
 | `CLIPPYSHOT_SANDBOX` | _(auto)_ | Force `nsjail`, `bwrap`, or `container`; fail loudly if unavailable |
+| `CLIPPYSHOT_INNER_NONO` | off | Optional nested **Landlock** (nono) layer inside the selected backend — opt-in defense-in-depth on runc + the FC guest (fails fast under gVisor, which has no Landlock). See `docs/CONFIGURATION.md`. |
 | `CLIPPYSHOT_TIMEOUT` | `60` | Per-conversion soffice timeout (seconds) |
 | `CLIPPYSHOT_MAX_PAGES` | `50` | Page count cap (truncates beyond this) |
 | `CLIPPYSHOT_DPI` | `150` | Rasterization DPI |
 | `CLIPPYSHOT_RASTERIZER` | `pdfium` | PDF→PNG engine: `pdfium` (PDFium/pypdfium2, ~2× faster) or `pdftoppm` (poppler) |
 | `CLIPPYSHOT_WARM_UNO` | `0` | When `1`, `engine.warmup()` starts a persistent `unoserver` and the runner converts through it (parity-preserving; fail-closed to cold). Inert without `warmup()` |
 | `CLIPPYSHOT_MAX_INPUT` | `104857600` | Max accepted upload size (100 MiB) |
-| `CLIPPYSHOT_MEM` | `1073741824` | Per-conversion RSS cap (1 GiB) |
-| `CLIPPYSHOT_TMPFS` | `536870912` | Per-conversion tmpfs cap (512 MiB) |
+| `CLIPPYSHOT_MEM` | `8589934592` | Per-conversion RLIMIT_AS / VADDR cap (8 GiB — soffice mmaps 4–8 GB at ~500 MB RSS; the container `--memory` is the real RSS cap) |
+| `CLIPPYSHOT_TMPFS` | `1073741824` | Per-conversion tmpfs / RLIMIT_FSIZE cap (1 GiB) |
 | `CLIPPYSHOT_DATABASE_URL` | `sqlite:///./clippyshot-jobs.db` | SQL job metadata backend; use `postgresql://...` in Compose/prod |
 
 ## Supported formats
