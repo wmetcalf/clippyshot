@@ -442,6 +442,10 @@ class LibreOfficeRunner:
             def _warm_diag(msg: str) -> None:
                 # Opt-in warm/cold-decision breadcrumb (set CLIPPYSHOT_WARM_DIAG_FILE to an
                 # absolute path). No-op by default so it leaves no stray file in normal output.
+                # OPERATOR-only: the dispatcher reserves CLIPPYSHOT_WARM_DIAG_FILE so a client's
+                # job.params can never set it (blastbox _is_reserved_env_key). Defense-in-depth:
+                # open with O_NOFOLLOW so the breadcrumb can't be redirected through a symlink to
+                # clobber an outside file; append-create only.
                 p = _os.environ.get("CLIPPYSHOT_WARM_DIAG_FILE")
                 if not p:
                     return
@@ -449,8 +453,13 @@ class LibreOfficeRunner:
                     # Append: _warm_diag is called multiple times per conversion (server
                     # status, then WARM_OK/WARM_FAIL) — overwriting would drop the earlier
                     # breadcrumbs and leave only the last line.
-                    with Path(p).open("a") as _f:
-                        _f.write(msg)
+                    fd = _os.open(
+                        p, _os.O_WRONLY | _os.O_APPEND | _os.O_CREAT | _os.O_NOFOLLOW, 0o600
+                    )
+                    try:
+                        _os.write(fd, msg.encode("utf-8", "replace"))
+                    finally:
+                        _os.close(fd)
                 except OSError:
                     pass
 
