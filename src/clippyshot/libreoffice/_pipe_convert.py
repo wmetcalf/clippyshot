@@ -91,7 +91,16 @@ def main(argv: list[str]) -> int:
         )
         return 2
     pipe_name, in_url, out_url, filter_name = argv[1], argv[2], argv[3], argv[4]
-    filter_data = json.loads(argv[5]) if len(argv) == 6 and argv[5] else {}
+    # argv[5] is filter_data JSON the runner builds via json.dumps; empty → no filter data.
+    # A non-empty but malformed value is an internal-caller bug — exit cleanly (2) with a
+    # message instead of an uncaught JSONDecodeError traceback (caller maps non-zero anyway).
+    filter_data: dict = {}
+    if len(argv) == 6 and argv[5]:
+        try:
+            filter_data = json.loads(argv[5])
+        except json.JSONDecodeError as exc:
+            sys.stderr.write(f"_pipe_convert.py: invalid filter_data JSON: {exc}\n")
+            return 2
 
     ctx = _resolve(pipe_name)
     smgr = ctx.ServiceManager
