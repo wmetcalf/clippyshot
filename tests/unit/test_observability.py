@@ -1,4 +1,3 @@
-import pytest
 
 from clippyshot.observability.logging import configure_logging, get_logger
 from clippyshot.observability.metrics import (

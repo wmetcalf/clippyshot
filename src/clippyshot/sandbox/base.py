@@ -24,6 +24,12 @@ class SandboxRequest:
     limits: Limits = field(default_factory=Limits)
     env: dict[str, str] = field(default_factory=dict)
     workdir: Path = Path("/")
+    # Attach the soffice-specific AppArmor profile (bwrap aa-exec / nsjail --proc_apparmor)?
+    # Default True. A stage that runs a *different* binary the soffice profile doesn't cover
+    # (e.g. the pdfium rasterizer, which bind-mounts its own sys.prefix/venv) sets this False
+    # so it isn't denied by a profile written for soffice — it stays confined by the
+    # namespace + (nsjail) seccomp.
+    attach_apparmor: bool = True
 
 
 @runtime_checkable

@@ -14,7 +14,12 @@ These two profiles are required on hosts where
 24.04). Without them, bwrap and nsjail cannot create user namespaces and
 ClippyShot cannot run.
 
-**Loading** (one-time, survives reboots):
+**Automated (recommended):** `clippyshot setup-sandbox` probes whether `bwrap`/`nsjail`
+can actually create a user namespace and prints exactly which scoped profiles need loading;
+`clippyshot setup-sandbox --apply` loads them via `sudo` (interactive — the password prompt
+is your consent; it never escalates silently). Idempotent — a no-op once loaded.
+
+**Loading manually** (one-time, survives reboots):
 
 ```sh
 sudo cp deploy/apparmor/clippyshot-bwrap deploy/apparmor/clippyshot-nsjail /etc/apparmor.d/

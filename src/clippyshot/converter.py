@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import tempfile
 import time
@@ -136,7 +137,6 @@ def _mediabox_mm(page) -> tuple[float, float]:
 # `Do` invokes an XObject (form or image). `BI` starts an inline image.
 # These are matched as whole-word tokens — we search with leading whitespace
 # + trailing whitespace/newline to avoid catching substrings of other words.
-import re
 _NON_TEXT_OPS_RE = re.compile(rb"(?m)(?:^|\s)(?:Do|BI|f|F|S|B|b|f\*|B\*|b\*)(?:$|\s)")
 
 
@@ -349,12 +349,17 @@ def _process_page_scanners(
                     for r in results
                 ]
             except Exception as e:
-                qr_skipped = "timeout" if "timeout" in str(e).lower() else "error"
-                warnings.append({
-                    "code": "qr_scan_error",
-                    "page": page_record.get("index"),
-                    "message": str(e)[:500],
-                })
+                if "timeout" in str(e).lower():
+                    # Deadline/budget exhaustion, not a scanner failure — clean skip, no
+                    # qr_scan_error warning (mirrors the OCR path).
+                    qr_skipped = "timeout"
+                else:
+                    qr_skipped = "error"
+                    warnings.append({
+                        "code": "qr_scan_error",
+                        "page": page_record.get("index"),
+                        "message": str(e)[:500],
+                    })
 
     # OCR branch
     if not ocr_enabled:
@@ -399,12 +404,19 @@ def _process_page_scanners(
                         "duration_ms": result.duration_ms,
                     }
                 except Exception as e:
-                    ocr_obj["skipped"] = "timeout" if "timeout" in str(e).lower() else "error"
-                    warnings.append({
-                        "code": "ocr_scan_error",
-                        "page": page_record.get("index"),
-                        "message": str(e)[:500],
-                    })
+                    if "timeout" in str(e).lower():
+                        # OCR ran out of time (per-page deadline / remaining budget) — the
+                        # same class as the pre-launch "timeout_budget" skip, NOT a scanner
+                        # failure. Record a clean skip with NO ocr_scan_error warning (slow
+                        # tiers on dense pages hit this; a warning on it is just noise).
+                        ocr_obj["skipped"] = "timeout"
+                    else:
+                        ocr_obj["skipped"] = "error"
+                        warnings.append({
+                            "code": "ocr_scan_error",
+                            "page": page_record.get("index"),
+                            "message": str(e)[:500],
+                        })
 
     return qr_list, qr_skipped, ocr_obj, warnings
 
@@ -622,12 +634,15 @@ class Converter:
                 except RasterizeError as e:
                     raise ConversionError(f"rasterize failed: {e}", cause=e) from e
                 
-                # Check rendered dimensions against limits.
-                for page in pages:
-                    if page.width_px > options.limits.max_width_px or page.height_px > options.limits.max_height_px:
-                        raise RasterizeError(
-                            f"page {page.index} dimensions {page.width_px}x{page.height_px} "
-                            f"exceed limits {options.limits.max_width_px}x{options.limits.max_height_px}"
+                # Check rendered dimensions against limits. A RasterizeError here would
+                # escape the try above and surface as exit 4 (internal) instead of 3
+                # (conversion failure); raise ConversionError to honor the contract.
+                for rp in pages:
+                    if rp.width_px > options.limits.max_width_px or rp.height_px > options.limits.max_height_px:
+                        raise ConversionError(
+                            f"rasterize failed: page {rp.index} dimensions "
+                            f"{rp.width_px}x{rp.height_px} exceed limits "
+                            f"{options.limits.max_width_px}x{options.limits.max_height_px}"
                         )
 
                 timings["rasterize"] = int((time.monotonic() - t) * 1000)
@@ -751,9 +766,18 @@ class Converter:
                 # budget (same helper the rasterizer uses) — each worker in
                 # this pool loads a full-page RGB buffer for hash/trim/focus,
                 # so N-way parallelism costs ~N × page_size RAM.
-                from clippyshot.runtime.host_limits import max_concurrent_page_ops
+                from clippyshot.limits import max_concurrent_page_ops
+                # Size-aware, like the rasterizer's shard budget: a giant clamped page
+                # (~30000px → ~2 GB RGBA) must collapse this fan-out to 1, not run N
+                # concurrent multi-GB decodes — the gVisor warm tier has no per-worker
+                # memory cgroup, so an unbounded fan-out is a host-memory DoS there.
+                _peak_mb = (
+                    max(rp.width_px * rp.height_px * 4 for rp in pages) / (1024 * 1024)
+                    if pages else 0.0
+                )
                 max_workers = (
-                    min(len(pages), (_os.cpu_count() or 2), max_concurrent_page_ops())
+                    min(len(pages), (_os.cpu_count() or 2),
+                        max_concurrent_page_ops(per_page_peak_mb=_peak_mb))
                     if pages else 1
                 )
                 # page_sheet_names is indexed 0-based same as the other

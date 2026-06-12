@@ -27,6 +27,7 @@ Usage::
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -50,7 +51,7 @@ from blastbox.limits import Limits as BlastboxLimits
 from blastbox.worker.engine import DetonationResult
 
 if TYPE_CHECKING:
-    from clippyshot.libreoffice.uno import UnoServer
+    from clippyshot.libreoffice.uno import WarmConverter
 
 # ─── ClippyShotPage: exported typed node (in-process use) ───────────────────
 # Registered so callers can walk typed in-process trees.  NOT used as a child
@@ -119,7 +120,7 @@ def _focused_id(index: int) -> str:
     return f"p{index}-focused"
 
 
-def _build_converter(uno_server: UnoServer | None = None):
+def _build_converter(uno_server: WarmConverter | None = None):
     """Build a ClippyShot Converter the same way ``worker._build_converter()`` does.
 
     ``uno_server`` (the warm tier) is threaded into the LibreOffice runner so the
@@ -170,6 +171,64 @@ def _scanner_record(page_rec: dict) -> Record:
     )
 
 
+# ─── Warm-tier priming ──────────────────────────────────────────────────────
+
+# Minimal flat-ODF (single-XML) documents — used to warm the Impress/Draw paths without
+# shipping binary fixtures. A flat presentation/drawing imports + exports through the same
+# LibreOffice app + PDF-export filter a real .pptx/.odp / .odg/.vsdx does, minus only the
+# binary-OOXML import code (a fraction of the warmup). Validated to convert under LO 25.8/runsc.
+_PRIME_FODP = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+    'xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" office:version="1.3" '
+    'office:mimetype="application/vnd.oasis.opendocument.presentation">'
+    '<office:body><office:presentation><draw:page draw:name="p1"/>'
+    "</office:presentation></office:body></office:document>\n"
+).encode()
+_PRIME_FODG = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+    'xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" office:version="1.3" '
+    'office:mimetype="application/vnd.oasis.opendocument.graphics">'
+    '<office:body><office:drawing><draw:page draw:name="p1"/>'
+    "</office:drawing></office:body></office:document>\n"
+).encode()
+
+# Throwaway documents converted during warmup() to load LibreOffice's document framework
+# + PDF-export filters BEFORE the warm snapshot is checkpointed. ONE entry per export-filter
+# family (writer/calc/impress/draw) — because in the disposable one-job-per-restore model every
+# slot is restored from the SAME snapshot, so the snapshot must have ALL families warm or e.g.
+# an .xlsx slot pays the Calc warmup the docx prime never covered. The shared framework cost
+# (~3.5s) is paid once by the first (txt) prime; each later family prime is sub-second.
+# (filename, bytes, detection-label → pdf_filter_for_label family).
+_WARM_PRIME_DOCS: tuple[tuple[str, bytes, str], ...] = (
+    ("clippyshot-prime.txt", b"clippyshot warm prime\n", "txt"),  # writer_pdf_Export
+    ("clippyshot-prime.csv", b"a,b,c\n1,2,3\n", "csv"),  # calc_pdf_Export
+    ("clippyshot-prime.fodp", _PRIME_FODP, "fodp"),  # impress_pdf_Export
+    ("clippyshot-prime.fodg", _PRIME_FODG, "fodg"),  # draw_pdf_Export
+)
+
+
+def _prime_warm_server(server: "WarmConverter") -> None:
+    """Run throwaway conversions against a freshly-started warm server so its filters are
+    loaded before the snapshot is taken. Best-effort — never raises (priming is an
+    optimization; a failure just means the first real convert pays the warmup once)."""
+    import logging
+    import tempfile
+
+    log = logging.getLogger("clippyshot.engine")
+    with tempfile.TemporaryDirectory(prefix="clippyshot-prime-") as td:
+        tdir = Path(td)
+        for name, data, label in _WARM_PRIME_DOCS:
+            src = tdir / name
+            src.write_bytes(data)
+            dst = tdir / (name + ".pdf")
+            try:
+                server.convert(src, dst, label)
+            except Exception as exc:  # noqa: BLE001
+                log.info("warm prime convert (%s) skipped: %s", label, exc)
+
+
 # ─── Engine ─────────────────────────────────────────────────────────────────
 
 
@@ -185,37 +244,87 @@ class ClippyShotEngine:
 
     def __init__(self) -> None:
         self._converter = None  # lazy
-        self._uno_server: UnoServer | None = None  # set by warmup() in the warm tier
+        self._uno_server: WarmConverter | None = None  # set by warmup() in the warm tier
 
     def warmup(self) -> None:
         """Pre-pay LibreOffice startup for the warm tier (blastbox warm-pool seam).
 
         With ``CLIPPYSHOT_WARM_UNO=1`` (the FC snapshot / warm-pool tier), ensure a
-        persistent unoserver is listening *before* any input arrives — adopting one
-        the FC rootfs already started, or spawning one. Best-effort: a failure here
-        leaves ``_uno_server`` None and ``detonate()`` converts via the cold soffice
-        path, so a warm hiccup never fails the slot. Off by default → no behaviour
-        change for the docker/sandbox tier."""
+        persistent warm soffice is listening *before* any input arrives — adopting one
+        the rootfs/snapshot already started, or spawning one. Best-effort: a failure
+        here leaves ``_uno_server`` None and ``detonate()`` converts via the cold
+        soffice path, so a warm hiccup never fails the slot. Off by default → no
+        behaviour change for the docker/sandbox tier.
+
+        Transport (``CLIPPYSHOT_WARM_UNO_TRANSPORT``): ``socket`` (default) uses the TCP
+        ``unoserver`` (the FC tier); ``pipe`` uses ``soffice --accept=pipe`` (an AF_UNIX
+        socket — required by the gVisor C/R tier, whose worker seccomp policy permits only
+        AF_UNIX sockets so the TCP unoserver can't bind, and whose UDS acceptor survives
+        checkpoint/restore via the accept-retry LD_PRELOAD shim)."""
         if os.environ.get("CLIPPYSHOT_WARM_UNO", "").lower() not in ("1", "true", "yes"):
             return
         import atexit
         import logging
 
-        from clippyshot.libreoffice.uno import UnoServer
+        from clippyshot.libreoffice.profile import HardenedProfile
 
-        server = UnoServer()
+        # SECURITY: the warm soffice/unoserver MUST boot with the same hardened LibreOffice
+        # profile the cold path writes (MacroSecurityLevel=3, DisableMacrosExecution=true, no
+        # Basic, no Java, no remote) — otherwise the warm tier parses untrusted documents with
+        # LibreOffice's permissive defaults, defeating the control that lets ClippyShot ACCEPT
+        # macro-enabled formats. Written here, before the snapshot is taken and before any
+        # untrusted input exists, so the lockdown is baked into the warm process captured in the
+        # FC/gVisor snapshot at zero per-job cost.
+        profile_dir = Path(
+            os.environ.get("CLIPPYSHOT_WARM_PROFILE_DIR", "/tmp/.clippyshot-warm-profile")
+        )
+        try:
+            HardenedProfile(profile_dir).write()
+            user_installation: str | None = HardenedProfile(profile_dir).url()
+        except OSError as exc:
+            # Fail CLOSED for a security control: if the hardened profile can't be written, do
+            # NOT start an unhardened warm server — leave _uno_server None so detonate() uses the
+            # cold path (which writes its own hardened profile per job).
+            logging.getLogger("clippyshot.engine").warning(
+                "warm-UNO: could not write hardened profile (%s); staying on cold path", exc
+            )
+            return
+
+        transport = os.environ.get("CLIPPYSHOT_WARM_UNO_TRANSPORT", "socket").strip().lower()
+        server: WarmConverter
+        if transport == "pipe":
+            from clippyshot.libreoffice.uno_pipe import SofficePipeServer
+
+            server = SofficePipeServer(user_installation=user_installation)
+        else:
+            from clippyshot.libreoffice.uno import UnoServer
+
+            server = UnoServer(user_installation=user_installation)
         try:
             server.start()
         except Exception as exc:
             # Non-fatal: detonate() falls back to cold. Log so warm-tier
-            # misconfiguration (missing unoserver, soffice failure) is diagnosable.
+            # misconfiguration (missing unoserver/soffice, transport mismatch) is
+            # diagnosable.
             logging.getLogger("clippyshot.engine").warning(
-                "warm-UNO warmup failed; falling back to cold conversion: %s", exc
+                "warm-UNO warmup failed (transport=%s); falling back to cold conversion: %s",
+                transport,
+                exc,
             )
             return
         # Reap a spawned server if the interpreter exits before reap (adopted
         # servers we don't own are a no-op on stop()).
         atexit.register(server.stop)
+        # Prime the conversion path BEFORE the warm snapshot is taken. A freshly-started
+        # soffice/unoserver is *listening* but its document framework + import/export filters
+        # are unloaded, so the FIRST real conversion pays a ~3-4s warmup (measured 4.65s vs
+        # 0.7s steady on gVisor C/R). In the disposable one-job-per-restore model that first
+        # convert is the ONLY convert, so without priming the warm tier is barely faster than
+        # cold. Running a throwaway conversion here — captured warm in the FC/gVisor snapshot —
+        # makes the first post-restore conversion steady-state. Best-effort + opt-out
+        # (CLIPPYSHOT_WARM_PRIME=0): a priming failure must never fail the slot.
+        if os.environ.get("CLIPPYSHOT_WARM_PRIME", "1").lower() in ("1", "true", "yes"):
+            _prime_warm_server(server)
         self._uno_server = server
 
     def _get_converter(self):
@@ -248,16 +357,72 @@ class ClippyShotEngine:
         from clippyshot.limits import Limits as CSLimits
 
         # Map blastbox Limits.timeout_s → ClippyShot Limits (valid range: [1, 600]).
+        # Funnel through from_env() so the server path honours every CLIPPYSHOT_* tunable
+        # (DPI, MAX_PAGES, MAX_WIDTH/HEIGHT, SKIP_BLANKS, RSS/tmpfs caps) — not just timeout.
+        # This is now the ONLY limits-construction point for the server (the bespoke api.py/
+        # worker.py were removed when ClippyShot moved onto blastbox.host), so without it the
+        # per-document page-count + pixel caps were silently unenforced. The blastbox timeout
+        # wins last via the override (preserving the [1, 600] clamp).
         cs_timeout = max(1, min(600, limits.timeout_s))
-        cs_limits = CSLimits(timeout_s=cs_timeout)
+        cs_limits = CSLimits.from_env(timeout_s=cs_timeout)
+
+        # Per-engine scanner args from the CLIPPYSHOT_* env namespace. The blastbox
+        # dispatcher forwards job.params → worker extra_env for keys matching
+        # ^[A-Z][A-Z0-9_]*$ (CLIPPYSHOT_* is allowed), so the UI's QR/OCR toggles
+        # arrive here as env vars. Defaults preserve the framework-proof behaviour:
+        # QR on, OCR off. Values are validated/clamped (untrusted client params).
+        def _flag(name: str, default: bool) -> bool:
+            v = os.environ.get(name)
+            return default if v is None else v.strip().lower() in ("1", "true", "yes", "on")
+
+        ocr_lang = (os.environ.get("CLIPPYSHOT_OCR_LANG", "") or "").strip() or "eng+Latin"
+        if not re.fullmatch(r"[A-Za-z0-9_+\-]+", ocr_lang):
+            ocr_lang = "eng+Latin"
+        try:
+            ocr_psm = int(os.environ.get("CLIPPYSHOT_OCR_PSM", "3"))
+        except (TypeError, ValueError):
+            ocr_psm = 3
+        ocr_psm = min(13, max(0, ocr_psm))
+
         cs_opts = ConvertOptions(
             limits=cs_limits,
-            qr_enabled=True,
-            ocr_enabled=False,  # OCR is opt-in; keep fast for framework proof
+            qr_enabled=_flag("CLIPPYSHOT_QR", True),
+            ocr_enabled=_flag("CLIPPYSHOT_OCR", False),
+            ocr_all=_flag("CLIPPYSHOT_OCR_ALL", False),
+            ocr_lang=ocr_lang,
+            ocr_psm=ocr_psm,
         )
 
+        from clippyshot.errors import DetectionError
+
         converter = self._get_converter()
-        result = converter.convert(input, outdir, cs_opts)
+        try:
+            result = converter.convert(input, outdir, cs_opts)
+        except DetectionError as exc:
+            # A detector rejection (oversized / unsupported / structural-sanity fail) is a
+            # legitimate verdict, not a pipeline error. Surface it as status="rejected" — the
+            # dispatcher keeps such a job DONE (dispatch.py gates only engine_error) — instead
+            # of letting it reach the harness as a generic engine_error/FAILED. Restores the
+            # documented "input rejected" outcome for the server path.
+            reason = str(exc)[:2000]
+            return DetonationResult(
+                payload=EmbeddedResource(
+                    embedded_path="/",
+                    content_type="application/octet-stream",
+                    depth=0,
+                    metadata=Record(fields={"label": "rejected", "reason": reason}),
+                    children=[],
+                ),
+                artifacts=[],
+                detected=Detection(
+                    label="unknown",
+                    mime="application/octet-stream",
+                    confidence=0.0,
+                    source="clippyshot",
+                ),
+                warnings=[Warning(code="rejected", message=reason)],
+                status="rejected",
+            )
         meta = result.metadata
 
         # ── Detection ───────────────────────────────────────────────────────
@@ -337,6 +502,19 @@ class ClippyShotEngine:
 
         # ── Payload root ─────────────────────────────────────────────────────
         render = meta.get("render", {})
+        # Embed the FULL clippyshot metadata (legacy metadata.json schema) as a
+        # single JSON string so the host UI can render the complete detail view:
+        # detection extras (magika_label/mime, libmagic_mime, agreed_with_extension),
+        # render stats (dpi, blank_pages, duration_ms timings, sheet inventory) and
+        # per-page derivative stats (trimmed + focused: removed_percent,
+        # background_color, dimensions). The typed envelope only carries a thin
+        # slice of this; the JSON string carries the rest losslessly. A scalar
+        # string adds no node-count/depth pressure (the depth guard is
+        # string-aware). Fail-open: a serialization hiccup must never fail the job.
+        try:
+            metadata_json = json.dumps(meta, default=str)
+        except (TypeError, ValueError):
+            metadata_json = ""
         payload = EmbeddedResource(
             embedded_path="/",
             content_type=det.get("mime") or "application/octet-stream",
@@ -348,6 +526,7 @@ class ClippyShotEngine:
                     "page_count_rendered": render.get("page_count_rendered", 0),
                     "truncated": bool(render.get("truncated", False)),
                     "clippyshot_version": meta.get("clippyshot_version", ""),
+                    "clippyshot_metadata": metadata_json,
                 }
             ),
             children=list(page_nodes),

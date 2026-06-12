@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 
 import pytest
 
 import clippyshot.qr as qr_mod
-from clippyshot.qr import QRResult, ScanError, scan_qr
+from clippyshot.qr import ScanError, scan_qr
 
 
 class _FakeCompleted:
@@ -101,3 +100,17 @@ def test_scan_qr_missing_binary_raises_scan_error(monkeypatch, tmp_path):
     with pytest.raises(ScanError) as exc_info:
         scan_qr(png)
     assert "not installed" in str(exc_info.value).lower()
+
+
+def test_scan_qr_sigkill_classified_as_timeout(tmp_path):
+    """A -SIGKILL exit (the sandbox killing ZXingReader at its deadline) is a TIMEOUT,
+    not a crash — the message must say 'timeout' so the converter records
+    qr_skipped='timeout' (clean) instead of a qr_scan_error. Mirrors the OCR path."""
+    import signal as _signal
+
+    png = tmp_path / "p.png"
+    png.write_bytes(b"fake")
+    with pytest.raises(ScanError) as exc_info:
+        scan_qr(png, argv_runner=lambda argv, timeout_s: (-_signal.SIGKILL, "", ""))
+    assert "timeout" in str(exc_info.value).lower()
+    assert "exited" not in str(exc_info.value).lower()

@@ -15,7 +15,11 @@ Ported from tika's `ZXingCPPScanner.parseJsonLine` (office-links branch).
 from __future__ import annotations
 
 import re
+import shutil
+import signal
+import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 from clippyshot._argv import assert_positional as _assert_positional
 
@@ -128,11 +132,16 @@ def _read_string(line: str, i: int) -> tuple[str, int]:
             if i >= len(line):
                 raise ValueError("unterminated escape")
             esc = line[i]
-            if esc == "n": buf.append("\n")
-            elif esc == "r": buf.append("\r")
-            elif esc == "t": buf.append("\t")
-            elif esc in ('"', "\\", "/"): buf.append(esc)
-            else: buf.append(esc)
+            if esc == "n":
+                buf.append("\n")
+            elif esc == "r":
+                buf.append("\r")
+            elif esc == "t":
+                buf.append("\t")
+            elif esc in ('"', "\\", "/"):
+                buf.append(esc)
+            else:
+                buf.append(esc)
             i += 1
             continue
         buf.append(ch)
@@ -172,11 +181,6 @@ def parse_zxing_output(stdout: str) -> list[QRResult]:
             )
         )
     return results
-
-
-import shutil
-import subprocess
-from pathlib import Path
 
 
 class ScanError(RuntimeError):
@@ -404,6 +408,11 @@ def scan_qr(
     except FileNotFoundError:
         raise ScanError("ZXingReader binary not installed — install the zxing-cpp package")
     if exit_code != 0:
+        if exit_code == -signal.SIGKILL:
+            # The sandbox SIGKILLs ZXingReader at its timeout (ContainerSandbox returns
+            # -SIGKILL on deadline) — a timeout, not a scanner crash. Mirror run_ocr so the
+            # converter records qr_skipped="timeout" (clean), not a qr_scan_error.
+            raise ScanError(f"ZXingReader timeout (deadline {timeout_s}s) on {png_path.name}")
         raise ScanError(
             f"ZXingReader exited {exit_code} on {png_path.name}: "
             f"{stderr.strip()[:500]}"

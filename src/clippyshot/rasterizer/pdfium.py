@@ -50,6 +50,14 @@ class PdfiumRasterizer(ShardingRasterizer):
         # a harmless no-op.
         return [Mount(self._venv_root, self._venv_root, read_only=True)]
 
+    def _attach_apparmor(self) -> bool:
+        # The shared soffice AppArmor profile (bwrap aa-exec / nsjail --proc_apparmor) is
+        # written for soffice and does NOT grant the pypdfium2 sys.prefix/venv this stage
+        # bind-mounts — under it, Python's site.py is denied reading pyvenv.cfg (EACCES).
+        # The render subprocess stays confined by the namespace + (nsjail) seccomp; don't
+        # also impose a profile that can't describe its filesystem.
+        return False
+
     def _env(self) -> dict[str, str]:
         # pypdfium2's CLI defaults to debug-level logging on stderr; quiet it
         # so a 50-page sharded render doesn't spew per-page noise.
@@ -71,5 +79,12 @@ class PdfiumRasterizer(ShardingRasterizer):
             "--format", "png",
             "--output", str(out_dir),
             "--prefix", "page-",
+            # Render serially WITHIN this invocation. The outer ShardingRasterizer already
+            # parallelises across page-range subprocesses; pypdfium2's own default multiprocessing
+            # would multiply that — each internal worker holds a full-page RGBA buffer, so on an
+            # oversized page (~2.7 GB each) the internal fan-out is a host-memory-exhaustion
+            # multiplier (measured ~+425% RSS). One render per shard keeps the aggregate bounded
+            # by the size-aware shard_count.
+            "--processes", "1",
             "--", str(sandbox_pdf),
         ]

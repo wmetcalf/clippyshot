@@ -1,0 +1,85 @@
+# gVisor C/R warm-pool SIDECAR — a dedicated, socket-less warm dispatcher.
+#   ./clippyshot-compose -f docker-compose.yml -f docker-compose.gvisor.yml up -d dispatcher-gvisor
+#
+# Runs `runsc` checkpoint/restore directly, so it needs root-in-container + a scoped
+# cap set + seccomp=unconfined (proven minimal: runsc fails the gofer fork otherwise).
+# That privilege is CONFINED here: this box holds NO docker socket, NO ports, only the
+# Postgres queue + the warm rootfs. The main docker-dispatcher-1 keeps cap_drop=ALL +
+# read_only. BLASTBOX_DISPATCH_WARM_ONLY makes it claim-gate on free warm slots and never
+# cold-fall-back, so overflow stays queued for the cold dispatcher / FC sidecar.
+services:
+  dispatcher-gvisor:
+    image: ${CLIPPYSHOT_IMAGE:-clippyshot:dev}
+    # Clear stale runsc state + checkpoint on startup, THEN run the dispatch loop. The C/R
+    # snapshot is per-process and rebuilt fresh; a leftover checkpoint.img from a prior run
+    # makes `runsc checkpoint` fail "file exists" (it won't overwrite), so the sidecar could
+    # not survive a restart without this. (Image default command is the API server.)
+    command: ["sh", "-c", "rm -rf /var/lib/blastbox/gvisor-snapshot /var/lib/blastbox/gvisor-base-* 2>/dev/null; rm -rf /var/lib/blastbox/gvisor-root/* 2>/dev/null; exec blastbox dispatch"]
+    restart: unless-stopped
+    # The image default healthcheck (`clippyshot selftest`) runs the COLD container sandbox,
+    # which refuses to start as root (this sidecar runs as uid 0 for runsc). It's the wrong
+    # probe for a warm-only dispatcher; liveness is covered by restart: unless-stopped.
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    user: "0:0"                       # runsc must be root inside the container to build the sandbox
+    # runsc-in-docker needs docker's DEFAULT caps PLUS these three (proven minimal: dropping
+    # ALL + re-adding only a subset leaves the gofer fork EPERM on a missing default cap).
+    # NOT --privileged; still confined to this single-purpose, socket-less sidecar.
+    cap_add:
+      - SYS_ADMIN
+      - SYS_PTRACE
+      - NET_ADMIN
+    security_opt:
+      - seccomp=unconfined            # runsc uses syscalls the default profile blocks
+      - apparmor=unconfined
+    environment:
+      - BLASTBOX_DATABASE_URL=postgresql://${POSTGRES_USER:-clippyshot}:${POSTGRES_PASSWORD:-clippyshot-dev}@postgres:5432/${POSTGRES_DB:-clippyshot}
+      - BLASTBOX_JOB_ROOT=${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}/jobs
+      - BLASTBOX_ENGINES=clippyshot=${CLIPPYSHOT_WORKER_IMAGE:-clippyshot-cold-worker:dev}
+      # Per-engine forwardable-param allowlist (default-deny). MUST mirror the cold
+      # dispatcher — without it, _sanitize_params falls back to denylist-only on this warm
+      # tier and a hostile job's `params` reaches the worker's CLIPPYSHOT_* knobs (resource
+      # limits + DISCLOSE_SECURITY_INTERNALS). Shared override var keeps all tiers in lockstep.
+      - BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS=${BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS:-CLIPPYSHOT_OCR,CLIPPYSHOT_OCR_ALL,CLIPPYSHOT_QR,CLIPPYSHOT_OCR_LANG,CLIPPYSHOT_OCR_PSM}
+      # --- sidecar primitive ---
+      - BLASTBOX_DISPATCH_WARM_ONLY=1
+      # Concurrency MUST match warm_size — the warm dispatch path blocks until the job
+      # finishes, so N threads are needed to keep N slots busy (default 1 starves the pool).
+      - BLASTBOX_DISPATCH_CONCURRENCY=${BLASTBOX_GVISOR_WARM_SIZE:-4}
+      - BLASTBOX_POOL_RUNTIME=gvisor
+      - BLASTBOX_POOL_WARM_SIZE=${BLASTBOX_GVISOR_WARM_SIZE:-4}
+      - BLASTBOX_POOL_CEILING=${BLASTBOX_GVISOR_CEILING:-8}
+      # --- gVisor C/R config ---
+      - BLASTBOX_GVISOR_RUNSC=/usr/bin/runsc
+      - BLASTBOX_GVISOR_ROOT=/var/lib/blastbox/gvisor-root
+      - BLASTBOX_GVISOR_ROOTFS=/opt/gvisor-rootfs
+      - BLASTBOX_GVISOR_NETWORK=none
+      # systrap (gVisor's modern default: seccomp+signals, NO /dev/kvm — same isolation as
+      # ptrace, just far fewer syscall round-trips). ptrace makes every guest syscall a
+      # ptrace stop, which murders syscall-/futex-heavy workloads: tesseract OCR on dense
+      # pages ran so slowly it blew the per-page OCR deadline and got SIGKILLed (exit -9),
+      # silently dropping OCR on this tier. systrap renders the same pages fast enough to
+      # finish in time (verified: tesseract -9 went 14/24 -> 0/24, OCR'd pages 10 -> 16).
+      # Checkpoint/restore confirmed working under systrap on this runsc (release-20260511).
+      - BLASTBOX_GVISOR_PLATFORM=systrap
+      - BLASTBOX_GVISOR_WARM_ARGV=["/opt/clippyshot/bin/python3","/opt/blastbox/run_warm.py"]
+      - BLASTBOX_GVISOR_LD_PRELOAD=/opt/clippyshot/accept-retry.so
+      - BLASTBOX_GVISOR_EXTRA_ENV=["CLIPPYSHOT_SANDBOX=container","CLIPPYSHOT_WARN_ON_INSECURE=1","CLIPPYSHOT_WARM_UNO=1"]
+    volumes:
+      # job_root (host-consistent, same as the main dispatcher) — read the staged input.
+      - "${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}/jobs:${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}/jobs"
+      # runsc binary from the host.
+      - "/usr/bin/runsc:/usr/bin/runsc:ro"
+      # the gVisor warm OCI rootfs (built on current code; accept-retry shim baked in).
+      # NON-nested path (not under the state mount) so runsc's gofer sees it populated.
+      # Host dir is operator-configurable (override CLIPPYSHOT_GVISOR_DIR in the env/.env).
+      - "${CLIPPYSHOT_GVISOR_DIR:-/var/lib/clippyshot-gvisor}/rootfs:/opt/gvisor-rootfs:ro"
+      # writable state: runsc --root + the warm-base checkpoint/snapshot + per-slot dirs.
+      - "${CLIPPYSHOT_GVISOR_DIR:-/var/lib/clippyshot-gvisor}/state:/var/lib/blastbox"
+    tmpfs:
+      - /tmp:rw,exec,nosuid,size=2g
+    networks:
+      - backend                       # same network as postgres + the main dispatcher

@@ -17,7 +17,7 @@ class DetectedType:
     confidence: float
     source: DetectionSource
     agreed_with_extension: bool
-    warnings: list[str] = None
+    warnings: list[str] | None = None
     magika_label: str = ""       # raw label from Magika before correction
     magika_mime: str = ""        # raw MIME from Magika
     libmagic_mime: str = ""      # MIME from libmagic (if available)

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import signal
 import subprocess
@@ -10,7 +9,7 @@ import time
 from pathlib import Path
 
 from clippyshot.errors import SandboxError, SandboxUnavailable
-from clippyshot.sandbox.base import Sandbox, SandboxRequest
+from clippyshot.sandbox.base import SandboxRequest
 from clippyshot.types import SandboxResult
 
 
@@ -240,7 +239,7 @@ class NsjailSandbox:
         # Strict AppArmor profile for the child process. nsjail calls
         # aa_change_onexec() with this name before execve(), so the profile
         # must already be loaded on the host kernel (see deploy/apparmor/).
-        if self._proc_apparmor_supported:
+        if self._proc_apparmor_supported and req.attach_apparmor:
             argv += ["--proc_apparmor", self._apparmor_profile]
 
         argv += ["--", *req.argv]

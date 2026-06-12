@@ -9,7 +9,7 @@ from pathlib import Path
 
 from clippyshot.errors import LibreOfficeEmptyOutputError, LibreOfficeError
 from clippyshot.libreoffice.profile import HardenedProfile
-from clippyshot.libreoffice.uno import UnoServer, convert_via_uno
+from clippyshot.libreoffice.uno import WarmConverter
 from clippyshot.limits import Limits
 from clippyshot.sandbox.base import Mount, Sandbox, SandboxRequest
 
@@ -55,7 +55,7 @@ class LibreOfficeRunner:
         self,
         sandbox: Sandbox,
         soffice_path: str = "/usr/bin/soffice",
-        uno_server: UnoServer | None = None,
+        uno_server: WarmConverter | None = None,
     ) -> None:
         self._sandbox = sandbox
         self._soffice = soffice_path
@@ -430,22 +430,54 @@ class LibreOfficeRunner:
             if pdf_filter != "writer_pdf_Export":
                 filters_to_try.append("writer_pdf_Export")
 
-            # Optimistic warm-UNO fast path. When a ready unoserver shares this
-            # filesystem (the FC warm tier — soffice boot already paid), convert via
-            # unoconvert: same LibreOffice engine + filters as the cold path, with no
-            # per-job soffice boot. On ANY failure, fall through to the untouched cold
-            # sandbox-retry loop below (a UNO hiccup must never fail the job).
-            if self._uno_server is not None and self._uno_server.is_ready():
+            # Optimistic warm fast path. When a ready warm server shares this
+            # filesystem (FC: TCP unoserver; gVisor C/R: soffice --accept=pipe — soffice
+            # boot already paid), convert through it: same LibreOffice engine + filters
+            # as the cold path, with no per-job soffice boot. The server is polymorphic
+            # (UnoServer | SofficePipeServer), both exposing is_ready()/convert(). On ANY
+            # failure, fall through to the untouched cold sandbox-retry loop below (a warm
+            # hiccup must never fail the job).
+            import os as _os
+
+            def _warm_diag(msg: str) -> None:
+                # Opt-in warm/cold-decision breadcrumb (set CLIPPYSHOT_WARM_DIAG_FILE to an
+                # absolute path). No-op by default so it leaves no stray file in normal output.
+                # OPERATOR-only: the dispatcher reserves CLIPPYSHOT_WARM_DIAG_FILE so a client's
+                # job.params can never set it (blastbox _is_reserved_env_key). Defense-in-depth:
+                # open with O_NOFOLLOW so the breadcrumb can't be redirected through a symlink to
+                # clobber an outside file; append-create only.
+                p = _os.environ.get("CLIPPYSHOT_WARM_DIAG_FILE")
+                if not p:
+                    return
+                try:
+                    # Append: _warm_diag is called multiple times per conversion (server
+                    # status, then WARM_OK/WARM_FAIL) — overwriting would drop the earlier
+                    # breadcrumbs and leave only the last line. An O_NOFOLLOW opener gives the
+                    # symlink-refusal while keeping the safe `with`-managed close + text write.
+                    def _opener(path: str, flags: int) -> int:
+                        return _os.open(path, flags | _os.O_NOFOLLOW, 0o600)
+
+                    with open(p, "a", encoding="utf-8", errors="replace", opener=_opener) as _f:
+                        _f.write(msg)
+                except OSError:
+                    pass
+
+            _server = self._uno_server
+            _warm_ready = _server is not None and _server.is_ready()
+            _warm_diag(f"server={_server is not None} ready={_warm_ready}\n")
+            if _warm_ready and _server is not None:
                 warm_pdf = output_dir / (input_path.stem + ".pdf")
                 try:
-                    convert_via_uno(self._uno_server, staged_input, warm_pdf, label)
+                    _server.convert(staged_input, warm_pdf, label)
                 except LibreOfficeError as exc:
+                    _warm_diag(f"WARM_FAIL: {str(exc)[:600]}\n")
                     import logging as _logging
 
                     _logging.getLogger("clippyshot.libreoffice.runner").warning(
-                        "warm unoconvert failed (%s); falling back to cold soffice", exc
+                        "warm convert failed (%s); falling back to cold soffice", exc
                     )
                 else:
+                    _warm_diag("WARM_OK\n")
                     if staged_input.suffix.lower() in (".xlsx", ".xlsm"):
                         try:
                             from clippyshot.libreoffice.sheet_prep import (
@@ -458,7 +490,18 @@ class LibreOfficeRunner:
                     return warm_pdf
 
             last_error = None
+            # L2: one cumulative wall-clock budget across the WHOLE filter×name fallback, so a
+            # doc that times out the first attempt can't walk every remaining filter/name combo
+            # at limits.timeout_s each (the per-call cap bounds ONE attempt, not the product).
+            # The first attempt always runs; once the budget is spent we stop trying more.
+            # The outer worker_timeout_s SIGKILL remains the hard backstop.
+            import time as _time
+
+            _fallback_deadline = _time.monotonic() + max(1, limits.timeout_s)
             for attempt, filt in enumerate(filters_to_try):
+                if attempt > 0 and _time.monotonic() >= _fallback_deadline:
+                    last_error = last_error or "soffice fallback budget exhausted"
+                    break
                 # Clean output dir between attempts
                 for old_pdf in output_dir.glob("*.pdf"):
                     old_pdf.unlink()
@@ -480,6 +523,8 @@ class LibreOfficeRunner:
                     name_attempts.append((original_staged_input, original_name))
 
                 for name_idx, (attempt_input, attempt_name) in enumerate(name_attempts):
+                    if name_idx > 0 and _time.monotonic() >= _fallback_deadline:
+                        break  # L2: cumulative fallback budget spent
                     sandbox_input = Path("/sandbox/in") / attempt_name
                     argv = [
                         self._soffice,

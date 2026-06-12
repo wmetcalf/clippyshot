@@ -1,15 +1,13 @@
 """Unit tests for ContainerSandbox."""
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
 
 import pytest
 
 from clippyshot.errors import SandboxUnavailable
 from clippyshot.sandbox.base import Mount, SandboxRequest
-from clippyshot.sandbox.container import ContainerSandbox, _inside_container, _translate_path
+from clippyshot.sandbox.container import ContainerSandbox, _translate_path
 
 
 # ---------------------------------------------------------------------------

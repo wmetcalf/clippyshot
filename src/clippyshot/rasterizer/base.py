@@ -1,6 +1,7 @@
 """Rasterizer protocol + shared sharding base for CLI-backed rasterizers."""
 from __future__ import annotations
 
+import logging
 import os
 import re
 from abc import ABC, abstractmethod
@@ -13,10 +14,11 @@ from pypdf import PdfReader
 
 from clippyshot._argv import assert_positional as _assert_positional
 from clippyshot.errors import RasterizeError
-from clippyshot.limits import Limits
-from clippyshot.runtime.host_limits import max_concurrent_page_ops
+from clippyshot.limits import Limits, max_concurrent_page_ops
 from clippyshot.sandbox.base import Mount, Sandbox, SandboxRequest
 from clippyshot.types import RasterizedPage
+
+_log = logging.getLogger(__name__)
 
 _PT_PER_INCH = 72.0
 _MM_PER_INCH = 25.4
@@ -26,6 +28,25 @@ _MIN_PAGES_FOR_SHARDING = 4
 
 _SANDBOX_IN = Path("/sandbox/in")
 _SANDBOX_OUT = Path("/sandbox/out")
+
+
+def _max_page_peak_mb(
+    page_sizes_mm: list[tuple[float, float]] | None, dpi: int
+) -> float:
+    """Worst-case in-RAM RGBA buffer (MB) of the LARGEST page at ``dpi``.
+
+    Returns 0.0 when page sizes are unknown (callers then fall back to the
+    default per-page heuristic). 4 bytes/px (RGBA) is the conservative peak; the
+    PNG encoder also holds the decoded buffer during the giant-page render.
+    """
+    if not page_sizes_mm:
+        return 0.0
+    peak = 0.0
+    for w_mm, h_mm in page_sizes_mm:
+        w_px = (w_mm / _MM_PER_INCH) * dpi
+        h_px = (h_mm / _MM_PER_INCH) * dpi
+        peak = max(peak, w_px * h_px * 4.0 / (1024.0 * 1024.0))
+    return peak
 
 
 @runtime_checkable
@@ -78,6 +99,12 @@ class ShardingRasterizer(ABC):
         """Extra environment for the render subprocess. Default: none."""
         return {}
 
+    def _attach_apparmor(self) -> bool:
+        """Whether to attach the soffice AppArmor profile to the render subprocess.
+        Default True. A backend that runs a binary the soffice profile doesn't cover
+        (e.g. pdfium reading its bundled libpdfium under sys.prefix) overrides to False."""
+        return True
+
     def _run_range(
         self,
         *,
@@ -106,6 +133,7 @@ class ShardingRasterizer(ABC):
                 dpi=dpi,
             ),
             env=self._env(),
+            attach_apparmor=self._attach_apparmor(),
         )
         result = self._sandbox.run(req)
         if result.killed or result.exit_code != 0:
@@ -147,7 +175,13 @@ class ShardingRasterizer(ABC):
         #     the worker's cgroup.
         cpus = os.cpu_count() or 2
         cpu_budget = max(1, cpus // 2)
-        mem_budget = max_concurrent_page_ops()
+        # Size-aware memory budget: a page rendered from an oversized mediabox (e.g. a
+        # 14400pt SinglePageSheets sheet → ~30000px → ~2.7 GB RGBA) costs far more than the
+        # 200 MB/page heuristic, so derive the peak from the ACTUAL largest page and let it
+        # collapse the shard count to 1 — N concurrent multi-GB renders would otherwise exhaust
+        # a host without a per-worker memory cgroup (the gVisor warm tier).
+        peak_mb = _max_page_peak_mb(page_sizes_mm, dpi)
+        mem_budget = max_concurrent_page_ops(per_page_peak_mb=peak_mb)
         shard_count = min(cpu_budget, mem_budget, max_pages)
         if max_pages < _MIN_PAGES_FOR_SHARDING or shard_count <= 1:
             # Single-shot fast path: one invocation for the whole range.
@@ -197,9 +231,43 @@ class ShardingRasterizer(ABC):
         # ourselves if not provided.
         page_sizes = page_sizes_mm if page_sizes_mm is not None else self._page_sizes_mm(pdf_path)
 
-        renamed: list[RasterizedPage] = []
+        # Collapse to AT MOST ONE file per absolute page index BEFORE building pages.
+        # Each shard writes page-<abs-index>.png (pypdfium2 zero-pads to the document's
+        # page count, so indices are unique in the normal case). But two differently-named
+        # files can parse to the SAME index — e.g. page-1.png + page-01.png, or a rare
+        # stray/partial render artifact observed only under heavy host contention (16
+        # concurrent runc workers). Left alone, that yields two RasterizedPages with the
+        # same index, which fails host-side sealing with "duplicate artifact id" and loses
+        # the WHOLE conversion. Deduplicate deterministically here: keep the largest file
+        # for the index (a complete render dominates a partial), delete the rest. The
+        # document's page count is fixed, so a second file for an existing index is the
+        # anomaly to drop — not a distinct page.
+        by_index: dict[int, Path] = {}
+        dropped: list[str] = []
         for src in produced:
             idx = self._index_from_name(src.name)
+            prev = by_index.get(idx)
+            if prev is None:
+                by_index[idx] = src
+                continue
+            keep, drop = (
+                (src, prev) if src.stat().st_size > prev.stat().st_size else (prev, src)
+            )
+            by_index[idx] = keep
+            dropped.append(drop.name)
+            try:
+                drop.unlink()
+            except OSError:
+                pass
+        if dropped:
+            _log.warning(
+                "%s: collapsed %d duplicate-index page file(s) (kept largest per index): %s",
+                self.name, len(dropped), dropped,
+            )
+
+        renamed: list[RasterizedPage] = []
+        for idx in sorted(by_index):
+            src = by_index[idx]
             new_name = f"page-{idx:03d}.png"
             dst = out_dir / new_name
             if src != dst:
@@ -217,7 +285,6 @@ class ShardingRasterizer(ABC):
                     height_mm=round(h_mm, 2),
                 )
             )
-        renamed.sort(key=lambda p: p.index)
         return renamed
 
     @staticmethod

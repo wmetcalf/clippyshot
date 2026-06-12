@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, fields
 
 
@@ -21,7 +22,7 @@ _ENV_MAP = {
 }
 
 # Map field name → coerce function for env-var parsing.
-_ENV_COERCE: dict[str, object] = {
+_ENV_COERCE: dict[str, Callable[[str], object]] = {
     "skip_blanks": lambda s: s.lower() not in ("0", "false", "no"),
     "disclose_security_internals": lambda s: s.lower() not in ("0", "false", "no"),
     "rasterizer": lambda s: s.strip().lower(),
@@ -101,3 +102,68 @@ class Limits:
                     ) from e
         values.update(overrides)
         return cls(**values)
+
+
+# ---------------------------------------------------------------------------
+# Page-operation parallelism (pipeline-side; host worker-launch sizing moved to
+# blastbox.host when ClippyShot adopted blastbox.host).
+# ---------------------------------------------------------------------------
+
+# Rough upper-bound for peak RAM of one in-flight page buffer during
+# rasterization (pdftoppm/PDFium) or per-page post-processing (PIL loading the
+# PNG for hash/trim/focus). A letter page at 150 DPI is ~6 MB; pathological
+# spreadsheet renders can hit ~150 MB — estimate 200 MB so the cap errs safe.
+_PER_PAGE_PEAK_MB = 200
+# Absolute ceiling on parallel page ops even on huge hosts — beyond ~8 the
+# wall-clock win flattens and gVisor/kernel contention dominates.
+_ABSOLUTE_PAGE_OP_CEILING = 8
+
+
+def parse_memory_gb(spec: str) -> float:
+    """Parse a docker-style memory spec like '4g', '512m', '1024' into GB."""
+    if not spec:
+        return 0.0
+    s = spec.strip().lower()
+    try:
+        if s.endswith("g"):
+            return float(s[:-1])
+        if s.endswith("m"):
+            return float(s[:-1]) / 1024.0
+        if s.endswith("k"):
+            return float(s[:-1]) / (1024.0 * 1024.0)
+        # Plain number — assume bytes.
+        return float(s) / (1024.0 ** 3)
+    except ValueError:
+        return 0.0
+
+
+def max_concurrent_page_ops(
+    worker_memory_spec: str | None = None, per_page_peak_mb: float | None = None
+) -> int:
+    """Bound parallel page-level operations by the worker's memory budget.
+
+    Used by both the rasterizer (shard count) and the converter's per-page
+    fan-out (hash/trim/focus/scanners). Both load the full page image into
+    memory; running too many at once on a memory-constrained worker risks an
+    OOM-kill by the cgroup.
+
+    ``per_page_peak_mb`` lets a caller that knows the ACTUAL largest page (the
+    rasterizer reads per-page mediaboxes) push the peak estimate ABOVE the
+    ``_PER_PAGE_PEAK_MB`` default — a 14400pt page at 150 DPI is ~2.7 GB, ~13×
+    the heuristic — so an oversized page collapses concurrency to 1 instead of
+    fanning out N concurrent multi-GB renders. It only ever RAISES the estimate
+    (never relaxes the conservative default for normal pages). The cold tier's
+    cgroup OOM-kills cleanly either way; this protects the gVisor warm tier,
+    which runs without a per-worker memory cgroup.
+    """
+    mem_gb = parse_memory_gb(
+        worker_memory_spec
+        or os.environ.get("CLIPPYSHOT_WORKER_MEMORY")
+        or "4g"
+    )
+    # Leave half the worker memory for the Python runtime, LibreOffice, and
+    # transient allocations.
+    usable_mb = max(1.0, mem_gb * 1024.0 * 0.5)
+    peak_mb = max(float(_PER_PAGE_PEAK_MB), per_page_peak_mb or 0.0)
+    mem_cap = max(1, int(usable_mb // peak_mb))
+    return max(1, min(_ABSOLUTE_PAGE_OP_CEILING, mem_cap))

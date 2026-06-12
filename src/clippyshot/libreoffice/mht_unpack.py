@@ -437,12 +437,9 @@ def _extract_inherited_props(style: str) -> dict[str, str | None]:
     return props
 
 
-# Matches a single CSS selector with optional tag and class (plus whatever
-# trailing combinators / pseudo-classes we'll intentionally ignore).
-_CSS_RULE_RE = re.compile(
-    r"([^{}]+)\{([^{}]*)\}",
-    re.DOTALL,
-)
+# CSS rules are split with an O(n) str.split("}")/str.partition("{") in
+# _collect_class_styles — NOT a regex. A backtracking `([^{}]+)\{([^{}]*)\}` is
+# O(n^2) on a long brace-free <style> body (ReDoS); see the loop for the rationale.
 _SELECTOR_SPLIT_RE = re.compile(r"\s*,\s*")
 # Accept plain tag (``p``), class (``.MsoNormal``), and tag.class
 # (``p.MsoNormal``) selectors. Pseudo-classes / descendants get
@@ -470,9 +467,17 @@ def _collect_class_styles(html_text: str) -> dict[str, dict[str, str]]:
         # Strip CSS comments (``/* ... */``) once so they don't
         # interfere with the rule regex.
         css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
-        for rule in _CSS_RULE_RE.finditer(css):
-            selectors = _SELECTOR_SPLIT_RE.split(rule.group(1).strip())
-            decls = _parse_inline_decls(rule.group(2))
+        # O(n) split/partition instead of a backtracking regex. The old
+        # `([^{}]+)\{([^{}]*)\}` is O(n^2) on a long brace-free <style> body — a crafted
+        # MHT / docx-altchunk part stalled the worker ~100s on ~200KB (a DoS that runs
+        # in-process OUTSIDE the soffice sandbox + its timeout). split/partition is linear
+        # and handles the same simple-rule subset (nested at-rules degrade as they did before).
+        for block in css.split("}"):
+            sel_text, brace, decl_text = block.partition("{")
+            if not brace:
+                continue  # no '{' in this block → not a complete rule
+            selectors = _SELECTOR_SPLIT_RE.split(sel_text.strip())
+            decls = _parse_inline_decls(decl_text)
             if not decls:
                 continue
             for sel in selectors:
@@ -604,7 +609,9 @@ def unpack_mht(mht_path: Path, out_dir: Path) -> Path | None:
             payload = part.get_payload(decode=True)
         except Exception:
             continue
-        if not payload:
+        # decode=True yields bytes for a leaf part (or None); narrow to bytes so the
+        # downstream sha1/write_bytes see a concrete buffer, and skip anything else.
+        if not isinstance(payload, bytes) or not payload:
             continue
         # First text/html wins: Word always emits exactly one, and edge
         # cases (forwarded chains, etc.) should render the top document.
@@ -648,7 +655,10 @@ def unpack_mht(mht_path: Path, out_dir: Path) -> Path | None:
 
     charset = html_part.get_content_charset() or "utf-8"
     try:
-        html = html_part.get_payload(decode=True).decode(charset, errors="replace")
+        html_bytes = html_part.get_payload(decode=True)
+        if not isinstance(html_bytes, bytes):
+            return None
+        html = html_bytes.decode(charset, errors="replace")
     except Exception:
         return None
 

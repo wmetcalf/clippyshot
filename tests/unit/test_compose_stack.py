@@ -1,3 +1,9 @@
+"""The compose stack runs ClippyShot ON blastbox.host.
+
+`api` → `blastbox serve` (ingress + ClippyShot extension); `dispatcher` →
+`blastbox dispatch` (claims jobs, launches the cold-worker image); `postgres`
+provides pg_bktree for /v1/similar. All host config is `BLASTBOX_*`.
+"""
 from pathlib import Path
 
 
@@ -19,37 +25,50 @@ def test_compose_stack_has_first_class_api_dispatcher_and_postgres_roles():
     assert "internal: true" in compose
     assert "frontend:" in compose
     assert "5432:" not in compose
-    assert "CLIPPYSHOT_DATABASE_URL=postgresql://" in compose
+    # Host config is BLASTBOX_*, not the retired CLIPPYSHOT_* host vars.
+    assert "BLASTBOX_DATABASE_URL=postgresql://" in compose
+    assert "CLIPPYSHOT_DATABASE_URL" not in compose
 
 
-def test_compose_stack_keeps_api_socket_free_and_on_shared_storage():
+def test_compose_stack_api_runs_blastbox_serve_socket_free_on_shared_storage():
     compose = Path("deploy/docker/docker-compose.yml").read_text()
     api = _api_block(compose)
 
-    assert "clippyshot-data:/var/lib/clippyshot" in api
+    # job_root is a host-CONSISTENT bind (host path == container path), NOT a
+    # named volume — so dispatcher-launched workers can bind-mount job dirs by
+    # host path. (See the docker-in-docker note in the compose.)
+    assert "${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}:${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}" in api
+    assert "clippyshot-data:" not in compose
     assert "/var/run/docker.sock" not in api
     assert "ports:" in api
     assert '"${CLIPPYSHOT_PORT:-8001}:8000"' in compose
-    assert 'command: ["serve", "--host", "0.0.0.0", "--port", "8000", "--job-store", "sql"]' in compose
+    # ingress = blastbox serve + the ClippyShot extension (routes + web UI)
+    assert 'command: ["blastbox", "serve", "--host", "0.0.0.0", "--port", "8000"]' in api
+    assert "BLASTBOX_ALLOWED_ENGINES=clippyshot" in api
+    assert "BLASTBOX_INGRESS_EXTENSION=clippyshot.blastbox_ingress:make_extension" in api
     assert api.count('- backend') == 1
     assert api.count('- frontend') == 1
 
 
-def test_compose_stack_gives_dispatcher_the_docker_socket_and_worker_image():
+def test_compose_stack_dispatcher_runs_blastbox_dispatch_with_socket_and_worker_image():
     compose = Path("deploy/docker/docker-compose.yml").read_text()
     dispatcher = _dispatcher_block(compose)
 
     assert compose.count("/var/run/docker.sock:/var/run/docker.sock") == 1
-    assert "clippyshot-data:/var/lib/clippyshot" in dispatcher
+    assert "${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}:${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}" in dispatcher
     assert "/var/run/docker.sock:/var/run/docker.sock" in dispatcher
     assert 'group_add:' in dispatcher
     assert '"${DOCKER_GID:-984}"' in dispatcher
     assert 'test: ["CMD", "docker", "info"]' in dispatcher
     assert "ports:" not in dispatcher
-    assert "CLIPPYSHOT_WORKER_IMAGE=" in dispatcher
     assert "image: ${CLIPPYSHOT_IMAGE:-clippyshot:dev}" in compose
-    assert "/opt/clippyshot/bin/python" in dispatcher
-    assert "CLIPPYSHOT_DISPATCH_INTERVAL=" in dispatcher
-    assert "CLIPPYSHOT_DISPATCH_CONCURRENCY=" in dispatcher
-    assert "clippyshot.dispatcher" in dispatcher
-    assert "SqlJobStore(" in dispatcher
+    # dispatch = blastbox dispatch; the worker image is the cold-worker overlay
+    assert 'command: ["blastbox", "dispatch"]' in dispatcher
+    assert "BLASTBOX_ENGINES=clippyshot=${CLIPPYSHOT_WORKER_IMAGE:-clippyshot-cold-worker:dev}" in dispatcher
+    assert "BLASTBOX_DISPATCH_CONCURRENCY=" in dispatcher
+    # fail-closed worker runtime policy is exposed
+    assert "BLASTBOX_WORKER_RUNTIME=" in dispatcher
+    assert "BLASTBOX_ALLOW_RUNC=" in dispatcher
+    # the retired bespoke-dispatcher inline python is gone
+    assert "clippyshot.dispatcher" not in dispatcher
+    assert "SqlJobStore(" not in dispatcher

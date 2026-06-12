@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 
 import pytest
 
@@ -89,3 +88,18 @@ def test_run_ocr_nonzero_exit_raises_ocr_error(monkeypatch, tmp_path):
     with pytest.raises(OCRError) as exc_info:
         run_ocr(png)
     assert "exited 1" in str(exc_info.value)
+
+
+def test_run_ocr_sigkill_classified_as_timeout(tmp_path):
+    """A -SIGKILL exit (the sandbox killing tesseract when its per-page deadline /
+    remaining OCR budget elapses) is a TIMEOUT, not a crash — so the error message must
+    say 'timeout' (the converter then records skipped='timeout', no scary ocr_scan_error).
+    Slow tiers (gVisor warm on dense pages) hit this."""
+    import signal as _signal
+
+    png = tmp_path / "p.png"
+    png.write_bytes(b"fake")
+    with pytest.raises(OCRError) as exc_info:
+        run_ocr(png, argv_runner=lambda argv, timeout_s: (-_signal.SIGKILL, "", ""))
+    assert "timeout" in str(exc_info.value).lower()
+    assert "exited" not in str(exc_info.value).lower()

@@ -123,14 +123,14 @@ def inspect_altchunks(docx_path: Path) -> list[AltChunk]:
                 rel_id = chunk.attrib.get(f"{_DOC_REL_NS}id", "")
                 if not rel_id:
                     continue
-                part_name = rel_targets.get(rel_id)
-                if not part_name:
+                target_name = rel_targets.get(rel_id)
+                if not target_name:
                     continue
-                content_type = content_types.get(part_name, "")
+                content_type = content_types.get(target_name, "")
                 if content_type not in _ALTCHUNK_CONTENT_TYPES:
                     continue
                 try:
-                    data = budget.read(zf, part_name.lstrip("/"))
+                    data = budget.read(zf, target_name.lstrip("/"))
                 except (KeyError, OSError, zipfile.BadZipFile, ExtractionLimitExceeded):
                     # Bomb part or cumulative budget exhausted: skip it. The
                     # original docx still goes to the sandboxed soffice, so we
@@ -138,7 +138,7 @@ def inspect_altchunks(docx_path: Path) -> list[AltChunk]:
                     continue
                 found.append(
                     AltChunk(
-                        part_name=part_name,
+                        part_name=target_name,
                         content_type=content_type,
                         size=len(data),
                         data=data,

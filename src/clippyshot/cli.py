@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -27,7 +26,6 @@ from clippyshot.selftest import (
     detect_soffice_apparmor_profile,
     run_selftest,
 )
-from clippyshot.worker import run_worker
 
 
 def _build_converter() -> Converter:
@@ -46,17 +44,25 @@ def _build_converter() -> Converter:
 
 
 def _convert_cmd(args: argparse.Namespace) -> int:
-    limits = Limits.from_env(
-        timeout_s=args.timeout,
-        max_pages=args.max_pages,
-        dpi=args.dpi,
-    )
-    # Apply CLI overrides that from_env doesn't accept directly.
-    limits = dataclasses.replace(
-        limits,
-        skip_blanks=args.skip_blanks,
-        disclose_security_internals=args.disclose_security_internals,
-    )
+    # Splat ONLY the flags the user actually passed (default=None) so an unset flag falls through
+    # to the CLIPPYSHOT_* env var via from_env, then the dataclass default (L4). Passing the
+    # argparse defaults unconditionally clobbered the env.
+    overrides: dict = {}
+    if args.timeout is not None:
+        overrides["timeout_s"] = args.timeout
+    if args.max_pages is not None:
+        overrides["max_pages"] = args.max_pages
+    if args.dpi is not None:
+        overrides["dpi"] = args.dpi
+    limits = Limits.from_env(**overrides)
+    # Apply CLI-only flags that from_env doesn't accept directly — only when explicitly passed.
+    replace_kw: dict = {}
+    if args.skip_blanks is not None:
+        replace_kw["skip_blanks"] = args.skip_blanks
+    if args.disclose_security_internals is not None:
+        replace_kw["disclose_security_internals"] = args.disclose_security_internals
+    if replace_kw:
+        limits = dataclasses.replace(limits, **replace_kw)
     options = ConvertOptions(limits=limits)
     out_dir = Path(args.outdir)
     try:
@@ -89,26 +95,34 @@ def _selftest_cmd(_: argparse.Namespace) -> int:
     return run_selftest()
 
 
-def _serve_cmd(args: argparse.Namespace) -> int:
-    import uvicorn
-
-    from clippyshot.api import build_app
-
-    app = build_app(
-        job_store_kind=args.job_store,
-        redis_url=args.redis_url,
-        database_url=args.database_url,
-    )
-    uvicorn.run(app, host=args.host, port=args.port, workers=1, log_level="info")
+def _version_cmd(_: argparse.Namespace) -> int:
+    print(f"clippyshot {__version__}")
     return 0
 
 
-def _worker_cmd(args: argparse.Namespace) -> int:
-    return run_worker(args)
+def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
+    from clippyshot import setup_sandbox as ss
 
-
-def _version_cmd(_: argparse.Namespace) -> int:
-    print(f"clippyshot {__version__}")
+    rep = ss.diagnose()
+    print("Sandbox host check:")
+    print(f"  apparmor_restrict_unprivileged_userns = {'1 (ACTIVE)' if rep.restrict_active else '0/absent'}")
+    for note in rep.notes:
+        print(f"  {note}")
+    if not rep.actions:
+        print("\nNothing to do — the namespace backends are usable (or unaffected).")
+        return 0
+    profile_dir = Path(args.profile_dir) if args.profile_dir else ss.default_profile_dir()
+    if not profile_dir.is_dir():
+        print(f"\nprofile dir not found: {profile_dir} (pass --profile-dir)", file=sys.stderr)
+        return 2
+    if args.apply:
+        print(f"\nLoading {len(rep.actions)} scoped profile(s) via sudo "
+              "(you'll be prompted for your password):")
+        return ss.apply(rep.actions, profile_dir)
+    print(f"\n{len(rep.actions)} scoped AppArmor profile(s) to load. Re-run with --apply to "
+          "load them (sudo), or run:\n")
+    for cmd in ss.commands_for(rep.actions, profile_dir):
+        print("  " + " ".join(cmd))
     return 0
 
 
@@ -119,18 +133,22 @@ def build_parser() -> argparse.ArgumentParser:
     pc = sub.add_parser("convert", help="convert a single document")
     pc.add_argument("input")
     pc.add_argument("-o", "--outdir", default="out")
-    pc.add_argument("--dpi", type=int, default=150)
-    pc.add_argument("--max-pages", type=int, default=50)
-    pc.add_argument("--timeout", type=int, default=60)
+    # default=None so an unset flag falls through to CLIPPYSHOT_* env (via Limits.from_env) and
+    # then the dataclass default — flag > env > default. With argparse defaults the flag value
+    # would always clobber the env (L4). The dataclass defaults are dpi=150/max_pages=50/
+    # timeout_s=60/skip_blanks=True.
+    pc.add_argument("--dpi", type=int, default=None)
+    pc.add_argument("--max-pages", type=int, default=None)
+    pc.add_argument("--timeout", type=int, default=None)
     pc.add_argument("--json", action="store_true", help="emit metadata.json on stdout")
     pc.add_argument("--quiet", action="store_true")
     pc.add_argument("--skip-blanks", dest="skip_blanks", action="store_true",
-                    default=False, help="drop blank pages from the output")
+                    default=None, help="drop blank pages from the output")
     pc.add_argument(
         "--disclose-security-internals",
         dest="disclose_security_internals",
         action="store_true",
-        default=False,
+        default=None,
         help=(
             "include sandbox backend name and AppArmor profile names in "
             "metadata.json security block (default: redacted)"
@@ -141,27 +159,24 @@ def build_parser() -> argparse.ArgumentParser:
     ps = sub.add_parser("selftest", help="run a deployment health check")
     ps.set_defaults(func=_selftest_cmd)
 
-    psv = sub.add_parser("serve", help="run the HTTP API")
-    psv.add_argument("--host", default="127.0.0.1")
-    psv.add_argument("--port", type=int, default=8000)
-    psv.add_argument("--job-store", choices=["memory", "redis", "sql"], default="sql")
-    psv.add_argument("--redis-url", default="redis://localhost:6379/0")
-    psv.add_argument(
-        "--database-url",
-        default=os.environ.get("CLIPPYSHOT_DATABASE_URL", "sqlite:///./clippyshot-jobs.db"),
-    )
-    psv.set_defaults(func=_serve_cmd)
-
-    pw = sub.add_parser("worker", help="process one mounted job directory")
-    pw.add_argument("--job-dir", required=True, help="mounted job directory")
-    pw.add_argument("--input", help="input file path inside the job directory")
-    pw.add_argument("--output", help="output directory path inside the job directory")
-    pw.add_argument("--job-id", help="optional job identifier for logging")
-    pw.add_argument("--quiet", action="store_true")
-    pw.set_defaults(func=_worker_cmd)
+    # The HTTP API + dispatcher + worker now run on blastbox.host:
+    #   blastbox serve --allowed-engines clippyshot   (BLASTBOX_INGRESS_EXTENSION=clippyshot.blastbox_ingress:make_extension)
+    #   blastbox dispatch                             (BLASTBOX_ENGINES=clippyshot=<cold-worker-image>)
+    #   python -m blastbox.worker.cold                (BLASTBOX_ENGINE=clippyshot.engine:ClippyShotEngine)
+    # ClippyShot's CLI keeps only the in-process pipeline commands.
 
     pv = sub.add_parser("version")
     pv.set_defaults(func=_version_cmd)
+
+    pss = sub.add_parser(
+        "setup-sandbox",
+        help="detect (and with --apply, load) the scoped AppArmor userns profiles for bwrap/nsjail",
+    )
+    pss.add_argument("--apply", action="store_true",
+                     help="load the needed profiles via sudo (interactive); default just prints them")
+    pss.add_argument("--profile-dir", default=None,
+                     help="directory holding the clippyshot-{bwrap,nsjail} profiles (default: repo deploy/apparmor)")
+    pss.set_defaults(func=_setup_sandbox_cmd)
     return p
 
 

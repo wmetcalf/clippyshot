@@ -1,7 +1,6 @@
 """Tests for the ocr_enabled + ocr_all + has_images gating logic."""
 from __future__ import annotations
 
-import pytest
 
 from clippyshot.converter import _process_page_scanners
 

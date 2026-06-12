@@ -269,7 +269,7 @@ _ODF_LABELS = frozenset({"odt", "ods", "odp", "odg"})
 
 # libmagic MIME → our canonical label mapping
 _LIBMAGIC_MIME_TO_LABEL: dict[str, str] = {}
-_LIBMAGIC_MIME_PATTERNS: list[tuple[str, str]] = [
+_LIBMAGIC_MIME_PATTERNS: list[tuple[str, str | None]] = [
     # OOXML (detected by content types inside the zip)
     ("presentationml", "pptx"),
     ("wordprocessingml", "docx"),
@@ -411,7 +411,7 @@ def _check_ole_content(path: Path) -> list[str]:
     document content stream (PowerPoint Document, WordDocument, Workbook)
     is almost certainly a macro-only payload — there's nothing to render.
     """
-    warnings = []
+    warnings: list[str] = []
     try:
         import olefile
 
@@ -656,6 +656,21 @@ class Detector:
         if magika_label == "unknown":
             if ext in _EXT_ALLOWLIST:
                 canonical, mime = _EXT_ALLOWLIST[ext]
+                # L1: even when Magika can't classify the bytes, an allowlisted OOXML extension
+                # routes the file into a zip-based LibreOffice import. If the file IS a parseable
+                # zip, apply the SAME bomb/entry/ratio gate the magika-labeled OOXML path uses
+                # (see :589) so a zip-bomb that defeats Magika's classifier can't skip the only
+                # cheap detection-time defence. A non-zip (e.g. a tiny spoofed .docx) is NOT a
+                # bomb — leave it accepted-with-warning (LibreOffice fails it gracefully).
+                if (
+                    canonical in ("docx", "xlsx", "pptx")
+                    and zipfile.is_zipfile(path)
+                    and not _looks_like_ooxml(path)
+                ):
+                    raise DetectionError(
+                        "ooxml_structural_check_failed",
+                        f"magika=unknown ext={ext} failed OOXML bomb/entry/ratio check",
+                    )
                 return DetectedType(
                     label=canonical,
                     mime=mime,

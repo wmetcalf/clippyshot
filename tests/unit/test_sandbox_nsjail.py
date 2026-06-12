@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import pytest
 
 from clippyshot.limits import Limits
 from clippyshot.sandbox.base import Mount, SandboxRequest

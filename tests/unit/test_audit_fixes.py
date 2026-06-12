@@ -9,10 +9,6 @@ from clippyshot.errors import sanitize_public_error
 from clippyshot.limits import Limits
 from clippyshot.ocr import validate_lang
 from clippyshot.qr import validate_formats
-from clippyshot.runtime.docker_runtime import (
-    InsecureRuntimeRefused,
-    select_worker_runtime,
-)
 
 
 # --- Limits bounds (#10) ---------------------------------------------------
@@ -94,27 +90,9 @@ def test_assert_positional_allows_normal_paths():
     assert_positional("page.png")  # relative but not option-like
 
 
-# --- Fail-closed runtime (#8) ----------------------------------------------
-
-def test_runtime_refuses_insecure_when_required(monkeypatch):
-    monkeypatch.setenv("CLIPPYSHOT_REQUIRE_SECURE_RUNTIME", "1")
-    monkeypatch.delenv("CLIPPYSHOT_WORKER_RUNTIME", raising=False)
-    with pytest.raises(InsecureRuntimeRefused):
-        select_worker_runtime(available_runtimes=["runc"])
-
-
-def test_runtime_allows_secure_when_required(monkeypatch):
-    monkeypatch.setenv("CLIPPYSHOT_REQUIRE_SECURE_RUNTIME", "1")
-    monkeypatch.delenv("CLIPPYSHOT_WORKER_RUNTIME", raising=False)
-    sel = select_worker_runtime(available_runtimes=["runsc", "runc"])
-    assert sel.runtime == "runsc" and sel.secure
-
-
-def test_runtime_downgrades_silently_when_not_required(monkeypatch):
-    monkeypatch.delenv("CLIPPYSHOT_REQUIRE_SECURE_RUNTIME", raising=False)
-    monkeypatch.delenv("CLIPPYSHOT_WORKER_RUNTIME", raising=False)
-    sel = select_worker_runtime(available_runtimes=["runc"])
-    assert sel.runtime == "runc" and not sel.secure
+# NOTE: the fail-closed worker-runtime selection (#8) moved to blastbox.host
+# (blastbox.host.runtime.docker.select_worker_runtime); its tests live in the
+# blastbox repo now that ClippyShot runs on blastbox.host.
 
 
 # --- Error scrubber (#13) --------------------------------------------------

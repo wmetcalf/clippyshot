@@ -1,7 +1,6 @@
 """Verify a QR/OCR scanner exception does not fail the conversion."""
 from __future__ import annotations
 
-from pathlib import Path
 
 from clippyshot.converter import _process_page_scanners
 from clippyshot.qr import ScanError

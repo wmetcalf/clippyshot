@@ -3,12 +3,18 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Callable
 
 from clippyshot.errors import SandboxUnavailable
 from clippyshot.sandbox.base import Sandbox
 from clippyshot.sandbox.bwrap import BwrapSandbox
 from clippyshot.sandbox.container import ContainerSandbox
+from clippyshot.sandbox.nono_wrap import (
+    NonoWrap,
+    NonoWrappedSandbox,
+    landlock_available,
+)
 from clippyshot.sandbox.nsjail import NsjailSandbox
 
 
@@ -32,6 +38,7 @@ def _keep_existing_error(current: Exception | None) -> bool:
 
 def select_sandbox(
     *,
+    inner_wrap: NonoWrap | None = None,
     _nsjail_factory: Callable[[], Sandbox] = NsjailSandbox,
     _bwrap_factory: Callable[[], Sandbox] = BwrapSandbox,
     _container_factory: Callable[[], Sandbox] = ContainerSandbox,
@@ -44,7 +51,30 @@ def select_sandbox(
 
     CLIPPYSHOT_SANDBOX env var (nsjail|bwrap|container) forces a specific
     backend; no silent fallback if forced.
+
+    ``inner_wrap`` (a :class:`~clippyshot.sandbox.nono_wrap.NonoWrap`) is an OPTIONAL
+    Landlock layer nested *inside* the selected backend — opt-in via this arg or the
+    ``CLIPPYSHOT_INNER_NONO`` env. Default ``None`` leaves the selected backend exactly
+    as-is (zero cost). It decorates whichever backend is chosen, so it composes with
+    nsjail/bwrap/container alike.
     """
+    if inner_wrap is None and _env_truthy("CLIPPYSHOT_INNER_NONO"):
+        profile = os.environ.get("CLIPPYSHOT_INNER_NONO_PROFILE", "").strip()
+        inner_wrap = NonoWrap(profile=Path(profile) if profile else None)
+
+    # Fail fast on a tier that can't enforce Landlock (e.g. the gVisor Sentry returns
+    # ENOSYS) rather than letting nono error mid-conversion. runc + the FC guest support
+    # Landlock; gVisor C/R does not — don't enable the inner layer there.
+    if inner_wrap is not None and not landlock_available():
+        raise SandboxUnavailable(
+            "inner nono layer requested (CLIPPYSHOT_INNER_NONO / inner_wrap) but Landlock "
+            "is unavailable on this kernel/runtime (the gVisor Sentry does not implement it); "
+            "disable inner-nono on this tier — runc and the Firecracker guest support it"
+        )
+
+    def _wrap(sb: Sandbox) -> Sandbox:
+        return NonoWrappedSandbox(sb, inner_wrap) if inner_wrap is not None else sb
+
     factories: dict[str, Callable[[], Sandbox]] = {
         "nsjail": _nsjail_factory,
         "bwrap": _bwrap_factory,
@@ -77,7 +107,7 @@ def select_sandbox(
                 extra={"backend": forced, "reasons": reasons},
             )
         _log.info("sandbox backend selected (forced)", extra={"backend": forced})
-        return sb
+        return _wrap(sb)
 
     last_error: Exception | None = None
     for name in ("nsjail", "bwrap", "container"):
@@ -131,7 +161,7 @@ def select_sandbox(
                 extra={"backend": name, "reasons": reasons},
             )
         _log.info("sandbox backend selected", extra={"backend": name})
-        return sb
+        return _wrap(sb)
 
     raise SandboxUnavailable(
         f"no sandbox backend available; last error: {last_error}"
