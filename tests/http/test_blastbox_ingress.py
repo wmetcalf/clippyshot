@@ -44,11 +44,18 @@ def _make_client(tmp_path: Path) -> tuple[TestClient, InMemoryJobStore]:
     return TestClient(app, raise_server_exceptions=False), store
 
 
-def _make_done_job(tmp_path: Path, store: InMemoryJobStore) -> tuple[Job, Path]:
+def _make_done_job(
+    tmp_path: Path, store: InMemoryJobStore, *, variants: bool = False
+) -> tuple[Job, Path]:
     """Create a DONE clippyshot job with document.pdf + page-001.png on disk.
 
     Output goes under ``<job_root>/<id>/output``; the test's ``job_root`` is
     ``tmp_path/"jobs"`` (mirrors blastbox's own _make_done_job).
+
+    The sealed ``metadata.json`` DECLARES every artifact the fixed-filename serve
+    routes return — blastbox>=0.1.8 enforces the manifest (H-1), so a route only
+    serves a path declared here (matching what RedTuskEngine/ClippyShotEngine emit).
+    ``variants=True`` additionally writes+declares the trimmed/focused page PNGs.
     """
     job = Job.new(engine="clippyshot", filename="test.docx")
     output_dir = tmp_path / "jobs" / job.job_id / "output"
@@ -56,6 +63,18 @@ def _make_done_job(tmp_path: Path, store: InMemoryJobStore) -> tuple[Job, Path]:
 
     (output_dir / "document.pdf").write_bytes(_PDF_BYTES)
     (output_dir / "page-001.png").write_bytes(_PAGE_BYTES)
+
+    declared = [
+        DeclaredArtifact(id="document", path="document.pdf", kind="pdf"),
+        DeclaredArtifact(id="page-001", path="page-001.png", kind="image"),
+    ]
+    if variants:
+        (output_dir / "page-001-trimmed.png").write_bytes(b"TRIMMED")
+        (output_dir / "page-001-focused.png").write_bytes(b"FOCUSED")
+        declared += [
+            DeclaredArtifact(id="page-001-trimmed", path="page-001-trimmed.png", kind="image"),
+            DeclaredArtifact(id="page-001-focused", path="page-001-focused.png", kind="image"),
+        ]
 
     detection = Detection(
         label="docx",
@@ -73,7 +92,7 @@ def _make_done_job(tmp_path: Path, store: InMemoryJobStore) -> tuple[Job, Path]:
         outdir=output_dir,
         input_sha256="a" * 64,
         detected=detection,
-        declared=[DeclaredArtifact(id="page-001", path="page-001.png", kind="image")],
+        declared=declared,
         warnings=[],
         payload=payload,
     )
@@ -123,9 +142,9 @@ def test_missing_trimmed_and_focused_return_404(tmp_path):
 
 def test_trimmed_and_focused_served_when_present(tmp_path):
     client, store = _make_client(tmp_path)
-    job, output_dir = _make_done_job(tmp_path, store)
-    (output_dir / "page-001-trimmed.png").write_bytes(b"TRIMMED")
-    (output_dir / "page-001-focused.png").write_bytes(b"FOCUSED")
+    # variants=True writes AND declares the trimmed/focused PNGs (the manifest-enforced
+    # serve route only returns declared paths under blastbox>=0.1.8).
+    job, output_dir = _make_done_job(tmp_path, store, variants=True)
 
     rt = client.get(f"/v1/jobs/{job.job_id}/pages/trimmed/1.png")
     assert rt.status_code == 200
