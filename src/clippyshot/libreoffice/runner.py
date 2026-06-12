@@ -452,14 +452,13 @@ class LibreOfficeRunner:
                 try:
                     # Append: _warm_diag is called multiple times per conversion (server
                     # status, then WARM_OK/WARM_FAIL) — overwriting would drop the earlier
-                    # breadcrumbs and leave only the last line.
-                    fd = _os.open(
-                        p, _os.O_WRONLY | _os.O_APPEND | _os.O_CREAT | _os.O_NOFOLLOW, 0o600
-                    )
-                    try:
-                        _os.write(fd, msg.encode("utf-8", "replace"))
-                    finally:
-                        _os.close(fd)
+                    # breadcrumbs and leave only the last line. An O_NOFOLLOW opener gives the
+                    # symlink-refusal while keeping the safe `with`-managed close + text write.
+                    def _opener(path: str, flags: int) -> int:
+                        return _os.open(path, flags | _os.O_NOFOLLOW, 0o600)
+
+                    with open(p, "a", encoding="utf-8", errors="replace", opener=_opener) as _f:
+                        _f.write(msg)
                 except OSError:
                     pass
 
