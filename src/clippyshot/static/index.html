@@ -246,7 +246,9 @@ let lastJobId = null;
 
 // Version
 fetch(API+'/v1/version').then(r=>r.json()).then(v=>{
-  document.getElementById('ver').textContent = 'v'+v.version+' | '+v.sandbox+' sandbox';
+  // /v1/version returns {version, allowed_engines}; the old bespoke route's
+  // `sandbox` field wasn't ported, so don't render "undefined sandbox".
+  document.getElementById('ver').textContent = v && v.version ? 'v'+v.version : '';
 }).catch(()=>{});
 
 // Drop zone
