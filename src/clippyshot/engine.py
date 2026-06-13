@@ -384,13 +384,28 @@ class ClippyShotEngine:
             ocr_psm = 3
         ocr_psm = min(13, max(0, ocr_psm))
 
+        def _int(name: str, default: int, lo: int, hi: int) -> int:
+            try:
+                return min(hi, max(lo, int(os.environ.get(name, str(default)))))
+            except (TypeError, ValueError):
+                return default
+
+        # qr_formats: comma-separated lowercase tokens; fall back to the default on
+        # any unexpected shape (untrusted client param) — qr.py re-validates downstream.
+        qr_formats = (os.environ.get("CLIPPYSHOT_QR_FORMATS", "") or "").strip()
+        if not re.fullmatch(r"[a-z0-9_]+(,[a-z0-9_]+)*", qr_formats):
+            qr_formats = "qr_code,micro_qr_code,rmqr_code"
+
         cs_opts = ConvertOptions(
             limits=cs_limits,
             qr_enabled=_flag("CLIPPYSHOT_QR", True),
+            qr_formats=qr_formats,
+            qr_timeout_s=_int("CLIPPYSHOT_QR_TIMEOUT_S", 10, 1, 120),
             ocr_enabled=_flag("CLIPPYSHOT_OCR", False),
             ocr_all=_flag("CLIPPYSHOT_OCR_ALL", False),
             ocr_lang=ocr_lang,
             ocr_psm=ocr_psm,
+            ocr_timeout_s=_int("CLIPPYSHOT_OCR_TIMEOUT_S", 60, 1, 600),
         )
 
         from clippyshot.errors import DetectionError

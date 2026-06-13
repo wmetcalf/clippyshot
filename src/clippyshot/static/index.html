@@ -792,9 +792,14 @@ async function refreshJobs() {
     const tbody = document.getElementById('job-tbody');
     tbody.innerHTML = jobs.map(j => {
       const id = j.job_id;
+      // Pages + detection come from result_summary (the generic /v1/jobs record):
+      // .meta carries the engine's scalar fields (page counts), .detected the label.
+      const rs = j.result_summary || {};
+      const meta = rs.meta || {};
+      const pdone = meta.page_count_rendered, ptot = meta.page_count_total;
       const errorTitle = j.error ? ' title="'+esc(j.error)+'"' : '';
       const badge = '<span class="badge '+j.status+'"'+errorTitle+'>'+j.status+'</span>';
-      const pages = (j.pages_done && j.pages_total) ? j.pages_done+'/'+j.pages_total : '-';
+      const pages = (pdone != null && ptot) ? pdone+'/'+ptot : '-';
       const time = j.finished_at ? new Date(j.finished_at*1000).toLocaleTimeString() :
                    j.created_at ? new Date(j.created_at*1000).toLocaleTimeString() : '-';
       const name = esc(j.filename || '?');
@@ -822,13 +827,11 @@ async function refreshJobs() {
           else { detail = '<span class="err-text">error</span>'; }
         }
       } else if (j.status === 'done') {
-        const det = j.detected || {};
-        detail = det.label ? esc(det.label) : '-';
-        if (det.magika_label && det.magika_label !== det.label) {
-          detail += ' <span style="color:#d29922;font-size:.72rem">(was: '+esc(det.magika_label)+')</span>';
-        }
+        // result_summary.detected is the generic detection label (the per-job
+        // magika/libmagic detail lives in the detail view's /metadata, not the list).
+        detail = rs.detected ? esc(rs.detected) : '-';
         // Flag all-blank documents
-        if (j.pages_total > 0 && j.pages_done === 0) {
+        if (ptot > 0 && pdone === 0) {
           detail += ' <span class="warn">all blank</span>';
         }
         // Show worker runtime badge (gVisor vs runc)
@@ -845,8 +848,8 @@ async function refreshJobs() {
       const fileExt = (j.filename||'').includes('.') ? (j.filename||'').split('.').pop().toLowerCase() : '-';
       // Pages column: show blank info
       let pagesDisplay = pages;
-      if (j.status === 'done' && j.pages_total > 0 && j.pages_done === 0) {
-        pagesDisplay = '<span class="warn" title="All pages detected as blank">0/'+j.pages_total+' (all blank)</span>';
+      if (j.status === 'done' && ptot > 0 && pdone === 0) {
+        pagesDisplay = '<span class="warn" title="All pages detected as blank">0/'+ptot+' (all blank)</span>';
       }
       const actions = '<button class="danger-btn" onclick="event.stopPropagation();deleteJob(\''+j.job_id+'\')">Delete</button>';
       const sha = j.input_sha256
