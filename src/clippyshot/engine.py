@@ -332,26 +332,16 @@ class ClippyShotEngine:
             self._converter = _build_converter(uno_server=self._uno_server)
         return self._converter
 
-    def detonate(
-        self,
-        input: Path,
-        outdir: Path,
-        limits: BlastboxLimits,
-    ) -> DetonationResult:
-        """Run the ClippyShot pipeline and return a typed ``DetonationResult``.
+    @staticmethod
+    def _convert_options_from_env(limits: BlastboxLimits):
+        """Build ClippyShot ``ConvertOptions`` from blastbox ``limits`` + the
+        ``CLIPPYSHOT_*`` env namespace (the per-job scanner toggles the dispatcher
+        forwards to cold workers and the warm worker injects into ``os.environ``
+        before detonate). Values are untrusted client params → validated + clamped.
 
-        Per-page PNGs are written to ``outdir`` by the converter.  This method
-        maps the resulting metadata dict to the blastbox contract:
-
-        - Each page → ``Page`` node with ``hashes`` + a ``Record`` child for
-          scanner data (QR / OCR).  ``Page`` is used instead of
-          ``ClippyShotPage`` here so the typed tree survives the worker
-          ``seal_envelope`` → host ``envelope_from_json`` JSON round-trip.
-        - Trimmed / focused derivative PNGs → additional ``DeclaredArtifact``
-          entries (``id: p{n}-trimmed`` / ``p{n}-focused``).
-        - ``document.pdf`` → artifact with ``kind="pdf"``.
-        - The root payload is an ``EmbeddedResource`` at path ``"/"`` whose
-          children are the ``Page`` nodes.
+        Extracted from ``detonate`` so the env→options mapping is unit-testable
+        without running LibreOffice — and so a regression here (a toggle silently
+        ignored, a clamp dropped) fails in CI rather than only in a live convert.
         """
         from clippyshot.converter import ConvertOptions
         from clippyshot.limits import Limits as CSLimits
@@ -384,14 +374,53 @@ class ClippyShotEngine:
             ocr_psm = 3
         ocr_psm = min(13, max(0, ocr_psm))
 
-        cs_opts = ConvertOptions(
+        def _int(name: str, default: int, lo: int, hi: int) -> int:
+            try:
+                val = int(os.environ.get(name, str(default)))
+            except (TypeError, ValueError):
+                val = default
+            return min(hi, max(lo, val))  # always clamp, even the fallback
+
+        # qr_formats: comma-separated lowercase tokens; fall back to the default on
+        # any unexpected shape (untrusted client param) — qr.py re-validates downstream.
+        qr_formats = (os.environ.get("CLIPPYSHOT_QR_FORMATS", "") or "").strip()
+        if not re.fullmatch(r"[a-z0-9_]+(,[a-z0-9_]+)*", qr_formats):
+            qr_formats = "qr_code,micro_qr_code,rmqr_code"
+
+        return ConvertOptions(
             limits=cs_limits,
             qr_enabled=_flag("CLIPPYSHOT_QR", True),
+            qr_formats=qr_formats,
+            qr_timeout_s=_int("CLIPPYSHOT_QR_TIMEOUT_S", 10, 1, 120),
             ocr_enabled=_flag("CLIPPYSHOT_OCR", False),
             ocr_all=_flag("CLIPPYSHOT_OCR_ALL", False),
             ocr_lang=ocr_lang,
             ocr_psm=ocr_psm,
+            ocr_timeout_s=_int("CLIPPYSHOT_OCR_TIMEOUT_S", 60, 1, 600),
         )
+
+    def detonate(
+        self,
+        input: Path,
+        outdir: Path,
+        limits: BlastboxLimits,
+    ) -> DetonationResult:
+        """Run the ClippyShot pipeline and return a typed ``DetonationResult``.
+
+        Per-page PNGs are written to ``outdir`` by the converter.  This method
+        maps the resulting metadata dict to the blastbox contract:
+
+        - Each page → ``Page`` node with ``hashes`` + a ``Record`` child for
+          scanner data (QR / OCR).  ``Page`` is used instead of
+          ``ClippyShotPage`` here so the typed tree survives the worker
+          ``seal_envelope`` → host ``envelope_from_json`` JSON round-trip.
+        - Trimmed / focused derivative PNGs → additional ``DeclaredArtifact``
+          entries (``id: p{n}-trimmed`` / ``p{n}-focused``).
+        - ``document.pdf`` → artifact with ``kind="pdf"``.
+        - The root payload is an ``EmbeddedResource`` at path ``"/"`` whose
+          children are the ``Page`` nodes.
+        """
+        cs_opts = self._convert_options_from_env(limits)
 
         from clippyshot.errors import DetectionError
 

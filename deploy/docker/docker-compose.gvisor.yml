@@ -16,6 +16,15 @@ services:
     # not survive a restart without this. (Image default command is the API server.)
     command: ["sh", "-c", "rm -rf /var/lib/blastbox/gvisor-snapshot /var/lib/blastbox/gvisor-base-* 2>/dev/null; rm -rf /var/lib/blastbox/gvisor-root/* 2>/dev/null; exec blastbox dispatch"]
     restart: unless-stopped
+    # Aggregate memory ceiling for the warm pool (the "recommended host memory cgroup"
+    # GvisorConfig defers to: it intentionally does NOT RLIMIT_AS the python/pdfium tree —
+    # that risks false VADDR kills — relying instead on the inner sandbox's per-soffice
+    # RLIMIT_AS plus an operator cgroup HERE). Brings gVisor warm to parity with the cold
+    # worker (BLASTBOX_WORKER_MEMORY=3g) and FC guest (BLASTBOX_FC_MEM_MIB=2048), which are
+    # already bounded. Default 0 = unbounded (unchanged behaviour); set CLIPPYSHOT_GVISOR_MEMORY
+    # in the env/.env (e.g. 32g) to bound the whole sidecar — sized for the pool, since this
+    # caps the dispatcher + all warm slots collectively, not per slot.
+    mem_limit: ${CLIPPYSHOT_GVISOR_MEMORY:-0}
     # The image default healthcheck (`clippyshot selftest`) runs the COLD container sandbox,
     # which refuses to start as root (this sidecar runs as uid 0 for runsc). It's the wrong
     # probe for a warm-only dispatcher; liveness is covered by restart: unless-stopped.
@@ -43,7 +52,7 @@ services:
       # dispatcher — without it, _sanitize_params falls back to denylist-only on this warm
       # tier and a hostile job's `params` reaches the worker's CLIPPYSHOT_* knobs (resource
       # limits + DISCLOSE_SECURITY_INTERNALS). Shared override var keeps all tiers in lockstep.
-      - BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS=${BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS:-CLIPPYSHOT_OCR,CLIPPYSHOT_OCR_ALL,CLIPPYSHOT_QR,CLIPPYSHOT_OCR_LANG,CLIPPYSHOT_OCR_PSM}
+      - BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS=${BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS:-CLIPPYSHOT_OCR,CLIPPYSHOT_OCR_ALL,CLIPPYSHOT_QR,CLIPPYSHOT_OCR_LANG,CLIPPYSHOT_OCR_PSM,CLIPPYSHOT_QR_FORMATS,CLIPPYSHOT_QR_TIMEOUT_S,CLIPPYSHOT_OCR_TIMEOUT_S}
       # --- sidecar primitive ---
       - BLASTBOX_DISPATCH_WARM_ONLY=1
       # Concurrency MUST match warm_size — the warm dispatch path blocks until the job

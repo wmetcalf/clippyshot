@@ -72,3 +72,13 @@ def test_compose_stack_dispatcher_runs_blastbox_dispatch_with_socket_and_worker_
     # the retired bespoke-dispatcher inline python is gone
     assert "clippyshot.dispatcher" not in dispatcher
     assert "SqlJobStore(" not in dispatcher
+
+
+def test_compose_gvisor_sidecar_has_operator_memory_ceiling():
+    """The gVisor warm sidecar must expose an operator memory ceiling (the host memory
+    cgroup GvisorConfig defers to — it deliberately doesn't RLIMIT_AS the worker tree).
+    cold (BLASTBOX_WORKER_MEMORY) and FC (BLASTBOX_FC_MEM_MIB) are already bounded; without
+    this, gVisor warm runs unbounded. Default 0 = unbounded so existing deploys don't
+    regress, but the knob is wired and documented."""
+    compose = Path("deploy/docker/docker-compose.gvisor.yml").read_text()
+    assert "mem_limit: ${CLIPPYSHOT_GVISOR_MEMORY:-0}" in compose
