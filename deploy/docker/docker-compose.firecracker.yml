@@ -36,6 +36,10 @@ services:
       # tier and a hostile job's `params` reaches the worker's CLIPPYSHOT_* knobs (resource
       # limits + DISCLOSE_SECURITY_INTERNALS). Shared override var keeps all tiers in lockstep.
       - BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS=${BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS:-CLIPPYSHOT_OCR,CLIPPYSHOT_OCR_ALL,CLIPPYSHOT_QR,CLIPPYSHOT_OCR_LANG,CLIPPYSHOT_OCR_PSM,CLIPPYSHOT_QR_FORMATS,CLIPPYSHOT_QR_TIMEOUT_S,CLIPPYSHOT_OCR_TIMEOUT_S}
+      # Engine-OWNED reserved keys — MUST mirror the cold dispatcher (see docker-compose.yml).
+      # Dropped UNCONDITIONALLY so a client can't flip this warm worker's security posture
+      # (sandbox selection / insecure fallback / internals disclosure / warm-diag write).
+      - BLASTBOX_ENGINE_CLIPPYSHOT_RESERVED_KEYS=${BLASTBOX_ENGINE_CLIPPYSHOT_RESERVED_KEYS:-CLIPPYSHOT_WARM_DIAG_FILE,CLIPPYSHOT_SANDBOX,CLIPPYSHOT_WARN_ON_INSECURE,CLIPPYSHOT_DISCLOSE_SECURITY_INTERNALS}
       # --- sidecar primitive ---
       - BLASTBOX_DISPATCH_WARM_ONLY=1
       # Concurrency MUST match the warm pool size: the warm dispatch path blocks until
