@@ -89,7 +89,7 @@ def test_all_dispatchers_declare_clippyshot_reserved_keys():
         "docker-compose.firecracker.yml",
         "docker-compose.gvisor.yml",
     ):
-        compose = Path(f"deploy/docker/{fname}").read_text()
+        compose = Path(f"deploy/docker/{fname}").read_text(encoding="utf-8")
         assert "BLASTBOX_ENGINE_CLIPPYSHOT_RESERVED_KEYS=" in compose, fname
         for key in must:
             assert key in compose, f"{key} not reserved in {fname}"
@@ -101,5 +101,5 @@ def test_compose_gvisor_sidecar_has_operator_memory_ceiling():
     cold (BLASTBOX_WORKER_MEMORY) and FC (BLASTBOX_FC_MEM_MIB) are already bounded; without
     this, gVisor warm runs unbounded. Default 0 = unbounded so existing deploys don't
     regress, but the knob is wired and documented."""
-    compose = Path("deploy/docker/docker-compose.gvisor.yml").read_text()
+    compose = Path("deploy/docker/docker-compose.gvisor.yml").read_text(encoding="utf-8")
     assert "mem_limit: ${CLIPPYSHOT_GVISOR_MEMORY:-0}" in compose
