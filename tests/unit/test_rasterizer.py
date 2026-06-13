@@ -169,6 +169,65 @@ def test_rasterize_dedupes_duplicate_index_keeping_largest(tmp_path: Path):
     assert not (out / "page-01.png").exists()
 
 
+def _argv_page_range(argv: list[str]) -> tuple[int, int]:
+    """Extract (first, last) from a pdftoppm `-f N -l M` argv."""
+    first = int(argv[argv.index("-f") + 1])
+    last = int(argv[argv.index("-l") + 1])
+    return first, last
+
+
+def test_rasterize_dedupes_across_real_shards(tmp_path: Path, monkeypatch):
+    """The duplicate-artifact-id race was observed under REAL sharding (many
+    concurrent runc workers, the range split across parallel invocations). This
+    forces shard_count > 1 and has each shard write its own absolute-index files,
+    with one shard also emitting a duplicate-index stray — the cross-shard
+    collection must still collapse to exactly one contiguous page per index.
+    Guards the sharded collection path the single-run dedup test doesn't cover."""
+    import io
+    import threading
+
+    from PIL import Image as _Image
+
+    import clippyshot.rasterizer.base as _base
+
+    buf = io.BytesIO()
+    _Image.new("RGB", (8, 8), "white").save(buf, "PNG")
+    big_png = buf.getvalue()
+    assert len(big_png) > len(_TINY_PNG)
+
+    # Force the multi-shard branch: 8 "CPUs" → cpu_budget 4, ample mem budget, 8 pages.
+    monkeypatch.setattr(_base.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(_base, "max_concurrent_page_ops", lambda **_: 99)
+
+    runs: list[tuple[int, int]] = []
+    lock = threading.Lock()
+
+    class ShardSandbox(FakeSandbox):
+        def run(self, req):
+            first, last = _argv_page_range(req.argv)
+            with lock:
+                runs.append((first, last))
+            out_host = next(
+                m.host_path for m in req.rw_mounts if m.sandbox_path == Path("/sandbox/out")
+            )
+            for i in range(first, last + 1):
+                (out_host / f"page-{i}.png").write_bytes(big_png)   # absolute-index, complete
+            if first == 1:  # the shard owning page 1 also drops a duplicate-index stray
+                (out_host / "page-01.png").write_bytes(_TINY_PNG)
+            return SandboxResult(exit_code=0, stdout=b"", stderr=b"", duration_ms=1, killed=False)
+
+    r = PdftoppmRasterizer(sandbox=ShardSandbox())
+    pages = r.rasterize(FIXTURE, tmp_path / "out", dpi=150, max_pages=8)
+
+    assert len(runs) > 1                                     # sharding actually happened
+    assert [p.index for p in pages] == [1, 2, 3, 4, 5, 6, 7, 8]   # contiguous, one per index
+    out = tmp_path / "out"
+    for i in range(1, 9):
+        assert (out / f"page-{i:03d}.png").read_bytes() == big_png
+    assert not (out / "page-01.png").exists()               # idx-1 stray collapsed away
+    assert not (out / "page-1.png").exists()                # raw names normalized
+
+
 # --- PDFium backend -------------------------------------------------------
 
 
