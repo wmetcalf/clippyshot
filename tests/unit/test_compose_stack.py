@@ -74,6 +74,27 @@ def test_compose_stack_dispatcher_runs_blastbox_dispatch_with_socket_and_worker_
     assert "SqlJobStore(" not in dispatcher
 
 
+def test_all_dispatchers_declare_clippyshot_reserved_keys():
+    """blastbox core is engine-agnostic; ClippyShot declares its OWN security-posture knobs
+    as reserved here. Every dispatcher (cold + FC + gVisor warm sidecars) MUST set
+    BLASTBOX_ENGINE_CLIPPYSHOT_RESERVED_KEYS with the 4 sandbox/insecure/disclose/warm-diag
+    keys, dropped unconditionally from client job.params — a warm tier missing it would let a
+    client flip that worker's posture."""
+    must = {
+        "CLIPPYSHOT_WARM_DIAG_FILE", "CLIPPYSHOT_SANDBOX",
+        "CLIPPYSHOT_WARN_ON_INSECURE", "CLIPPYSHOT_DISCLOSE_SECURITY_INTERNALS",
+    }
+    for fname in (
+        "docker-compose.yml",
+        "docker-compose.firecracker.yml",
+        "docker-compose.gvisor.yml",
+    ):
+        compose = Path(f"deploy/docker/{fname}").read_text()
+        assert "BLASTBOX_ENGINE_CLIPPYSHOT_RESERVED_KEYS=" in compose, fname
+        for key in must:
+            assert key in compose, f"{key} not reserved in {fname}"
+
+
 def test_compose_gvisor_sidecar_has_operator_memory_ceiling():
     """The gVisor warm sidecar must expose an operator memory ceiling (the host memory
     cgroup GvisorConfig defers to — it deliberately doesn't RLIMIT_AS the worker tree).

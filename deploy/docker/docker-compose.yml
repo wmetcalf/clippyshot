@@ -100,6 +100,13 @@ services:
       # engine re-validates/clamps. Blocks client override of other CLIPPYSHOT_* the
       # worker reads (sandbox selection / insecure-fallback / resource limits).
       - BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS=${BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS:-CLIPPYSHOT_OCR,CLIPPYSHOT_OCR_ALL,CLIPPYSHOT_QR,CLIPPYSHOT_OCR_LANG,CLIPPYSHOT_OCR_PSM,CLIPPYSHOT_QR_FORMATS,CLIPPYSHOT_QR_TIMEOUT_S,CLIPPYSHOT_OCR_TIMEOUT_S}
+      # Engine-OWNED reserved keys (blastbox core is engine-agnostic; ClippyShot names its
+      # own dangerous knobs here). A client must NEVER override these via job.params — they
+      # flip the worker's security posture: inner-sandbox selection, insecure-mode fallback,
+      # security-internals disclosure, the warm-diag write primitive. Dropped UNCONDITIONALLY
+      # (before the allowlist) on every tier; non-empty default = protected even if the
+      # allowlist is unset/misconfigured.
+      - BLASTBOX_ENGINE_CLIPPYSHOT_RESERVED_KEYS=${BLASTBOX_ENGINE_CLIPPYSHOT_RESERVED_KEYS:-CLIPPYSHOT_WARM_DIAG_FILE,CLIPPYSHOT_SANDBOX,CLIPPYSHOT_WARN_ON_INSECURE,CLIPPYSHOT_DISCLOSE_SECURITY_INTERNALS}
       # Concurrency: empty = 1 dispatch loop. Set to fan out claim+launch.
       - BLASTBOX_DISPATCH_CONCURRENCY=${BLASTBOX_DISPATCH_CONCURRENCY:-}
       - BLASTBOX_WORKER_TIMEOUT_S=${BLASTBOX_WORKER_TIMEOUT_S:-300}
