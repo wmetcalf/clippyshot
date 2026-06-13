@@ -35,7 +35,7 @@ services:
       # dispatcher — without it, _sanitize_params falls back to denylist-only on this warm
       # tier and a hostile job's `params` reaches the worker's CLIPPYSHOT_* knobs (resource
       # limits + DISCLOSE_SECURITY_INTERNALS). Shared override var keeps all tiers in lockstep.
-      - BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS=${BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS:-CLIPPYSHOT_OCR,CLIPPYSHOT_OCR_ALL,CLIPPYSHOT_QR,CLIPPYSHOT_OCR_LANG,CLIPPYSHOT_OCR_PSM}
+      - BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS=${BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS:-CLIPPYSHOT_OCR,CLIPPYSHOT_OCR_ALL,CLIPPYSHOT_QR,CLIPPYSHOT_OCR_LANG,CLIPPYSHOT_OCR_PSM,CLIPPYSHOT_QR_FORMATS,CLIPPYSHOT_QR_TIMEOUT_S,CLIPPYSHOT_OCR_TIMEOUT_S}
       # --- sidecar primitive ---
       - BLASTBOX_DISPATCH_WARM_ONLY=1
       # Concurrency MUST match the warm pool size: the warm dispatch path blocks until
