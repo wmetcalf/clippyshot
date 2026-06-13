@@ -386,9 +386,10 @@ class ClippyShotEngine:
 
         def _int(name: str, default: int, lo: int, hi: int) -> int:
             try:
-                return min(hi, max(lo, int(os.environ.get(name, str(default)))))
+                val = int(os.environ.get(name, str(default)))
             except (TypeError, ValueError):
-                return default
+                val = default
+            return min(hi, max(lo, val))  # always clamp, even the fallback
 
         # qr_formats: comma-separated lowercase tokens; fall back to the default on
         # any unexpected shape (untrusted client param) — qr.py re-validates downstream.
