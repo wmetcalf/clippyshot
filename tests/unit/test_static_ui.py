@@ -60,3 +60,11 @@ def test_ui_includes_job_search_and_delete_controls():
     assert 'id="job-search"' in html
     assert "searchJobs(this.value)" in html
     assert "deleteJob(" in html
+
+
+def test_ui_renders_worker_tier():
+    """The web UI distinguishes the two warm backends (FC vs gVisor) via worker_tier, not just
+    the generic worker_runtime='warm' — guards the badge from regressing to the stale
+    'warm == gVisor' assumption."""
+    assert "worker_tier" in _INDEX
+    assert "firecracker" in _INDEX and "gvisor" in _INDEX
