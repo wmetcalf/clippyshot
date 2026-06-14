@@ -562,7 +562,7 @@ async function loadResult(jobId, opts) {
       const jr = await fetch(API+'/v1/jobs/'+jobId);
       if (jr.ok) {
         const jdata = await jr.json();
-        if (jdata.worker_runtime) {
+        if (jdata && jdata.worker_runtime) {
           const rt = jdata.worker_runtime;
           const isWarm = rt === 'warm';
           const tier = jdata.worker_tier || '';   // 'firecracker' | 'gvisor' for warm jobs

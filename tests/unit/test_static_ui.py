@@ -66,7 +66,5 @@ def test_ui_renders_worker_tier():
     """The web UI distinguishes the two warm backends (FC vs gVisor) via worker_tier, not just
     the generic worker_runtime='warm' — guards the badge from regressing to the stale
     'warm == gVisor' assumption."""
-    from pathlib import Path
-    html = Path("src/clippyshot/static/index.html").read_text(encoding="utf-8")
-    assert "worker_tier" in html
-    assert "firecracker" in html and "gvisor" in html
+    assert "worker_tier" in _INDEX
+    assert "firecracker" in _INDEX and "gvisor" in _INDEX
