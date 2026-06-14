@@ -41,6 +41,11 @@ services:
       - BLASTBOX_JOB_RETENTION_SECONDS=${BLASTBOX_JOB_RETENTION_SECONDS:-0}
       - BLASTBOX_ALLOWED_ENGINES=clippyshot
       - BLASTBOX_INGRESS_EXTENSION=clippyshot.blastbox_ingress:make_extension
+      # Per-job tier routing (a job's `target_tier` pins which dispatcher tier claims it) is an
+      # OPERATOR/TEST knob — default OFF so untrusted clients can't pin/flood a pool. Set to 1
+      # (env/.env) to let the API accept a `target_tier` form field; the dispatchers always
+      # honor a set target_tier at claim. Mainly for exercising one tier without stopping others.
+      - BLASTBOX_ALLOW_TIER_ROUTING=${BLASTBOX_ALLOW_TIER_ROUTING:-}
     ports:
       - "${CLIPPYSHOT_PORT:-8001}:8000"
     read_only: true
@@ -110,6 +115,10 @@ services:
       # Concurrency: empty = 1 dispatch loop. Set to fan out claim+launch.
       - BLASTBOX_DISPATCH_CONCURRENCY=${BLASTBOX_DISPATCH_CONCURRENCY:-}
       - BLASTBOX_WORKER_TIMEOUT_S=${BLASTBOX_WORKER_TIMEOUT_S:-300}
+      # Opt-in ceiling (0 = off) on time a job may sit QUEUED before it's FAILed + its input
+      # deleted — bounds a target_tier pinned to a tier with no running dispatcher (relevant
+      # when BLASTBOX_ALLOW_TIER_ROUTING is enabled). The maintenance sweep enforces it.
+      - BLASTBOX_MAX_QUEUED_AGE_S=${BLASTBOX_MAX_QUEUED_AGE_S:-0}
       # Worker runtime: empty = auto-detect (prefer runsc). Plain runc is
       # fail-closed REFUSED unless BLASTBOX_ALLOW_RUNC=1;
       # BLASTBOX_REQUIRE_SECURE_RUNTIME=1 is a hard lockdown (never runc).

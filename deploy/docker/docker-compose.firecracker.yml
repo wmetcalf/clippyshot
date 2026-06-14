@@ -46,6 +46,7 @@ services:
       # the job finishes, so N dispatch threads are needed to keep N slots busy. With
       # the default 1, a single feeder starves the whole pool (only 1 slot ever used).
       - BLASTBOX_DISPATCH_CONCURRENCY=${BLASTBOX_FC_WARM_SIZE:-16}
+      - BLASTBOX_MAX_QUEUED_AGE_S=${BLASTBOX_MAX_QUEUED_AGE_S:-0}  # bound stuck target_tier jobs
       - BLASTBOX_POOL_RUNTIME=firecracker
       - BLASTBOX_POOL_WARM_SNAPSHOT=1
       - BLASTBOX_POOL_WARM_SIZE=${BLASTBOX_FC_WARM_SIZE:-16}

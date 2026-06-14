@@ -103,3 +103,14 @@ def test_compose_gvisor_sidecar_has_operator_memory_ceiling():
     regress, but the knob is wired and documented."""
     compose = Path("deploy/docker/docker-compose.gvisor.yml").read_text(encoding="utf-8")
     assert "mem_limit: ${CLIPPYSHOT_GVISOR_MEMORY:-0}" in compose
+
+
+def test_tier_routing_env_wired_in_compose():
+    """Tier routing is an operator/test knob: the API gates submit on BLASTBOX_ALLOW_TIER_ROUTING
+    (default off), and every dispatcher carries BLASTBOX_MAX_QUEUED_AGE_S so a job pinned to a
+    down tier can't accumulate. Default-off values → no behavior change unless an operator opts in."""
+    base = Path("deploy/docker/docker-compose.yml").read_text(encoding="utf-8")
+    assert "BLASTBOX_ALLOW_TIER_ROUTING=${BLASTBOX_ALLOW_TIER_ROUTING:-}" in base
+    for fname in ("docker-compose.yml", "docker-compose.firecracker.yml", "docker-compose.gvisor.yml"):
+        compose = Path(f"deploy/docker/{fname}").read_text(encoding="utf-8")
+        assert "BLASTBOX_MAX_QUEUED_AGE_S=${BLASTBOX_MAX_QUEUED_AGE_S:-0}" in compose, fname
