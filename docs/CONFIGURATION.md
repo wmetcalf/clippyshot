@@ -30,7 +30,7 @@ blastbox **host/runtime** knobs (`BLASTBOX_*` — dispatch, warm pool, FC/gVisor
 |---|---|---|
 | `CLIPPYSHOT_SANDBOX` | auto | force the soffice sandbox: `nsjail` → `bwrap` → `container`. Auto picks the best available; `container` inside an OCI host. |
 | `CLIPPYSHOT_WARN_ON_INSECURE` | off | let the backend self-check run leniently (set by the dispatcher under runsc / opted-in runc). |
-| `CLIPPYSHOT_INNER_NONO` | off | **optional** nested Landlock layer (nono) inside the selected backend. Fails fast where Landlock is absent (the gVisor Sentry — ENOSYS); works on runc + the FC guest. See [DEPLOYMENT.md](DEPLOYMENT.md). |
+| `CLIPPYSHOT_INNER_NONO` | off | **optional** nested Landlock layer (nono) inside the selected backend. Fails fast where Landlock is absent (the gVisor Sentry — ENOSYS); works on runc + the FC guest. See [the README's Configuration section](../README.md#configuration). |
 | `CLIPPYSHOT_INNER_NONO_PROFILE` | `""` | a nono profile JSON (e.g. profiler-generated) for the inner layer; else auto-derived grants. |
 | `CLIPPYSHOT_NONO_BIN` | `nono` on PATH | nono binary path/name. |
 
@@ -42,7 +42,7 @@ blastbox **host/runtime** knobs (`BLASTBOX_*` — dispatch, warm pool, FC/gVisor
 | `CLIPPYSHOT_OCR_ALL` | off | OCR every page, not just image-heavy ones. |
 | `CLIPPYSHOT_OCR_LANG` | `""` | tesseract `-l` language(s). |
 | `CLIPPYSHOT_OCR_PSM` | `3` | tesseract page-segmentation mode. |
-| `CLIPPYSHOT_QR` | off | ZXing QR/barcode scan. |
+| `CLIPPYSHOT_QR` | **on** | ZXing QR/barcode scan (default-on; cheap enough to justify on untrusted content). |
 
 Scanner crashes are **non-fatal** — they record `ocr.skipped`/`qr_skipped` + a warning and the conversion still succeeds. The forwardable subset is allowlisted per-engine on the host (`BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS`).
 

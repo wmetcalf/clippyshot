@@ -8,11 +8,22 @@ Sandboxed office-document → image rasterizer.
 
 ClippyShot takes a Microsoft Office, OpenDocument, or text-family file and
 produces a deterministic set of per-page PNGs plus a `metadata.json`
-manifest. Conversion runs LibreOffice headless inside a hardened sandbox
-(`nsjail` preferred, `bwrap` fallback) with macros, scripting, Java,
-network egress, OLE link updates, and remote resource fetching all
-disabled. PDFs are then rasterized via **PDFium** (`pypdfium2`) by default,
-or poppler `pdftoppm` (`CLIPPYSHOT_RASTERIZER=pdftoppm`).
+manifest. Conversion runs LibreOffice headless inside a hardened sandbox —
+one of three auto-selected backends (`nsjail`, `bwrap`, or `container`) —
+with macros, scripting, Java, network egress, OLE link updates, and remote
+resource fetching all disabled. PDFs are then rasterized via **PDFium**
+(`pypdfium2`) by default, or poppler `pdftoppm`
+(`CLIPPYSHOT_RASTERIZER=pdftoppm`).
+
+ClippyShot ships the conversion **engine**, the rendering pipeline, the
+`convert`/`selftest` CLI, and a small **web UI**. The HTTP API, job queue,
+dispatch, and per-job worker isolation are provided by
+[**blastbox.host**](https://github.com/wmetcalf/blastbox), which runs
+ClippyShot as a pluggable engine: the Compose stack's `api` service is
+`blastbox serve` with ClippyShot's ingress extension mounted, and the
+`dispatcher` is `blastbox dispatch` launching one hardened worker container
+per job. Host/runtime knobs are therefore `BLASTBOX_*`; the engine's own
+render knobs stay `CLIPPYSHOT_*` (see [Configuration](#configuration)).
 
 By default each job cold-starts `soffice --convert-to`. With
 `CLIPPYSHOT_WARM_UNO=1`, `ClippyShotEngine.warmup()` starts a persistent
@@ -21,8 +32,8 @@ warm-UNO path, `clippyshot.libreoffice.uno`) — paying the ~750 ms soffice boot
 once rather than per job. Output is pixel/byte-identical to the cold path
 (validated across calc, impress, and draw families), and any warm failure falls
 back to cold `--convert-to`. The warm path engages only when an engine runs
-`warmup()` first (the [blastbox](https://github.com/wmetcalf/blastbox) Firecracker
-warm-snapshot tier is what drives it); it is inert otherwise.
+`warmup()` first (blastbox's Firecracker microVM and gVisor checkpoint/restore
+warm-snapshot tiers are what drive it); it is inert otherwise.
 
 The intended use case is taking untrusted user-uploaded documents from a
 web service, rendering them safely on a worker, and serving the result as
@@ -56,27 +67,46 @@ docker compose -f deploy/docker/docker-compose.yml up --build -d
 
 Web UI + API at <http://localhost:8001/>.
 
-Validated: ~76% success on an 801-sample malware corpus, every worker
-fully isolated under its own short-lived container (gVisor if installed,
-`runc` + namespace/cgroup caps otherwise).
+Each worker is fully isolated in its own short-lived gVisor (`runsc`)
+container; plain `runc` is fail-closed and refused unless the operator
+sets `BLASTBOX_ALLOW_RUNC=1`.
 
 The stack brings up:
-- `api` on `http://localhost:8001`
-- `dispatcher` — claims jobs from Postgres and launches one worker
-  container per job. Only component with Docker socket access.
-- `postgres` on a private internal network (no host-exposed port)
-- persistent named volumes for shared job/artifact tree and database data
+- `api` on `http://localhost:8001` — `blastbox serve` with ClippyShot's
+  ingress extension (typed-artifact routes + web UI). No Docker socket.
+- `dispatcher` — `blastbox dispatch`: claims queued jobs from Postgres and
+  launches one worker container per job. Only component with Docker socket
+  access.
+- `postgres` — a custom `postgres:16-alpine` image with `pg_bktree` compiled
+  in (powers perceptual-hash `/v1/similar` search), on a private internal
+  network with no host-exposed port.
+- a persistent named volume for the database, plus a **host-consistent
+  bind-mount** for the shared job/artifact tree (`/var/lib/clippyshot` by
+  default) — required so dispatcher-launched workers can bind-mount each job
+  directory by its host path.
 
 Each worker is launched with `--network=none --cap-drop=ALL
---security-opt=no-new-privileges --read-only --memory=4g --pids-limit=256
---cpus=1.0`, input bind-mounted read-only, metadata.json validated by
-the dispatcher before being trusted. The malware input file is deleted
-from the shared volume immediately after conversion.
+--security-opt=no-new-privileges --read-only` plus blastbox-managed
+memory / pids / cpu / nofile caps (`BLASTBOX_WORKER_*`, auto-sized to the
+host when unset), the input bind-mounted read-only, and `metadata.json`
+validated by the dispatcher before being trusted. The input file is
+deleted from the shared volume immediately after conversion.
 
-`CLIPPYSHOT_WARN_ON_INSECURE=1` is set on the api/dispatcher inside the
-compose file because the API container is itself the sandbox boundary
-in that mode. For stricter deployment, install gVisor (auto-detected)
-and/or load the ClippyShot AppArmor + seccomp profiles — see
+Two optional **warm-pool sidecar** overlays add a low-latency tier alongside
+the cold dispatcher — each a dedicated, socket-less dispatcher that claims
+jobs and never cold-falls-back:
+- `docker-compose.firecracker.yml` — a Firecracker microVM snapshot pool
+  (`dispatcher-fc`; needs `/dev/kvm`).
+- `docker-compose.gvisor.yml` — a `runsc` checkpoint/restore pool
+  (`dispatcher-gvisor`; KVM-less).
+
+```sh
+./deploy/docker/clippyshot-compose -f deploy/docker/docker-compose.yml \
+    -f deploy/docker/docker-compose.gvisor.yml up -d dispatcher-gvisor
+```
+
+For stricter deployment, install gVisor (the dispatcher prefers it
+automatically) and/or load the ClippyShot AppArmor + seccomp profiles — see
 `deploy/docker/README.md#hardening`.
 
 ### Single-container Docker conversion
@@ -141,50 +171,54 @@ modules wired together by `clippyshot.converter.Converter`:
 
 | Module | Responsibility |
 |---|---|
-| `clippyshot.detector` | Magika-primary content-type detection with extension fallback |
+| `clippyshot.detector` | Magika-primary content-type detection with extension fallback + zip/XML structural sanity |
 | `clippyshot.libreoffice.profile` | Hardened `UserInstallation` generator |
 | `clippyshot.libreoffice.runner` | soffice argv builder + sandbox dispatch (+ optional warm-UNO fast path) |
 | `clippyshot.libreoffice.uno` | warm `unoserver` lifecycle + `unoconvert` conversion (parity-preserving; opt-in) |
 | `clippyshot.sandbox.{base,bwrap,nsjail,container,detect}` | Sandbox protocol + three backends + auto-selection |
 | `clippyshot.rasterizer.{base,pdfium,pdftoppm}` | PDF → per-page PNG via PDFium (default) or pdftoppm |
-| `clippyshot.hasher` | pHash + colorhash + SHA-256 of each rendered page |
+| `clippyshot.hasher` / `clippyshot.trimmer` | pHash + colorhash + SHA-256 and the trimmed/focused derivatives |
+| `clippyshot.qr` / `clippyshot.ocr` | ZXing QR/barcode scan + image-gated tesseract OCR (both non-fatal) |
 | `clippyshot.converter` | The orchestration layer |
-| `clippyshot.cli` | argparse CLI: `convert`, `selftest`, `serve`, `version` |
-| `clippyshot.api` | FastAPI HTTP server: sync `/v1/convert` + async `/v1/jobs` lifecycle |
-| `clippyshot.jobs` | JobStore protocol with in-memory, Redis, and SQL backends |
-| `clippyshot.dispatcher` | Claims queued jobs and launches one worker container per job |
-| `clippyshot.worker` | One-shot worker entry point for a single mounted job directory |
-| `clippyshot.runtime.docker_runtime` | Docker runtime selection and narrow worker `docker run` argv |
+| `clippyshot.engine` | `ClippyShotEngine` — wraps the pipeline as a blastbox `Engine` (cold + warm `warmup()`), mapping output onto the blastbox artifact contract |
+| `clippyshot.blastbox_ingress` | Ingress extension: ClippyShot's typed-artifact routes (PDF + per-page PNGs) and web UI, mounted onto `blastbox serve` |
+| `clippyshot.cli` | argparse CLI: `convert`, `selftest`, `version`, `setup-sandbox` |
+| `clippyshot.setup_sandbox` | Detect/load the scoped AppArmor userns profiles for bwrap/nsjail |
 | `clippyshot.observability` | structlog + prometheus_client |
 | `clippyshot.selftest` | Deployment health check |
 
-The deployment split is:
+The HTTP API, job queue, dispatch, and worker lifecycle are provided by
+**blastbox.host**; ClippyShot plugs in as the engine plus an ingress
+extension. The resulting process split is:
 
-- API: uploads, job status, artifact serving, no Docker socket.
-- Dispatcher: claims jobs, chooses `runsc`/`runc`, launches workers, has the Docker socket.
-- Worker: one job, one mounted directory, no Postgres credentials.
+- **API** — `blastbox serve` with ClippyShot's ingress extension: uploads, job status, artifact serving. No Docker socket.
+- **Dispatcher** — `blastbox dispatch`: claims jobs, prefers `runsc` (refuses plain `runc` unless `BLASTBOX_ALLOW_RUNC=1`), launches one worker container per job. The only component with the Docker socket.
+- **Worker** — `python -m blastbox.worker.cold` with `BLASTBOX_ENGINE=clippyshot.engine:ClippyShotEngine`: one job, one mounted directory, no Postgres credentials.
 
 ## Deployment modes
 
-Five shipping shapes, trading setup effort for isolation depth:
+Five shipping shapes, trading setup effort for isolation depth. The first
+two run the full service (blastbox.host's API + dispatcher + per-job worker
+containers); the last three are one-shot `clippyshot convert` invocations
+where the outer container or the host *is* the boundary:
 
 | Mode | Outer boundary | Inner sandbox | Seccomp | AppArmor profile required | Works on |
 |---|---|---|---|---|---|
 | Compose + gVisor (runsc) | `runsc` per-job container | `ContainerSandbox` | `runsc` + docker-default | none | anywhere Docker + gVisor run |
 | Compose + runc | `runc` per-job container | `ContainerSandbox` | docker-default | none | anywhere Docker runs |
-| Single container (inner bwrap/nsjail) | `docker run` | `bwrap` or `nsjail` inside | libseccomp or KAFEL | `clippyshot-{bwrap,nsjail}` on host kernel | Linux w/ unprivileged userns |
-| Host-native bwrap | — | `bwrap` | libseccomp BPF | `clippyshot-bwrap` + `clippyshot-soffice` | AppArmor distros, kernel ≥ 3.8 |
-| Host-native nsjail | — | `nsjail` | KAFEL DSL | `clippyshot-nsjail` + `clippyshot-soffice` | AppArmor distros + source build |
+| Single container `convert` (inner bwrap/nsjail) | `docker run` | `bwrap` or `nsjail` inside | libseccomp or KAFEL | `clippyshot-{bwrap,nsjail}` on host kernel | Linux w/ unprivileged userns |
+| Bare-metal `convert` (bwrap) | — | `bwrap` | libseccomp BPF | `clippyshot-bwrap` + `clippyshot-soffice` | AppArmor distros, kernel ≥ 3.8 |
+| Bare-metal `convert` (nsjail) | — | `nsjail` | KAFEL DSL | `clippyshot-nsjail` + `clippyshot-soffice` | AppArmor distros + source build |
 
-**Pick Compose + gVisor** unless you have a specific reason not to — it has the lowest host-assumption count, the best blast-radius story (gVisor intercepts syscalls at the VM-like boundary), and works on RHEL/SUSE/etc. where AppArmor isn't a thing. Host-native bwrap/nsjail are fallbacks for bare-metal installs where running Docker isn't acceptable; nsjail specifically adds KAFEL-expressed seccomp and `--cgroup-pids` ergonomics at the cost of needing a from-source build.
+**Pick Compose + gVisor** unless you have a specific reason not to — it has the lowest host-assumption count, the best blast-radius story (gVisor intercepts syscalls at the VM-like boundary), and works on RHEL/SUSE/etc. where AppArmor isn't a thing. The bare-metal `clippyshot convert` paths are for embedding the renderer where running Docker isn't acceptable; nsjail specifically adds KAFEL-expressed seccomp and `--cgroup-pids` ergonomics at the cost of needing a from-source build.
 
 ### Compose + gVisor (runsc) — recommended
 
 ```mermaid
 flowchart LR
     client((Client))
-    api[API container]
-    disp[Dispatcher]
+    api["API — blastbox serve<br/>(+ ClippyShot ingress)"]
+    disp["Dispatcher — blastbox dispatch"]
     pg[(Postgres)]
     subgraph worker["Worker container (runsc)"]
         cs[ContainerSandbox]
@@ -201,7 +235,7 @@ flowchart LR
 Hardening on each tier, outside→in:
 - **API container** — read-only rootfs, `cap-drop=ALL`, `no-new-privileges`, no Docker socket, only Postgres + job-artifact access.
 - **Dispatcher container** — same, plus `/var/run/docker.sock` to launch workers. No PII handling.
-- **Worker container** — read-only rootfs, `--network=none`, dedicated `seccomp=clippyshot.json`, `apparmor=clippyshot-soffice`, UID 10001.
+- **Worker container** — read-only rootfs, `--network=none`, unprivileged UID, plus an operator-attached seccomp profile (`BLASTBOX_SECCOMP_JSON_HOST`, image ships one at `/etc/clippyshot/seccomp.json`) and AppArmor profiles (`BLASTBOX_APPARMOR_PROFILES`) when configured.
 - **gVisor (runsc)** — syscall-level interception; LibreOffice never talks to the host kernel directly.
 - **ContainerSandbox** — in-process checks that NoNewPrivs, Seccomp, and cap-drop are effective before LO starts.
 - **LibreOffice** — MacroSecurity=3, Java/OLE/updates/network all disabled.
@@ -211,8 +245,8 @@ Hardening on each tier, outside→in:
 ```mermaid
 flowchart LR
     client((Client))
-    api[API]
-    disp[Dispatcher]
+    api["API — blastbox serve"]
+    disp["Dispatcher — blastbox dispatch"]
     pg[(Postgres)]
     subgraph worker["Worker container (runc)"]
         cs[ContainerSandbox]
@@ -225,24 +259,22 @@ flowchart LR
     disp -.->|docker run --runtime=runc| worker
 ```
 
-Same topology minus gVisor's syscall-interception layer. The ContainerSandbox's hardening checks read `/proc/self/status`; runsc virtualises that file (so it opts into the "insecure" fallback automatically), runc doesn't — on runc the operator must set `CLIPPYSHOT_WARN_ON_INSECURE=1` explicitly.
+Same topology minus gVisor's syscall-interception layer. blastbox treats plain `runc` as fail-closed: the dispatcher refuses to launch a `runc` worker unless `BLASTBOX_ALLOW_RUNC=1` (and `BLASTBOX_REQUIRE_SECURE_RUNTIME=1` forbids it outright, even then). Inside the worker, the ContainerSandbox's hardening checks read `/proc/self/status`; runsc virtualises that file (so it opts into the lenient self-check automatically), runc doesn't — so a `runc` worker also needs `CLIPPYSHOT_WARN_ON_INSECURE=1`.
 
-### Host-native bwrap / nsjail
+### Bare-metal / embedded (`clippyshot convert`)
 
 ```mermaid
 flowchart LR
-    client((Client))
-    api[clippyshot serve]
-    subgraph sbx["bwrap or nsjail (per job)"]
+    caller[clippyshot convert / engine]
+    subgraph sbx["bwrap or nsjail (per document)"]
         soff[LibreOffice]
         rast[PDFium]
         scan[ZXing + tesseract]
     end
-    client -->|HTTP/S| api
-    api -.->|fork + sandbox| sbx
+    caller -.->|fork + sandbox| sbx
 ```
 
-No Docker dependency. FastAPI forks a fresh `bwrap` (or `nsjail`) subprocess per conversion with its own user/mount/PID/IPC/UTS/cgroup/network namespaces, dropped caps, seccomp-BPF (bwrap) or KAFEL (nsjail), rlimits, and the `clippyshot-soffice` AppArmor profile attached to soffice (the pdfium rasterizer opts out — that profile can't describe its venv). On Ubuntu 24.04+ this needs the shipped `clippyshot-{bwrap,nsjail,soffice}` AppArmor profiles loaded once — run **`clippyshot setup-sandbox`** to detect what's needed and `clippyshot setup-sandbox --apply` to load the scoped userns profiles via sudo (or load them by hand per `deploy/apparmor/README.md`).
+No Docker dependency. The `clippyshot convert` CLI (and the in-process engine) runs each document in a fresh `bwrap` (or `nsjail`) subprocess with its own user/mount/PID/IPC/UTS/cgroup/network namespaces, dropped caps, seccomp-BPF (bwrap) or KAFEL (nsjail), rlimits, and the `clippyshot-soffice` AppArmor profile attached to soffice (the pdfium rasterizer opts out — that profile can't describe its venv). To expose this over HTTP, run blastbox.host in front of it rather than a built-in server. On Ubuntu 24.04+ this needs the shipped `clippyshot-{bwrap,nsjail,soffice}` AppArmor profiles loaded once — run **`clippyshot setup-sandbox`** to detect what's needed and `clippyshot setup-sandbox --apply` to load the scoped userns profiles via sudo (or load them by hand per `deploy/apparmor/README.md`).
 
 ### Shared pipeline (all modes)
 
@@ -292,29 +324,33 @@ compose:
    layer above were compromised, the blast radius is confined to a tmpfs
    inside an unprivileged container.
 
-Additional input-handling hardening on the HTTP entry point:
+Additional input-handling hardening, split across the blastbox.host ingress
+and ClippyShot's detector:
 
-- HTTP requests larger than `CLIPPYSHOT_MAX_INPUT` bytes are rejected with
-  HTTP 413 before any body is read (Content-Length check) or as soon as the
-  streaming body exceeds the limit (chunked uploads). Previously the limit
-  was only enforced by the detector, after the full upload had already been
-  spooled to disk.
-- Client-supplied filenames are sanitized to a safe basename matching
-  `[A-Za-z0-9._-]+`, truncated to 255 chars, with empty/hidden names mapped
-  to `upload.bin`. Path traversal via filename is not possible.
-- Files that Magika labels as `zip` or `xml` (generic container labels) are
-  structurally sanity-checked before the extension-fallback path trusts
-  them. Zip-bombs (compression ratio > 100:1, > 5000 entries, or missing
-  `[Content_Types].xml`) and billion-laughs XML (more than 64 entity
-  declarations) are rejected at the detector.
-- The HTTP API honours all `CLIPPYSHOT_*` env-var overrides via
-  `Limits.from_env()` on both `/v1/convert` and `/v1/jobs`, matching the
-  CLI behaviour.
+- **(blastbox.host ingress)** Over-size uploads are rejected with HTTP 413
+  before any body is read (Content-Length check) or as soon as the streaming
+  body exceeds the limit (chunked uploads), and client-supplied filenames are
+  sanitized to a safe basename so path traversal via filename is not
+  possible. The ingress also owns auth and artifact path-confinement;
+  ClippyShot's ingress extension adds no security logic of its own.
+- **(ClippyShot detector)** Files that Magika labels as `zip` or `xml`
+  (generic container labels) are structurally sanity-checked before the
+  extension-fallback path trusts them. Zip-bombs (compression ratio > 100:1,
+  > 5000 entries, or missing `[Content_Types].xml`) and billion-laughs XML
+  (more than 64 entity declarations) are rejected at the detector.
+- The engine honours all `CLIPPYSHOT_*` render overrides via
+  `Limits.from_env()`, matching the `clippyshot convert` CLI; the subset a
+  client may set per-job (the scanner toggles) is allowlisted on the host via
+  `BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS` (default-deny).
 
 ## Configuration
 
-All limits are set via `clippyshot.limits.Limits.from_env()`. **[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)
-is the full reference** (every `CLIPPYSHOT_*` knob by group); the most common ones:
+ClippyShot's own render/limit knobs funnel through
+`clippyshot.limits.Limits.from_env()` (sandbox, scanner, and warm-UNO knobs
+are read directly); host/runtime knobs are `BLASTBOX_*` and belong to
+blastbox.host. **[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) is the full
+`CLIPPYSHOT_*` reference** (and links to blastbox's `BLASTBOX_*` reference);
+the most common ones:
 
 | Env var | Default | Effect |
 |---|---|---|
@@ -328,7 +364,7 @@ is the full reference** (every `CLIPPYSHOT_*` knob by group); the most common on
 | `CLIPPYSHOT_MAX_INPUT` | `104857600` | Max accepted upload size (100 MiB) |
 | `CLIPPYSHOT_MEM` | `8589934592` | Per-conversion RLIMIT_AS / VADDR cap (8 GiB — soffice mmaps 4–8 GB at ~500 MB RSS; the container `--memory` is the real RSS cap) |
 | `CLIPPYSHOT_TMPFS` | `1073741824` | Per-conversion tmpfs / RLIMIT_FSIZE cap (1 GiB) |
-| `CLIPPYSHOT_DATABASE_URL` | `sqlite:///./clippyshot-jobs.db` | SQL job metadata backend; use `postgresql://...` in Compose/prod |
+| `BLASTBOX_DATABASE_URL` | _(host knob)_ | Job-metadata backend, owned by blastbox.host; Compose sets it to `postgresql://…` |
 
 ## Supported formats
 
@@ -368,16 +404,22 @@ Rendered pages can be scanned for QR codes (via `zxing-cpp`) and OCR'd
 untrusted content. OCR is opt-in because it is the single most expensive
 stage when enabled.
 
-**Enable per-request** via `POST /v1/jobs` form params (or the UI
-checkboxes):
+**Enable per-request** by submitting to `POST /v1/jobs` with `engine=clippyshot`
+and repeated `params` fields (the UI checkboxes do exactly this). Each `params`
+entry is a `CLIPPYSHOT_*=value` pair; only the allowlisted scanner keys
+(`BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS`) are forwarded to the worker:
 
 ```sh
-curl -F "file=@doc.pdf" -F "qr=1" -F "ocr=1" http://localhost:8001/v1/jobs
+curl -F "file=@doc.pdf" -F "engine=clippyshot" \
+     -F "params=CLIPPYSHOT_QR=1" -F "params=CLIPPYSHOT_OCR=1" \
+     http://localhost:8001/v1/jobs
 ```
 
-**Or globally** via dispatcher env vars in `docker-compose.yml`
-(`CLIPPYSHOT_ENABLE_QR`, `CLIPPYSHOT_ENABLE_OCR`, `CLIPPYSHOT_OCR_ALL`,
-`CLIPPYSHOT_OCR_LANG`, `CLIPPYSHOT_OCR_PSM`, `CLIPPYSHOT_OCR_TIMEOUT_S`).
+**Or globally** by setting the engine's environment on the worker
+(`CLIPPYSHOT_QR`, `CLIPPYSHOT_OCR`, `CLIPPYSHOT_OCR_ALL`, `CLIPPYSHOT_OCR_LANG`,
+`CLIPPYSHOT_OCR_PSM`, `CLIPPYSHOT_OCR_TIMEOUT_S`) — baked into the cold-worker
+image or supplied as operator defaults. A per-job `params` value always wins
+over the global default.
 
 ### Image-gating
 
@@ -430,19 +472,22 @@ corresponding `tesseract-ocr-<lang>` package.
 ## Project layout
 
 ```
-src/clippyshot/        # library + CLI + API
+src/clippyshot/        # engine + rendering pipeline + CLI + blastbox ingress extension
 tests/
   unit/                # pure unit tests, no soffice or sandbox required
   cli/                 # CLI subprocess tests
-  http/                # FastAPI TestClient tests
+  http/                # ingress-extension tests (against blastbox.host's app)
   integration/         # full pipeline; requires soffice + working sandbox
   docker/              # exercises the built Docker image
   fixtures/safe/       # safe, hand-built input fixtures
   fixtures/malicious/  # safety probes (no exploits, just feature exercises)
 deploy/
-  docker/              # Dockerfile + .dockerignore
+  docker/              # Dockerfile, docker-compose{,.firecracker,.gvisor}.yml, clippyshot-compose wrapper, postgres image
   apparmor/            # AppArmor profiles + load instructions
-docs/superpowers/      # design spec, plan, brainstorm notes
+  seccomp/             # seccomp BPF + KAFEL policies (x86_64)
+docs/
+  CONFIGURATION.md     # full CLIPPYSHOT_* reference
+  plans/               # design / cutover notes
 ```
 
 ## Exit codes
