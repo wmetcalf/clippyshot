@@ -179,6 +179,54 @@ def test_warmup_priming_failure_is_nonfatal(monkeypatch):
     assert eng._uno_server is srv  # warm tier stays active despite priming failure
 
 
+def test_warm_ocr_off_by_default(monkeypatch):
+    monkeypatch.delenv("CLIPPYSHOT_WARM_OCR", raising=False)
+    monkeypatch.delenv("CLIPPYSHOT_WARM_UNO", raising=False)
+    eng = ClippyShotEngine()
+    eng.warmup()
+    assert eng._ocr_server is None
+
+
+def test_warm_ocr_starts_when_enabled(monkeypatch):
+    # OCR warm tier is independent of the UNO warm tier.
+    monkeypatch.setenv("CLIPPYSHOT_WARM_OCR", "1")
+    monkeypatch.delenv("CLIPPYSHOT_WARM_UNO", raising=False)
+    monkeypatch.delenv("CLIPPYSHOT_OCR_ENGINE", raising=False)
+    started = []
+
+    class FakeWarm:
+        def start(self):
+            started.append(True)
+
+        def is_ready(self):
+            return True
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr("clippyshot.ocr_warm.WarmOCR", lambda *a, **k: FakeWarm())
+    eng = ClippyShotEngine()
+    eng.warmup()
+    assert started == [True]
+    assert eng._ocr_server is not None
+
+
+def test_warm_ocr_nonfatal_on_start_failure(monkeypatch):
+    monkeypatch.setenv("CLIPPYSHOT_WARM_OCR", "1")
+
+    class FailWarm:
+        def start(self):
+            raise RuntimeError("tesserocr not installed")
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr("clippyshot.ocr_warm.WarmOCR", lambda *a, **k: FailWarm())
+    eng = ClippyShotEngine()
+    eng.warmup()  # must NOT raise — falls back to CLI
+    assert eng._ocr_server is None
+
+
 def test_detonate_maps_detection_error_to_rejected(tmp_path):
     """A detector rejection (DetectionError out of converter.convert) must surface as
     status='rejected' (the dispatcher keeps such a job DONE), NOT propagate to the harness
