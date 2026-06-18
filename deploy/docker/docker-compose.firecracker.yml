@@ -39,7 +39,7 @@ services:
       # Engine-OWNED reserved keys — MUST mirror the cold dispatcher (see docker-compose.yml).
       # Dropped UNCONDITIONALLY so a client can't flip this warm worker's security posture
       # (sandbox selection / insecure fallback / internals disclosure / warm-diag write).
-      - BLASTBOX_ENGINE_CLIPPYSHOT_RESERVED_KEYS=${BLASTBOX_ENGINE_CLIPPYSHOT_RESERVED_KEYS:-CLIPPYSHOT_WARM_DIAG_FILE,CLIPPYSHOT_SANDBOX,CLIPPYSHOT_WARN_ON_INSECURE,CLIPPYSHOT_DISCLOSE_SECURITY_INTERNALS}
+      - BLASTBOX_ENGINE_CLIPPYSHOT_RESERVED_KEYS=${BLASTBOX_ENGINE_CLIPPYSHOT_RESERVED_KEYS:-CLIPPYSHOT_WARM_DIAG_FILE,CLIPPYSHOT_SANDBOX,CLIPPYSHOT_WARN_ON_INSECURE,CLIPPYSHOT_DISCLOSE_SECURITY_INTERNALS,CLIPPYSHOT_WARM_OCR,CLIPPYSHOT_OCR_ENGINE}
       # --- sidecar primitive ---
       - BLASTBOX_DISPATCH_WARM_ONLY=1
       # Concurrency MUST match the warm pool size: the warm dispatch path blocks until
