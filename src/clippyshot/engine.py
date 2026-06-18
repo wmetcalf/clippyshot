@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -250,6 +251,7 @@ class ClippyShotEngine:
         self._converter = None  # lazy
         self._uno_server: WarmConverter | None = None  # set by warmup() in the warm tier
         self._ocr_server: WarmOCR | None = None  # set by warmup() (CLIPPYSHOT_WARM_OCR)
+        self._converter_lock = threading.Lock()  # guards lazy _get_converter init
 
     def warmup(self) -> None:
         """Pre-pay startup for the warm tiers (blastbox warm-pool seam).
@@ -380,6 +382,12 @@ class ClippyShotEngine:
 
         if os.environ.get("CLIPPYSHOT_OCR_ENGINE", "tesserocr").strip().lower() == "tesseract_cli":
             return
+        # Only spawn the cold helper when this job actually uses OCR (off by
+        # default). Otherwise every non-OCR container job would pay a tesserocr
+        # spawn + model load for nothing, and a slow helper startup could delay
+        # the job by ready_timeout_s with no OCR path to use it.
+        if os.environ.get("CLIPPYSHOT_OCR", "").strip().lower() not in ("1", "true", "yes"):
+            return
         try:
             from clippyshot.sandbox.detect import select_sandbox
 
@@ -398,13 +406,16 @@ class ClippyShotEngine:
         self._ocr_server = srv
 
     def _get_converter(self):
-        if self._converter is None:
-            if self._ocr_server is None:
-                self._maybe_start_cold_ocr_helper()
-            self._converter = _build_converter(
-                uno_server=self._uno_server, ocr_helper=self._ocr_server
-            )
-        return self._converter
+        # Lock the lazy init: concurrent detonate() calls on one engine must not
+        # build duplicate converters or spawn duplicate cold-OCR helpers.
+        with self._converter_lock:
+            if self._converter is None:
+                if self._ocr_server is None:
+                    self._maybe_start_cold_ocr_helper()
+                self._converter = _build_converter(
+                    uno_server=self._uno_server, ocr_helper=self._ocr_server
+                )
+            return self._converter
 
     @staticmethod
     def _convert_options_from_env(limits: BlastboxLimits):

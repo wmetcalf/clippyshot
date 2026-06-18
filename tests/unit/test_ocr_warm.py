@@ -174,6 +174,36 @@ class HangProc:
         self._ev.set()
 
 
+class RaisingProc:
+    """terminate()/wait()/kill() all raise — an already-reaped process."""
+
+    def __init__(self):
+        self.stdin = io.StringIO()
+        self.stdout = io.StringIO(json.dumps({"ready": True}) + "\n")
+
+    def poll(self):
+        return None  # appears running
+
+    def terminate(self):
+        raise ProcessLookupError("already reaped")
+
+    def wait(self, timeout=None):
+        raise ChildProcessError()
+
+    def kill(self):
+        raise ProcessLookupError()
+
+
+def test_stop_is_robust_when_terminate_raises():
+    # Teardown (atexit / timeout-kill races) must never raise even if the
+    # process was already reaped.
+    proc = RaisingProc()
+    srv = WarmOCR(popen=lambda *a, **k: proc)
+    srv.start()
+    srv.stop()  # must NOT propagate ProcessLookupError/ChildProcessError
+    assert srv._proc is None
+
+
 def test_hung_helper_times_out_and_is_killed():
     # Finding 2: a hung page must NOT block forever; ocr() times out, kills the
     # helper, and raises OCRError so the converter cold-falls-back.
