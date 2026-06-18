@@ -369,8 +369,38 @@ class ClippyShotEngine:
             _prime_warm_server(server)
         self._uno_server = server
 
+    def _maybe_start_cold_ocr_helper(self) -> None:
+        """Cold-container tier: when no warm helper is set, start a per-process
+        tesserocr helper so cold jobs also amortize the model load across a job's
+        gated pages. Only on the ``container`` backend (the worker container is the
+        sandbox); bare-metal nsjail/bwrap keeps the per-page sandboxed CLI. Honors
+        the ``tesseract_cli`` escape hatch. Fail-closed: any issue → cold CLI."""
+        import atexit
+        import logging
+
+        if os.environ.get("CLIPPYSHOT_OCR_ENGINE", "tesserocr").strip().lower() == "tesseract_cli":
+            return
+        try:
+            from clippyshot.sandbox.detect import select_sandbox
+
+            if select_sandbox().name != "container":
+                return
+            from clippyshot.ocr_warm import WarmOCR
+
+            srv = WarmOCR()
+            srv.start()
+        except Exception as exc:  # noqa: BLE001 - non-fatal: cold CLI path
+            logging.getLogger("clippyshot.engine").info(
+                "cold-OCR helper unavailable; using the tesseract CLI: %s", exc
+            )
+            return
+        atexit.register(srv.stop)
+        self._ocr_server = srv
+
     def _get_converter(self):
         if self._converter is None:
+            if self._ocr_server is None:
+                self._maybe_start_cold_ocr_helper()
             self._converter = _build_converter(
                 uno_server=self._uno_server, ocr_helper=self._ocr_server
             )

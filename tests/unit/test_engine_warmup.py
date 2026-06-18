@@ -227,6 +227,58 @@ def test_warm_ocr_nonfatal_on_start_failure(monkeypatch):
     assert eng._ocr_server is None
 
 
+def test_warm_ocr_disabled_by_cli_engine(monkeypatch):
+    monkeypatch.setenv("CLIPPYSHOT_WARM_OCR", "1")
+    monkeypatch.setenv("CLIPPYSHOT_OCR_ENGINE", "tesseract_cli")
+
+    class FakeWarm:
+        def start(self):
+            raise AssertionError("must not start when forced to the CLI")
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr("clippyshot.ocr_warm.WarmOCR", lambda *a, **k: FakeWarm())
+    eng = ClippyShotEngine()
+    eng.warmup()
+    assert eng._ocr_server is None
+
+
+def _fake_sandbox(name):
+    return lambda: type("S", (), {"name": name})()
+
+
+def test_cold_ocr_helper_starts_on_container_backend(monkeypatch):
+    monkeypatch.delenv("CLIPPYSHOT_OCR_ENGINE", raising=False)
+    monkeypatch.setattr("clippyshot.ocr_warm.WarmOCR",
+                        lambda *a, **k: type("W", (), {"start": lambda self: None,
+                                                       "stop": lambda self: None})())
+    monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", _fake_sandbox("container"))
+    eng = ClippyShotEngine()
+    eng._maybe_start_cold_ocr_helper()
+    assert eng._ocr_server is not None
+
+
+def test_cold_ocr_helper_skipped_on_baremetal(monkeypatch):
+    monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", _fake_sandbox("bwrap"))
+    eng = ClippyShotEngine()
+    eng._maybe_start_cold_ocr_helper()
+    assert eng._ocr_server is None
+
+
+def test_cold_ocr_helper_nonfatal_when_start_fails(monkeypatch):
+    monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", _fake_sandbox("container"))
+
+    def _boom(self):
+        raise RuntimeError("tesserocr missing in this container")
+
+    monkeypatch.setattr("clippyshot.ocr_warm.WarmOCR",
+                        lambda *a, **k: type("W", (), {"start": _boom, "stop": lambda self: None})())
+    eng = ClippyShotEngine()
+    eng._maybe_start_cold_ocr_helper()  # must NOT raise
+    assert eng._ocr_server is None
+
+
 def test_detonate_maps_detection_error_to_rejected(tmp_path):
     """A detector rejection (DetectionError out of converter.convert) must surface as
     status='rejected' (the dispatcher keeps such a job DONE), NOT propagate to the harness
