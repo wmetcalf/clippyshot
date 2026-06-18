@@ -13,11 +13,13 @@ def test_readme_describes_api_dispatcher_worker_split():
 
     assert "Docker Compose stack (recommended" in readme
     assert "`api` on `http://localhost:8001`" in readme
-    assert "`dispatcher` — claims jobs from Postgres and launches one worker" in readme
+    assert "`dispatcher` — `blastbox dispatch`: claims queued jobs from Postgres and" in readme
 
-    assert "API: uploads, job status, artifact serving, no Docker socket." in readme
-    assert "Dispatcher: claims jobs, chooses `runsc`/`runc`, launches workers, has the Docker socket." in readme
-    assert "Worker: one job, one mounted directory, no Postgres credentials." in readme
+    # The api/dispatcher/worker roles now run on blastbox.host (the migration);
+    # the README describes the split via the blastbox commands.
+    assert "**API** — `blastbox serve` with ClippyShot's ingress extension" in readme
+    assert "**Dispatcher** — `blastbox dispatch`:" in readme
+    assert "**Worker** — `python -m blastbox.worker.cold`" in readme
 
 def test_readme_runtime_example_sets_tmpfs_owner_for_db():
     readme = Path("README.md").read_text()
