@@ -24,6 +24,7 @@ the sandboxed CLI enforces.
 from __future__ import annotations
 
 import json
+import os
 import queue
 import subprocess
 import sys
@@ -193,14 +194,36 @@ def _serve() -> None:  # pragma: no cover - runs in the helper subprocess
     one page per stdin request. A per-request failure is non-fatal (returns an
     ``error`` so the caller cold-falls-back). A hang is handled by the client
     SIGKILLing this process — tesseract C calls aren't interruptible here."""
+    import glob
+
     from tesserocr import PyTessBaseAPI  # PyTessBaseAPI takes psm as a plain int
 
+    def _tessdata_dir() -> str | None:
+        # `docker export` (FC/gVisor warm-guest rootfs) DROPS the image's
+        # TESSDATA_PREFIX ENV, so tesserocr can't find the models and init fails.
+        # Honor a valid env; otherwise discover the system tessdata dir and pass it
+        # explicitly — keeps the warm helper working in export-built guest rootfs.
+        env = os.environ.get("TESSDATA_PREFIX")
+        if env and glob.glob(os.path.join(env, "*.traineddata")):
+            return env
+        for cand in sorted(glob.glob("/usr/share/tesseract-ocr/*/tessdata")) + [
+            "/usr/share/tessdata",
+            "/usr/local/share/tessdata",
+        ]:
+            if glob.glob(os.path.join(cand, "*.traineddata")):
+                return cand
+        return None  # let tesserocr use its default (errors if no models)
+
+    tessdata = _tessdata_dir()
     apis: dict[tuple[str, int], PyTessBaseAPI] = {}
 
     def api_for(lang: str, psm: int) -> PyTessBaseAPI:
         key = (lang, psm)
         if key not in apis:
-            api = PyTessBaseAPI(lang=lang, psm=psm)
+            kw = {"lang": lang, "psm": psm}
+            if tessdata is not None:
+                kw["path"] = tessdata
+            api = PyTessBaseAPI(**kw)
             # Match the CLI path's --dpi 150 (DEFAULT_DPI in clippyshot.ocr).
             api.SetVariable("user_defined_dpi", "150")
             apis[key] = api
