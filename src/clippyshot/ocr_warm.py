@@ -57,14 +57,18 @@ class WarmOCR:
         line. Idempotent. Raises ``OCRError`` if it never readies."""
         if self._proc is not None:
             return
-        self._proc = self._popen(
+        proc = self._popen(
             self.argv(),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
             bufsize=1,
         )
-        hello = self._proc.stdout.readline()
+        self._proc = proc
+        if proc.stdout is None:
+            self.stop()
+            raise OCRError("warm OCR helper has no stdout pipe")
+        hello = proc.stdout.readline()
         try:
             ready = bool(hello) and json.loads(hello).get("ready") is True
         except ValueError:
@@ -86,27 +90,28 @@ class WarmOCR:
     ) -> OCRResult:
         """OCR one page via the warm helper. Raises ``OCRError`` on any failure
         (caller falls back to the cold CLI path)."""
-        if not self.is_ready():
+        proc = self._proc
+        if proc is None or proc.poll() is not None or proc.stdin is None or proc.stdout is None:
             raise OCRError("warm OCR helper not ready")
         validate_lang(lang)
         try:
-            self._proc.stdin.write(
+            proc.stdin.write(
                 json.dumps(
                     {"png": str(png), "lang": lang, "psm": psm, "timeout_s": timeout_s}
                 )
                 + "\n"
             )
-            self._proc.stdin.flush()
-            line = self._proc.stdout.readline()
+            proc.stdin.flush()
+            line = proc.stdout.readline()
             resp = json.loads(line) if line else {"error": "no response from warm OCR helper"}
         except (OSError, ValueError) as e:
             raise OCRError(f"warm OCR transport failure: {e}") from e
         if "error" in resp:
             raise OCRError(str(resp["error"]))
         return OCRResult(
-            text=resp["text"],
-            char_count=resp["char_count"],
-            duration_ms=resp["duration_ms"],
+            text=str(resp["text"]),
+            char_count=int(resp["char_count"]),
+            duration_ms=int(resp["duration_ms"]),
         )
 
     def stop(self) -> None:
