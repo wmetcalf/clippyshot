@@ -396,7 +396,11 @@ def _process_page_scanners(
                 per_call_timeout = int(remaining)
 
                 def _ocr_cold():
-                    kwargs = {"lang": ocr_lang, "psm": ocr_psm, "timeout_s": per_call_timeout}
+                    # Recompute the remaining budget so a warm attempt's wait/timeout
+                    # is deducted before the CLI fallback — otherwise warm-then-CLI on
+                    # a hung helper could spend up to 2x the per-page budget.
+                    t = int(ocr_time_left()) if ocr_time_left is not None else per_call_timeout
+                    kwargs = {"lang": ocr_lang, "psm": ocr_psm, "timeout_s": max(1, t)}
                     if ocr_runner is not None:
                         kwargs["argv_runner"] = ocr_runner
                     return _ocr_fn(scan_png, **kwargs)

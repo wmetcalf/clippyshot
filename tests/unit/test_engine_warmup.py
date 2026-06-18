@@ -250,6 +250,7 @@ def _fake_sandbox(name):
 
 def test_cold_ocr_helper_starts_on_container_backend(monkeypatch):
     monkeypatch.delenv("CLIPPYSHOT_OCR_ENGINE", raising=False)
+    monkeypatch.setenv("CLIPPYSHOT_OCR", "1")  # cold helper only when OCR is enabled
     monkeypatch.setattr("clippyshot.ocr_warm.WarmOCR",
                         lambda *a, **k: type("W", (), {"start": lambda self: None,
                                                        "stop": lambda self: None})())
@@ -259,7 +260,19 @@ def test_cold_ocr_helper_starts_on_container_backend(monkeypatch):
     assert eng._ocr_server is not None
 
 
+def test_cold_ocr_helper_skipped_when_ocr_disabled(monkeypatch):
+    # OCR off by default → a non-OCR container job must NOT spawn a helper.
+    monkeypatch.delenv("CLIPPYSHOT_OCR", raising=False)
+    monkeypatch.setattr("clippyshot.ocr_warm.WarmOCR",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not start")))
+    monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", _fake_sandbox("container"))
+    eng = ClippyShotEngine()
+    eng._maybe_start_cold_ocr_helper()
+    assert eng._ocr_server is None
+
+
 def test_cold_ocr_helper_skipped_on_baremetal(monkeypatch):
+    monkeypatch.setenv("CLIPPYSHOT_OCR", "1")
     monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", _fake_sandbox("bwrap"))
     eng = ClippyShotEngine()
     eng._maybe_start_cold_ocr_helper()
@@ -267,6 +280,7 @@ def test_cold_ocr_helper_skipped_on_baremetal(monkeypatch):
 
 
 def test_cold_ocr_helper_nonfatal_when_start_fails(monkeypatch):
+    monkeypatch.setenv("CLIPPYSHOT_OCR", "1")
     monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", _fake_sandbox("container"))
 
     def _boom(self):

@@ -55,6 +55,33 @@ def test_falls_back_to_cli_on_helper_error(tmp_path):
     assert any(w["code"] == "ocr_warm_fallback" for w in warnings)
 
 
+def test_warm_fallback_recomputes_ocr_budget(tmp_path):
+    # On warm->CLI fallback the CLI must use the RECOMPUTED remaining budget
+    # (ocr_time_left), not the stale pre-warm value — so a slow/hung warm attempt
+    # can't make the job spend ~2x the per-page budget.
+    h = Helper(raises=True)
+    seen = {}
+
+    def cli(scan_png, *, lang, psm, timeout_s, argv_runner=None):
+        seen["timeout_s"] = timeout_s
+        return OCRResult("cli", 3, 1)
+
+    calls = {"n": 0}
+
+    def time_left():
+        calls["n"] += 1
+        return 50.0 if calls["n"] == 1 else 12.0  # warm consumed budget → 12 left
+
+    rec = {"file": "page-001.png", "index": 1, "width": 100, "height": 100}
+    (tmp_path / "page-001.png").write_bytes(b"x")
+    _process_page_scanners(
+        tmp_path, rec, is_blank=False, qr_enabled=False, qr_formats="", qr_timeout_s=5,
+        ocr_enabled=True, ocr_lang="eng", ocr_psm=3, ocr_time_left=time_left,
+        has_images=True, ocr_all=True, _ocr_fn=cli, ocr_helper=h,
+    )
+    assert seen["timeout_s"] == 12  # recomputed remaining, not the pre-warm 50
+
+
 def test_no_helper_uses_cli(tmp_path):
     called = {"cli": 0}
 

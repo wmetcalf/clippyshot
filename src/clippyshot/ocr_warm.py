@@ -172,14 +172,20 @@ class WarmOCR:
             if proc.stdin is not None and not proc.stdin.closed:
                 proc.stdin.write(json.dumps({"cmd": "quit"}) + "\n")
                 proc.stdin.flush()
-        except OSError:
+        except Exception:  # noqa: BLE001 - best-effort; SIGKILL is the real teardown
             pass
-        proc.terminate()
+        # terminate()/wait() can raise (ProcessLookupError/ChildProcessError) if the
+        # process was already reaped (e.g. atexit racing a timeout-kill). Stay quiet —
+        # teardown must never raise.
         try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _serve() -> None:  # pragma: no cover - runs in the helper subprocess
