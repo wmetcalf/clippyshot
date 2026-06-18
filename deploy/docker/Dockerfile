@@ -119,7 +119,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Warm-OCR tier: point tesserocr (bundled tesseract 5.5.1) at the system tessdata
 # installed by tesseract-ocr-all (eng + Latin + osd). The `tesseract` CLI fallback
-# uses its own compiled-in default; this only affects the in-process C-API helper.
+# uses its own compiled-in default; this only affects the warm-OCR helper subprocess.
 ENV TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata
 
 COPY --from=builder /out/nsjail /usr/local/bin/nsjail
