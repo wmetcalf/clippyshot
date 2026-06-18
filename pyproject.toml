@@ -25,6 +25,10 @@ dependencies = [
     "python-magic>=0.4.27",
     "olefile>=0.46",
     "blastbox>=0.1.14",
+    # Warm-OCR tier: tesseract C-API binding (bundled manylinux wheel = tesseract
+    # 5.5.1). Reads the image's system tessdata via TESSDATA_PREFIX. The cold path's
+    # `tesseract` CLI (5.3.4) stays the fail-closed fallback.
+    "tesserocr>=2.7.0",
 ]
 
 [project.optional-dependencies]

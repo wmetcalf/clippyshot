@@ -117,6 +117,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && (apt-get purge -y default-jre-headless 'openjdk-*' libreoffice-java-common 2>/dev/null || true) \
     && rm -rf /var/lib/apt/lists/*
 
+# Warm-OCR tier: point tesserocr (bundled tesseract 5.5.1) at the system tessdata
+# installed by tesseract-ocr-all (eng + Latin + osd). The `tesseract` CLI fallback
+# uses its own compiled-in default; this only affects the in-process C-API helper.
+ENV TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata
+
 COPY --from=builder /out/nsjail /usr/local/bin/nsjail
 # Optional inner Landlock wrapper (opt-in via CLIPPYSHOT_INNER_NONO); resolved by
 # clippyshot.sandbox.nono_wrap on PATH. No-op unless explicitly enabled.
