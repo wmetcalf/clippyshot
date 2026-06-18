@@ -79,3 +79,9 @@ ignore_missing_imports = true
 # olefile ships no type stubs (used for OLE structural sniffing in detector/sheet_prep).
 module = ["olefile"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# tesserocr ships no type stubs / py.typed marker. Used only inside the warm-OCR
+# helper subprocess loop (clippyshot/ocr_warm.py:_serve), imported lazily there.
+module = ["tesserocr"]
+ignore_missing_imports = true
