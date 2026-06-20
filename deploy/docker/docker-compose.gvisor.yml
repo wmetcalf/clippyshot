@@ -67,7 +67,7 @@ services:
       - BLASTBOX_GVISOR_PLATFORM=systrap
       - BLASTBOX_GVISOR_WARM_ARGV=["/opt/clippyshot/bin/python3","/opt/blastbox/run_warm.py"]
       - BLASTBOX_GVISOR_LD_PRELOAD=/opt/clippyshot/accept-retry.so
-      - BLASTBOX_GVISOR_EXTRA_ENV=["CLIPPYSHOT_SANDBOX=container","CLIPPYSHOT_WARN_ON_INSECURE=1","CLIPPYSHOT_WARM_UNO=1"]
+      - BLASTBOX_GVISOR_EXTRA_ENV=["CLIPPYSHOT_SANDBOX=container","CLIPPYSHOT_WARN_ON_INSECURE=1","CLIPPYSHOT_WARM_UNO=1","CLIPPYSHOT_WARM_OCR=1"]
     volumes:
       # job_root (host-consistent, same as the main dispatcher) — read the staged input.
       - "${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}/jobs:${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}/jobs"

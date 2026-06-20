@@ -41,6 +41,10 @@ services:
       - BLASTBOX_JOB_RETENTION_SECONDS=${BLASTBOX_JOB_RETENTION_SECONDS:-0}
       - BLASTBOX_ALLOWED_ENGINES=clippyshot
       - BLASTBOX_INGRESS_EXTENSION=clippyshot.blastbox_ingress:make_extension
+      # Optional per-job tier routing (target_tier), default-OFF operator/test knob —
+      # mirrors the redtusk-bb stack. Lets a submit pin cold|firecracker|gvisor; off →
+      # silently ignored. Set BLASTBOX_ALLOW_TIER_ROUTING=1 in .env to enable.
+      - BLASTBOX_ALLOW_TIER_ROUTING=${BLASTBOX_ALLOW_TIER_ROUTING:-}
     ports:
       - "${CLIPPYSHOT_PORT:-8001}:8000"
     read_only: true
