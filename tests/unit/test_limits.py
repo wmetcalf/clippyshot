@@ -28,6 +28,31 @@ def test_limits_from_env(monkeypatch):
     assert limits.dpi == 150
 
 
+def test_skip_blanks_bool_spellings(monkeypatch):
+    # default-ON: canonical AND noncanonical falsy spellings (incl. whitespace/"off") disable it.
+    for val in ("0", "false", "no", "Off", " NO ", "false "):
+        monkeypatch.setenv("CLIPPYSHOT_SKIP_BLANKS", val)
+        assert Limits.from_env().skip_blanks is False, val
+    for val in ("1", "true", "yes", "on"):
+        monkeypatch.setenv("CLIPPYSHOT_SKIP_BLANKS", val)
+        assert Limits.from_env().skip_blanks is True, val
+    monkeypatch.delenv("CLIPPYSHOT_SKIP_BLANKS")
+    assert Limits.from_env().skip_blanks is True   # default on
+
+
+def test_disclose_security_internals_fail_closed(monkeypatch):
+    # a SECURITY flag (True = more disclosure) must FAIL CLOSED: only an explicit truthy token enables it,
+    # so a typo / whitespace / "off" can't silently flip on security-internals disclosure.
+    for val in ("1", "true", "YES", " on "):
+        monkeypatch.setenv("CLIPPYSHOT_DISCLOSE_SECURITY_INTERNALS", val)
+        assert Limits.from_env().disclose_security_internals is True, val
+    for val in ("0", "false", "off", "garbage", "No"):
+        monkeypatch.setenv("CLIPPYSHOT_DISCLOSE_SECURITY_INTERNALS", val)
+        assert Limits.from_env().disclose_security_internals is False, val
+    monkeypatch.delenv("CLIPPYSHOT_DISCLOSE_SECURITY_INTERNALS")
+    assert Limits.from_env().disclose_security_internals is False   # default off
+
+
 def test_dpi_too_high_rejected():
     with pytest.raises(ValueError, match="dpi"):
         Limits(dpi=10000)

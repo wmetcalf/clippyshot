@@ -23,8 +23,11 @@ _ENV_MAP = {
 
 # Map field name → coerce function for env-var parsing.
 _ENV_COERCE: dict[str, Callable[[str], object]] = {
-    "skip_blanks": lambda s: s.lower() not in ("0", "false", "no"),
-    "disclose_security_internals": lambda s: s.lower() not in ("0", "false", "no"),
+    # default-ON: strip/lower + include "off" so `False`/` no `/`Off` actually disable it.
+    "skip_blanks": lambda s: s.strip().lower() not in ("0", "false", "no", "off"),
+    # security flag (True = MORE disclosure) -> FAIL-CLOSED: only an explicit truthy token enables it, so a
+    # typo / whitespace / "off" can't silently flip on security-internals disclosure.
+    "disclose_security_internals": lambda s: s.strip().lower() in ("1", "true", "yes", "on"),
     "rasterizer": lambda s: s.strip().lower(),
 }
 
