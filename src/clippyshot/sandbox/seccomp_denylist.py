@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 
 _log = logging.getLogger("clippyshot.sandbox.seccomp")
 
@@ -58,19 +59,21 @@ DENY_ERRNO1: tuple[str, ...] = (
 )
 
 
-def libseccomp_available() -> bool:
-    try:
-        import seccomp  # type: ignore[import-not-found]  # noqa: F401
-    except Exception:
-        return False
-    return True
-
-
 def build_bpf_bytes() -> bytes | None:
     """Build a ``DEFAULT ALLOW`` + ``ERRNO(1)``-denylist BPF program via libseccomp and return
-    its raw bytes (to feed ``bwrap --seccomp <fd>``). Returns ``None`` if libseccomp is
-    unavailable or the build fails — the caller then keeps bwrap marked insecure (fail-safe).
-    A syscall name that doesn't resolve on this arch is logged + skipped (degrade, don't crash)."""
+    its raw bytes (to feed ``bwrap --seccomp <fd>``).
+
+    Returns ``None`` — so the caller keeps bwrap marked insecure — when the arch isn't x86_64,
+    libseccomp is unavailable, OR **any** deny rule can't be added. That last case is deliberately
+    **fail-CLOSED**: a partial denylist (e.g. an older libseccomp missing a syscall name) would
+    still report ``seccomp_active=True`` while silently allowing a denied syscall, breaking the
+    parity guarantee — attach the FULL filter or none at all.
+    """
+    if platform.machine() not in ("x86_64", "amd64"):
+        # The denylist (and the nsjail KAFEL policy it mirrors) is x86_64-only — syscall
+        # availability is arch-specific, so don't claim a filter on other arches.
+        _log.warning("seccomp: denylist is x86_64-only; not building on %s", platform.machine())
+        return None
     try:
         import seccomp  # type: ignore[import-not-found]
     except Exception:
@@ -80,15 +83,15 @@ def build_bpf_bytes() -> bytes | None:
         for name in DENY_ERRNO1:
             try:
                 f.add_rule(seccomp.ERRNO(1), name)
-            except Exception as e:  # noqa: BLE001 - unresolved syscall on this arch, etc.
-                _log.warning("seccomp: skipping unresolvable syscall %r: %s", name, e)
-        # Export to a memfd (not a pipe — a pipe would deadlock if the BPF exceeded the pipe
-        # buffer; it won't here, but memfd is unconditionally safe), then read it back.
+            except Exception as e:  # noqa: BLE001
+                _log.warning("seccomp: cannot add deny rule for %r (%s) — failing closed", name, e)
+                return None  # fail-closed: no partial denylist
+        # Export to a memfd (a pipe could deadlock if the BPF exceeded the pipe buffer; it won't
+        # here, but memfd is unconditionally safe). closefd=False so the outer os.close owns the fd.
         fd = os.memfd_create("clippyshot_seccomp_build", 0)
         try:
-            bf = os.fdopen(fd, "wb", closefd=False)
-            f.export_bpf(bf)
-            bf.flush()
+            with os.fdopen(fd, "wb", closefd=False) as bf:
+                f.export_bpf(bf)   # flushed + closed by the with (fd stays open, closefd=False)
             os.lseek(fd, 0, os.SEEK_SET)
             return b"".join(iter(lambda: os.read(fd, 1 << 16), b""))
         finally:
