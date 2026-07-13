@@ -124,3 +124,25 @@ def test_no_duplicate_syscalls_in_deny_block() -> None:
                 tokens.append(tok)
     dupes = [t for t in tokens if tokens.count(t) > 1]
     assert len(tokens) == len(set(tokens)), f"duplicates in DENY: {dupes}"
+
+
+def test_bwrap_denylist_matches_kafel_policy() -> None:
+    """The bwrap BPF denylist (seccomp_denylist.DENY_ERRNO1) MUST equal the nsjail KAFEL
+    ERRNO(1) block, so both backends deny the exact same syscalls (no drift between them)."""
+    from clippyshot.sandbox.seccomp_denylist import DENY_ERRNO1
+
+    # KAFEL can't lex `umount2` so the nsjail policy names that syscall `umount`; libseccomp needs
+    # the real x86_64 `umount2`. Same syscall, backend-appropriate name — normalize that one.
+    assert set(DENY_ERRNO1) == (_extract_deny_tokens() - {"umount"}) | {"umount2"}
+    assert len(DENY_ERRNO1) == len(set(DENY_ERRNO1))  # no duplicates in the tuple
+
+
+def test_build_bpf_bytes_produces_a_valid_bpf() -> None:
+    """Where python3-libseccomp is installed, build_bpf_bytes() returns a non-empty BPF program
+    (a whole number of 8-byte struct sock_filter instructions). Skips where the distro lib is absent."""
+    pytest.importorskip("seccomp")
+    from clippyshot.sandbox.seccomp_denylist import build_bpf_bytes
+
+    bpf = build_bpf_bytes()
+    assert bpf is not None
+    assert len(bpf) > 0 and len(bpf) % 8 == 0
