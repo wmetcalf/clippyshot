@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# ClippyShot's integration/docker suites need real soffice + a sandbox backend /
+# Docker daemon (they run inside the built image, not on hosted CI) and are
+# marker-gated. This workflow runs the host-safe tiers: lint, types, and the
+# pure unit/cli/http tests.
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Ruff
+        run: ruff check src tests
+      - name: Mypy
+        run: mypy src
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Pytest (unit + cli + http)
+        run: pytest -q tests/unit tests/cli tests/http
