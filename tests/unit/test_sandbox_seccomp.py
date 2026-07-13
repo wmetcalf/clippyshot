@@ -131,7 +131,9 @@ def test_bwrap_denylist_matches_kafel_policy() -> None:
     ERRNO(1) block, so both backends deny the exact same syscalls (no drift between them)."""
     from clippyshot.sandbox.seccomp_denylist import DENY_ERRNO1
 
-    assert set(DENY_ERRNO1) == _extract_deny_tokens()
+    # KAFEL can't lex `umount2` so the nsjail policy names that syscall `umount`; libseccomp needs
+    # the real x86_64 `umount2`. Same syscall, backend-appropriate name — normalize that one.
+    assert set(DENY_ERRNO1) == (_extract_deny_tokens() - {"umount"}) | {"umount2"}
     assert len(DENY_ERRNO1) == len(set(DENY_ERRNO1))  # no duplicates in the tuple
 
 

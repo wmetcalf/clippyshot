@@ -27,8 +27,11 @@ DENY_ERRNO1: tuple[str, ...] = (
     "init_module", "finit_module", "delete_module",
     # Key management
     "add_key", "keyctl", "request_key",
-    # Mount / filesystem manipulation
-    "mount", "umount", "pivot_root",
+    # Mount / filesystem manipulation. libseccomp needs the REAL x86_64 syscall `umount2`
+    # (`umount` resolves to a pseudo that never matches); the nsjail KAFEL policy names the same
+    # syscall `umount` (KAFEL can't lex `umount2`). Same intent, backend-appropriate name — the
+    # parity test normalizes it.
+    "mount", "umount2", "pivot_root",
     # Kernel exec / reboot
     "kexec_load", "kexec_file_load", "reboot",
     # Process inspection/control of others
