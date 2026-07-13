@@ -35,9 +35,13 @@ def test_bwrap_skips_aa_exec_when_opted_out():
 
 
 def test_nsjail_skips_proc_apparmor_when_opted_out():
+    from clippyshot.errors import SandboxUnavailable
     from clippyshot.sandbox.nsjail import NsjailSandbox
 
-    sb = NsjailSandbox()
+    try:
+        sb = NsjailSandbox()
+    except SandboxUnavailable:
+        pytest.skip("nsjail not installed on this host")
     if not sb._proc_apparmor_supported:
         pytest.skip("installed nsjail lacks --proc_apparmor")
     off = sb._build_argv(SandboxRequest(argv=["/usr/bin/soffice"], attach_apparmor=False))
