@@ -272,7 +272,7 @@ flowchart LR
 - Base `ubuntu:24.04`; the **LibreOffice** archive build, `tesseract-ocr` + `tesseract-ocr-all` (`TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata`), and `zxing-cpp-tools` (`/usr/bin/ZXingReader` for QR).
 - `pip install` ClippyShot (from this repo) **with `tesserocr`** (needs `build-essential` + `python3-dev`) for the warm in-process OCR helper, on top of `blastbox` (from PyPI).
 - Entrypoint `python -m blastbox.worker.http_agent` with `BLASTBOX_ENGINE=clippyshot.engine:ClippyShotEngine`. The agent runs `engine.warmup()` **before** it binds, so a healthy `GET /healthz` means warm; the host POSTs each job to `POST /detonate` and gets the sealed output tar back over the `remote_http` transport (same sealed-envelope contract as a local sandbox).
-- **Run the agent as non-root** (uid 10001 `clippy`) — `ContainerSandbox` refuses uid 0 — and set `CLIPPYSHOT_SANDBOX=container` + `CLIPPYSHOT_WARN_ON_INSECURE=1`.
+- **Run the worker image as an OCI container** on the EC2 host (e.g. `docker run` from cloud-init/user-data), not baked bare into the AMI — `ContainerSandbox` trusts its enclosing container and **refuses on a bare host** (it checks `/.dockerenv` / `/run/.containerenv`), so this is the live-proven shape. Run the agent **non-root** (uid 10001 `clippy`; `ContainerSandbox` also refuses uid 0) and set `CLIPPYSHOT_SANDBOX=container` + `CLIPPYSHOT_WARN_ON_INSECURE=1`. *(If you instead run the agent directly on the AMI with no container, drop `CLIPPYSHOT_SANDBOX=container` and use a host-native `nsjail`/`bwrap` backend — see the Host-native modes above.)*
 
 **Pool config — disposable EC2 (`aws-ec2`):**
 
