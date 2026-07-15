@@ -175,7 +175,7 @@ Six shipping shapes, trading setup effort for isolation depth:
 | Single container (inner bwrap/nsjail) | `docker run` | `bwrap` or `nsjail` inside | libseccomp or KAFEL | `clippyshot-{bwrap,nsjail}` on host kernel | Linux w/ unprivileged userns |
 | Host-native bwrap | — | `bwrap` | libseccomp BPF | `clippyshot-bwrap` + `clippyshot-soffice` | AppArmor distros, kernel ≥ 3.8 |
 | Host-native nsjail | — | `nsjail` | KAFEL DSL | `clippyshot-nsjail` + `clippyshot-soffice` | AppArmor distros + source build |
-| AWS / cloud workers (blastbox.host) | Disposable/hibernated AWS instance (`aws-ec2` / Lambda MicroVM) | `ContainerSandbox` | ContainerSandbox checks | none | ARM64 AWS |
+| AWS / cloud workers (blastbox.host) | Disposable/hibernated AWS instance (`aws-ec2` / Lambda MicroVM) | `ContainerSandbox` | docker-default (verified) | none | ARM64 AWS |
 
 **Pick Compose + gVisor** unless you have a specific reason not to — it has the lowest host-assumption count, the best blast-radius story (gVisor intercepts syscalls at the VM-like boundary), and works on RHEL/SUSE/etc. where AppArmor isn't a thing. Host-native bwrap/nsjail are fallbacks for bare-metal installs where running Docker isn't acceptable; nsjail specifically adds KAFEL-expressed seccomp and `--cgroup-pids` ergonomics at the cost of needing a from-source build.
 
@@ -269,7 +269,7 @@ flowchart LR
 ```
 
 **Worker image (ARM64).** Bake the engine + its native deps and run blastbox's generic agent:
-- Base `ubuntu:24.04`; the archive **LibreOffice**, `tesseract-ocr` + `tesseract-ocr-all` (`TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata`), and `zxing-cpp-tools` (`/usr/bin/ZXingReader` for QR).
+- Base `ubuntu:24.04`; the **LibreOffice** archive build, `tesseract-ocr` + `tesseract-ocr-all` (`TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata`), and `zxing-cpp-tools` (`/usr/bin/ZXingReader` for QR).
 - `pip install` ClippyShot (from this repo) **with `tesserocr`** (needs `build-essential` + `python3-dev`) for the warm in-process OCR helper, on top of `blastbox` (from PyPI).
 - Entrypoint `python -m blastbox.worker.http_agent` with `BLASTBOX_ENGINE=clippyshot.engine:ClippyShotEngine`. The agent runs `engine.warmup()` **before** it binds, so a healthy `GET /healthz` means warm; the host POSTs each job to `POST /detonate` and gets the sealed output tar back over the `remote_http` transport (same sealed-envelope contract as a local sandbox).
 - **Run the agent as non-root** (uid 10001 `clippy`) — `ContainerSandbox` refuses uid 0 — and set `CLIPPYSHOT_SANDBOX=container` + `CLIPPYSHOT_WARN_ON_INSECURE=1`.
@@ -288,7 +288,7 @@ BLASTBOX_POOL_WARMING_TIMEOUT_S=240    # aws-ec2 first boot can exceed the 120s 
 # BLASTBOX_EC2_PUBLIC_IP=1 requires dispatcher mTLS (below) or the runtime fails closed
 ```
 
-**Pool config — warm EC2 hibernate (`aws-ec2-hibernate`):** reuses every `BLASTBOX_EC2_*` / `BLASTBOX_AWS_*` above, plus a **hibernation-capable** type + AMI (t4g/m6g/m7g, AL2023):
+**Pool config — warm EC2 hibernate (`aws-ec2-hibernate`):** reuses every `BLASTBOX_EC2_*` / `BLASTBOX_AWS_*` above, plus a **hibernation-capable** instance type (t4g/m6g/m7g) and a hibernation-enabled build of your Ubuntu worker AMI:
 
 ```sh
 BLASTBOX_POOL_RUNTIME=aws-ec2-hibernate
