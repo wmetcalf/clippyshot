@@ -166,7 +166,7 @@ The deployment split is:
 
 ## Deployment modes
 
-Five shipping shapes, trading setup effort for isolation depth:
+Six shipping shapes, trading setup effort for isolation depth:
 
 | Mode | Outer boundary | Inner sandbox | Seccomp | AppArmor profile required | Works on |
 |---|---|---|---|---|---|
@@ -175,6 +175,7 @@ Five shipping shapes, trading setup effort for isolation depth:
 | Single container (inner bwrap/nsjail) | `docker run` | `bwrap` or `nsjail` inside | libseccomp or KAFEL | `clippyshot-{bwrap,nsjail}` on host kernel | Linux w/ unprivileged userns |
 | Host-native bwrap | — | `bwrap` | libseccomp BPF | `clippyshot-bwrap` + `clippyshot-soffice` | AppArmor distros, kernel ≥ 3.8 |
 | Host-native nsjail | — | `nsjail` | KAFEL DSL | `clippyshot-nsjail` + `clippyshot-soffice` | AppArmor distros + source build |
+| AWS / cloud workers (blastbox.host) | Disposable/hibernated AWS instance (`aws-ec2` / Lambda MicroVM) | `ContainerSandbox` | docker-default (verified) | none | ARM64 AWS |
 
 **Pick Compose + gVisor** unless you have a specific reason not to — it has the lowest host-assumption count, the best blast-radius story (gVisor intercepts syscalls at the VM-like boundary), and works on RHEL/SUSE/etc. where AppArmor isn't a thing. Host-native bwrap/nsjail are fallbacks for bare-metal installs where running Docker isn't acceptable; nsjail specifically adds KAFEL-expressed seccomp and `--cgroup-pids` ergonomics at the cost of needing a from-source build.
 
@@ -243,6 +244,59 @@ flowchart LR
 ```
 
 No Docker dependency. FastAPI forks a fresh `bwrap` (or `nsjail`) subprocess per conversion with its own user/mount/PID/IPC/UTS/cgroup/network namespaces, dropped caps, seccomp-BPF (bwrap) or KAFEL (nsjail), rlimits, and the `clippyshot-soffice` AppArmor profile attached to soffice (the pdfium rasterizer opts out — that profile can't describe its venv). On Ubuntu 24.04+ this needs the shipped `clippyshot-{bwrap,nsjail,soffice}` AppArmor profiles loaded once — run **`clippyshot setup-sandbox`** to detect what's needed and `clippyshot setup-sandbox --apply` to load the scoped userns profiles via sudo (or load them by hand per `deploy/apparmor/README.md`).
+
+### AWS / cloud workers — blastbox.host
+
+ClippyShot is a **blastbox engine** (`clippyshot.engine:ClippyShotEngine`); the host layer — ingress, dispatch, jobstore, and the worker-pool runtime — is **blastbox.host**'s. The AWS worker tiers are therefore blastbox's, and the *same* prebaked ClippyShot worker image runs locally or on AWS purely by changing `BLASTBOX_POOL_RUNTIME`. Four tiers: `aws-ec2` and `aws-lambda-microvm` are **disposable** (one job, then terminate); `aws-ec2-hibernate` and `aws-lambda-snapstart` are **warm** (a parked instance/microVM keeps the same warmed process across jobs — `stop --hibernate`/`start` C/R and per-microVM suspend/resume respectively). All four **fail closed on creds/entitlement** — a tier is refused at selection unless `aws sts get-caller-identity` and a read-only service probe both pass. ClippyShot (and RedTusk) are **live-proven on real ARM64 AWS** (the same warmed PID served the pre-hibernate and post-resume jobs); the only per-engine difference is the baked worker image.
+
+```mermaid
+flowchart LR
+    client((Client))
+    api[blastbox serve]
+    disp[blastbox dispatch]
+    pg[(Postgres)]
+    subgraph worker["ClippyShot worker image (ARM64, on AWS)"]
+        agent[http_agent]
+        agent --- cs[ContainerSandbox]
+        cs --- soff[LibreOffice]
+        cs --- rast[PDFium]
+        cs --- scan[ZXing + tesseract]
+    end
+    client -->|HTTPS| api
+    api --> pg
+    disp --> pg
+    disp -.->|remote_http + mTLS| worker
+```
+
+**Worker image (ARM64).** Bake the engine + its native deps and run blastbox's generic agent:
+- Base `ubuntu:24.04`; the **LibreOffice** archive build, `tesseract-ocr` + `tesseract-ocr-all` (`TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata`), and `zxing-cpp-tools` (`/usr/bin/ZXingReader` for QR).
+- `pip install` ClippyShot (from this repo) **with `tesserocr`** (needs `build-essential` + `python3-dev`) for the warm in-process OCR helper, on top of `blastbox` (from PyPI).
+- Entrypoint `python -m blastbox.worker.http_agent` with `BLASTBOX_ENGINE=clippyshot.engine:ClippyShotEngine`. The agent runs `engine.warmup()` **before** it binds, so a healthy `GET /healthz` means warm; the host POSTs each job to `POST /detonate` and gets the sealed output tar back over the `remote_http` transport (same sealed-envelope contract as a local sandbox).
+- **Run the worker image as an OCI container** on the EC2 host (e.g. `docker run` from cloud-init/user-data), not baked bare into the AMI — `ContainerSandbox` trusts its enclosing container and **refuses on a bare host** (it checks `/.dockerenv` / `/run/.containerenv`), so this is the live-proven shape. Run the agent **non-root** (uid 10001 `clippy`; `ContainerSandbox` also refuses uid 0) and set `CLIPPYSHOT_SANDBOX=container` + `CLIPPYSHOT_WARN_ON_INSECURE=1`. *(If you instead run the agent directly on the AMI with no container, drop `CLIPPYSHOT_SANDBOX=container` and use a host-native `nsjail`/`bwrap` backend — see the Host-native modes above.)*
+
+**Pool config — disposable EC2 (`aws-ec2`):**
+
+```sh
+BLASTBOX_POOL_RUNTIME=aws-ec2
+BLASTBOX_AWS_REGION=us-east-1
+BLASTBOX_EC2_AMI=ami-...               # your baked ClippyShot worker AMI
+BLASTBOX_EC2_INSTANCE_TYPE=m7g.large   # ARM64
+BLASTBOX_EC2_SUBNET_ID=subnet-...
+BLASTBOX_EC2_SECURITY_GROUPS=sg-...
+BLASTBOX_EC2_AGENT_TOKEN=...           # bearer token the agent expects
+BLASTBOX_POOL_WARMING_TIMEOUT_S=240    # aws-ec2 first boot can exceed the 120s default
+# BLASTBOX_EC2_PUBLIC_IP=1 requires dispatcher mTLS (below) or the runtime fails closed
+```
+
+**Pool config — warm EC2 hibernate (`aws-ec2-hibernate`):** reuses every `BLASTBOX_EC2_*` / `BLASTBOX_AWS_*` above, plus a **hibernation-capable** instance type (t4g/m6g/m7g) and a hibernation-enabled build of your Ubuntu worker AMI:
+
+```sh
+BLASTBOX_POOL_RUNTIME=aws-ec2-hibernate
+BLASTBOX_EC2_ROOT_VOLUME_GB=30         # must be >= instance RAM (RAM -> encrypted EBS on hibernate)
+BLASTBOX_EC2_ORPHAN_MAX_AGE_S=1800     # host-side sweep for slots parked when the dispatcher crashed
+```
+
+**Reaching the worker (mTLS).** EC2 workers are **private-IP by default**. A public IP requires dispatcher TLS or the runtime fails closed (token + samples would otherwise cross the internet in cleartext; override only via `BLASTBOX_EC2_ALLOW_PLAINTEXT_PUBLIC=1`). Self-hosted agent→worker **mTLS applies** on the EC2 tiers (the Lambda tiers are AWS-fronted and auth by per-VM JWE instead): mint a PKI with `blastbox pki init`, bake `ca.crt` into the image, set `BLASTBOX_DISPATCH_TLS_CA` / `BLASTBOX_DISPATCH_TLS_CERT` / `BLASTBOX_DISPATCH_TLS_KEY` on the dispatcher, and set `BLASTBOX_WORKER_AGENT_CLIENT_CA` (require client cert) + `BLASTBOX_WORKER_AGENT_TOKEN` on the worker. Host/runtime knobs are all `BLASTBOX_*` — see blastbox.host's `CONFIGURATION.md` / `DEPLOYMENT.md` for the full per-tier reference (`aws-lambda-microvm`/`aws-lambda-snapstart`, and `cascade` for local+AWS overflow).
 
 ### Shared pipeline (all modes)
 
