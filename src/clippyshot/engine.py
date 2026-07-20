@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -52,6 +53,7 @@ from blastbox.worker.engine import DetonationResult
 
 if TYPE_CHECKING:
     from clippyshot.libreoffice.uno import WarmConverter
+    from clippyshot.ocr_warm import WarmOCR
 
 # ─── ClippyShotPage: exported typed node (in-process use) ───────────────────
 # Registered so callers can walk typed in-process trees.  NOT used as a child
@@ -120,12 +122,14 @@ def _focused_id(index: int) -> str:
     return f"p{index}-focused"
 
 
-def _build_converter(uno_server: WarmConverter | None = None):
+def _build_converter(uno_server: WarmConverter | None = None, ocr_helper=None):
     """Build a ClippyShot Converter the same way ``worker._build_converter()`` does.
 
     ``uno_server`` (the warm tier) is threaded into the LibreOffice runner so the
     soffice→PDF step goes through unoconvert when a server is ready; None keeps the
-    cold path."""
+    cold path. ``ocr_helper`` (the warm-OCR tier) is threaded into the Converter so
+    the per-page OCR routes through the persistent tesserocr helper; None keeps the
+    cold CLI path."""
     from clippyshot.converter import Converter
     from clippyshot.detector import Detector
     from clippyshot.libreoffice.runner import LibreOfficeRunner
@@ -146,6 +150,7 @@ def _build_converter(uno_server: WarmConverter | None = None):
         runtime_apparmor_profile=detect_runtime_apparmor_profile(),
         soffice_apparmor_profile=detect_soffice_apparmor_profile(sandbox),
         seccomp=getattr(sandbox, "seccomp_source", "none"),
+        ocr_helper=ocr_helper,
     )
 
 
@@ -245,8 +250,47 @@ class ClippyShotEngine:
     def __init__(self) -> None:
         self._converter = None  # lazy
         self._uno_server: WarmConverter | None = None  # set by warmup() in the warm tier
+        self._ocr_server: WarmOCR | None = None  # set by warmup() (CLIPPYSHOT_WARM_OCR)
+        self._converter_lock = threading.Lock()  # guards lazy _get_converter init
 
     def warmup(self) -> None:
+        """Pre-pay startup for the warm tiers (blastbox warm-pool seam).
+
+        Two independent tiers, each gated by its own env var and fail-closed:
+        warm-UNO (``CLIPPYSHOT_WARM_UNO``) pre-starts a persistent soffice; warm-OCR
+        (``CLIPPYSHOT_WARM_OCR``) pre-starts a persistent tesserocr helper. Either
+        failing leaves its server None and the corresponding cold path is used."""
+        self._warmup_uno()
+        self._warmup_ocr()
+
+    def _warmup_ocr(self) -> None:
+        """Start the persistent tesserocr OCR helper (warm-OCR tier).
+
+        Gated by ``CLIPPYSHOT_WARM_OCR``; the ``CLIPPYSHOT_OCR_ENGINE=tesseract_cli``
+        escape hatch forces the cold CLI and skips the helper. Best-effort: a start
+        failure (e.g. tesserocr missing) leaves ``_ocr_server`` None and the converter
+        OCRs via the cold ``tesseract`` CLI, so a warm-OCR hiccup never fails a job."""
+        import atexit
+        import logging
+
+        if os.environ.get("CLIPPYSHOT_WARM_OCR", "").lower() not in ("1", "true", "yes"):
+            return
+        if os.environ.get("CLIPPYSHOT_OCR_ENGINE", "tesserocr").strip().lower() == "tesseract_cli":
+            return
+        try:
+            from clippyshot.ocr_warm import WarmOCR
+
+            ocr_server = WarmOCR()
+            ocr_server.start()
+        except Exception as exc:  # noqa: BLE001 - non-fatal: cold CLI path
+            logging.getLogger("clippyshot.engine").warning(
+                "warm-OCR warmup failed; falling back to the tesseract CLI: %s", exc
+            )
+            return
+        atexit.register(ocr_server.stop)
+        self._ocr_server = ocr_server
+
+    def _warmup_uno(self) -> None:
         """Pre-pay LibreOffice startup for the warm tier (blastbox warm-pool seam).
 
         With ``CLIPPYSHOT_WARM_UNO=1`` (the FC snapshot / warm-pool tier), ensure a
@@ -327,10 +371,51 @@ class ClippyShotEngine:
             _prime_warm_server(server)
         self._uno_server = server
 
+    def _maybe_start_cold_ocr_helper(self) -> None:
+        """Cold-container tier: when no warm helper is set, start a per-process
+        tesserocr helper so cold jobs also amortize the model load across a job's
+        gated pages. Only on the ``container`` backend (the worker container is the
+        sandbox); bare-metal nsjail/bwrap keeps the per-page sandboxed CLI. Honors
+        the ``tesseract_cli`` escape hatch. Fail-closed: any issue → cold CLI."""
+        import atexit
+        import logging
+
+        if os.environ.get("CLIPPYSHOT_OCR_ENGINE", "tesserocr").strip().lower() == "tesseract_cli":
+            return
+        # Only spawn the cold helper when this job actually uses OCR (off by
+        # default). Otherwise every non-OCR container job would pay a tesserocr
+        # spawn + model load for nothing, and a slow helper startup could delay
+        # the job by ready_timeout_s with no OCR path to use it.
+        if os.environ.get("CLIPPYSHOT_OCR", "").strip().lower() not in ("1", "true", "yes"):
+            return
+        try:
+            from clippyshot.sandbox.detect import select_sandbox
+
+            if select_sandbox().name != "container":
+                return
+            from clippyshot.ocr_warm import WarmOCR
+
+            srv = WarmOCR()
+            srv.start()
+        except Exception as exc:  # noqa: BLE001 - non-fatal: cold CLI path
+            logging.getLogger("clippyshot.engine").info(
+                "cold-OCR helper unavailable; using the tesseract CLI: %s", exc
+            )
+            return
+        atexit.register(srv.stop)
+        self._ocr_server = srv
+
     def _get_converter(self):
-        if self._converter is None:
-            self._converter = _build_converter(uno_server=self._uno_server)
-        return self._converter
+        # Lock the lazy init: concurrent detonate() calls on one engine must not
+        # build duplicate converters or spawn duplicate cold-OCR helpers.
+        with self._converter_lock:
+            if self._converter is None:
+                if self._ocr_server is None:
+                    self._maybe_start_cold_ocr_helper()
+                self._converter = _build_converter(
+                    uno_server=self._uno_server, ocr_helper=self._ocr_server
+                )
+            return self._converter
 
     @staticmethod
     def _convert_options_from_env(limits: BlastboxLimits):

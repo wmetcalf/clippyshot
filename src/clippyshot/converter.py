@@ -279,6 +279,7 @@ def _process_page_scanners(
     _ocr_fn=None,
     qr_runner=None,
     ocr_runner=None,
+    ocr_helper=None,
 ) -> tuple[list[dict], str | None, dict, list[dict]]:
     """Run QR and OCR for one page, catching errors.
 
@@ -393,11 +394,36 @@ def _process_page_scanners(
                 # >= _MIN_OCR_CALL_S guaranteed by the check above, so the call
                 # gets a useful budget yet is still bounded by the deadline.
                 per_call_timeout = int(remaining)
-                try:
-                    kwargs = {"lang": ocr_lang, "psm": ocr_psm, "timeout_s": per_call_timeout}
+
+                def _ocr_cold():
+                    # Recompute the remaining budget so a warm attempt's wait/timeout
+                    # is deducted before the CLI fallback — otherwise warm-then-CLI on
+                    # a hung helper could spend up to 2x the per-page budget.
+                    t = int(ocr_time_left()) if ocr_time_left is not None else per_call_timeout
+                    kwargs = {"lang": ocr_lang, "psm": ocr_psm, "timeout_s": max(1, t)}
                     if ocr_runner is not None:
                         kwargs["argv_runner"] = ocr_runner
-                    result = _ocr_fn(scan_png, **kwargs)
+                    return _ocr_fn(scan_png, **kwargs)
+
+                try:
+                    if ocr_helper is not None and ocr_helper.is_ready():
+                        # Warm tier: OCR via the persistent tesserocr helper. A warm
+                        # hiccup is NOT a scanner failure — fall closed to the cold
+                        # CLI path for this page (never fail the page on a warm error).
+                        try:
+                            result = ocr_helper.ocr(
+                                scan_png, lang=ocr_lang, psm=ocr_psm,
+                                timeout_s=per_call_timeout,
+                            )
+                        except Exception as warm_exc:  # noqa: BLE001
+                            warnings.append({
+                                "code": "ocr_warm_fallback",
+                                "page": page_record.get("index"),
+                                "message": str(warm_exc)[:200],
+                            })
+                            result = _ocr_cold()
+                    else:
+                        result = _ocr_cold()
                     ocr_obj = {
                         "text": result.text,
                         "char_count": result.char_count,
@@ -471,12 +497,16 @@ class Converter:
         runtime_apparmor_profile: str | None = None,
         soffice_apparmor_profile: str | None = None,
         seccomp: str = "none",
+        ocr_helper: object | None = None,
     ) -> None:
         self._detector = detector
         self._runner = runner
         self._rasterizer = rasterizer
         self._sandbox = sandbox
         self._sandbox_backend = sandbox_backend
+        # Optional warm-OCR helper (clippyshot.ocr_warm.WarmOCR). When ready, the
+        # per-page scanner routes OCR through it, falling closed to the cold CLI.
+        self._ocr_helper = ocr_helper
         # Back-compat: if caller only passed the legacy `apparmor_profile`
         # field, it was the runtime's measured profile. Map it into the new
         # split fields so existing tests and callers continue to work.
@@ -752,6 +782,7 @@ class Converter:
                         ocr_all=options.ocr_all,
                         qr_runner=qr_runner,
                         ocr_runner=ocr_runner,
+                        ocr_helper=self._ocr_helper,
                     )
                     qr_or_ocr_ms = int((time.monotonic() - t_qr_ocr) * 1000)
                     stage_t["ocr"] = ocr_obj.get("duration_ms", 0)

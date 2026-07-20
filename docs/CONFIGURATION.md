@@ -30,7 +30,7 @@ blastbox **host/runtime** knobs (`BLASTBOX_*` — dispatch, warm pool, FC/gVisor
 |---|---|---|
 | `CLIPPYSHOT_SANDBOX` | auto | force the soffice sandbox: `nsjail` → `bwrap` → `container`. Auto picks the best available; `container` inside an OCI host. |
 | `CLIPPYSHOT_WARN_ON_INSECURE` | off | let the backend self-check run leniently (set by the dispatcher under runsc / opted-in runc). |
-| `CLIPPYSHOT_INNER_NONO` | off | **optional** nested Landlock layer (nono) inside the selected backend. Fails fast where Landlock is absent (the gVisor Sentry — ENOSYS); works on runc + the FC guest. See [DEPLOYMENT.md](DEPLOYMENT.md). |
+| `CLIPPYSHOT_INNER_NONO` | off | **optional** nested Landlock layer (nono) inside the selected backend. Fails fast where Landlock is absent (the gVisor Sentry — ENOSYS); works on runc + the FC guest. See [the README's Configuration section](../README.md#configuration). |
 | `CLIPPYSHOT_INNER_NONO_PROFILE` | `""` | a nono profile JSON (e.g. profiler-generated) for the inner layer; else auto-derived grants. |
 | `CLIPPYSHOT_NONO_BIN` | `nono` on PATH | nono binary path/name. |
 
@@ -42,7 +42,8 @@ blastbox **host/runtime** knobs (`BLASTBOX_*` — dispatch, warm pool, FC/gVisor
 | `CLIPPYSHOT_OCR_ALL` | off | OCR every page, not just image-heavy ones. |
 | `CLIPPYSHOT_OCR_LANG` | `""` | tesseract `-l` language(s). |
 | `CLIPPYSHOT_OCR_PSM` | `3` | tesseract page-segmentation mode. |
-| `CLIPPYSHOT_QR` | off | ZXing QR/barcode scan. |
+| `CLIPPYSHOT_QR` | **on** | ZXing QR/barcode scan (default-on; cheap enough to justify on untrusted content). |
+| `CLIPPYSHOT_OCR_ENGINE` | `tesserocr` | OCR backend: `tesserocr` (warm tesseract C-API, default) or `tesseract_cli` (force the cold per-page CLI, disabling the warm/cold-container helper). |
 
 Scanner crashes are **non-fatal** — they record `ocr.skipped`/`qr_skipped` + a warning and the conversion still succeeds. The forwardable subset is allowlisted per-engine on the host (`BLASTBOX_ENGINE_CLIPPYSHOT_PARAM_KEYS`).
 
@@ -51,6 +52,7 @@ Scanner crashes are **non-fatal** — they record `ocr.skipped`/`qr_skipped` + a
 | Var | Default | Notes |
 |---|---|---|
 | `CLIPPYSHOT_WARM_UNO` | off | convert through a persistent `unoserver`/`unoconvert` instead of cold `soffice --convert-to`. Parity-preserving + fail-closed (any UNO hiccup → cold fallback). |
+| `CLIPPYSHOT_WARM_OCR` | off | OCR through a persistent `tesserocr` helper subprocess (model loaded once, one page per request, lock-serialised, per-page timeout → SIGKILL the helper). Fail-closed to the cold `tesseract` CLI. Cold-container jobs also get a per-job helper automatically; this var pins it persistent across jobs in the warm tiers. Operator-only (reserved key). |
 | `CLIPPYSHOT_WARM_UNO_TRANSPORT` | `socket` | `socket` (UDS) vs `pipe`. |
 | `CLIPPYSHOT_WARM_PRIME` | `1` | prime the PDF-export filters at warmup (avoids the first-convert filter-warmup tax). |
 | `CLIPPYSHOT_WARM_PROFILE_DIR` | `/tmp/.clippyshot-warm-profile` | LO user-profile dir for the warm server. |
