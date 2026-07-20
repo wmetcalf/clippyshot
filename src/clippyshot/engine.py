@@ -324,7 +324,12 @@ class ClippyShotEngine:
         )
         try:
             HardenedProfile(profile_dir).write()
+            # soffice's -env:UserInstallation wants a file:// URL; unoserver's
+            # --user-installation wants a filesystem PATH (it re-URIs internally, and
+            # Path("file://…").as_uri() raises "relative path can't be expressed as a
+            # file URI"). Give each transport the form it expects.
             user_installation: str | None = HardenedProfile(profile_dir).url()
+            user_installation_path: str | None = str(profile_dir.resolve())
         except OSError as exc:
             # Fail CLOSED for a security control: if the hardened profile can't be written, do
             # NOT start an unhardened warm server — leave _uno_server None so detonate() uses the
@@ -343,7 +348,7 @@ class ClippyShotEngine:
         else:
             from clippyshot.libreoffice.uno import UnoServer
 
-            server = UnoServer(user_installation=user_installation)
+            server = UnoServer(user_installation=user_installation_path)
         try:
             server.start()
         except Exception as exc:
