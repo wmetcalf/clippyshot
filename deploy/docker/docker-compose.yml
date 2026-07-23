@@ -142,7 +142,12 @@ services:
     security_opt:
       - no-new-privileges:true
     group_add:
-      - "${DOCKER_GID:-984}"
+      # No literal default: the docker gid differs per host (110 and 988 observed in
+      # this fleet), and a wrong-but-plausible value fails SILENTLY — the dispatcher
+      # starts, cannot reach the socket, logs "runsc unavailable; falling back to runc
+      # (insecure)", and REQUIRE_SECURE_RUNTIME then fails every job, which reads like
+      # an engine bug. Fail loudly instead; scripts/node_env_sync.sh sets this per host.
+      - "${DOCKER_GID:?unset — run scripts/node_env_sync.sh on this node}"
     tmpfs:
       # Pure cold dispatcher — no warm scratch here (FC warm runs in the dispatcher-fc
       # sidecar with its own large /tmp; gVisor in dispatcher-gvisor). Keep this minimal.
