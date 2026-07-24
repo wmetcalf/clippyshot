@@ -149,6 +149,14 @@ def parse_memory_gb(spec: str) -> float:
 _MIN_PAGE_PX = 1_000_000            # 1 MP floor — never clamp below a thumbnail.
 _MAX_PAGE_PX_CEILING = 200_000_000  # 200 MP hard ceiling regardless of RAM / env.
 
+# Largest page the MAIN-process derivative/scan pipeline (trimmer.py trim/focus,
+# scanners) will materialize as a numpy RGB array. A 100 MP page is ~300 MB RGB
+# plus transient int16/bool masks (~1.5 GB peak) — the knee for a 4 GB worker.
+# The rasterizer's per-page render budget is capped at this so a page we RENDER is
+# always one the post-processors can consume — otherwise the giant SinglePageSheets
+# spreadsheets that trim/focus exist for would render but never get a derivative.
+MAX_POSTPROCESS_PX = 100_000_000
+
 
 def max_page_px(worker_memory_spec: str | None = None) -> int:
     """Largest single-page pixel area (w*h px) the rasterizer renders before it
@@ -156,10 +164,13 @@ def max_page_px(worker_memory_spec: str | None = None) -> int:
 
     One page costs ~4 B/px RGBA plus a comparable PNG-encode buffer; budget a
     single page at ~1/8 of worker RAM for the RGBA bitmap (leaving the rest for
-    the LibreOffice/unoserver resident set, Python, and the encode). Bounded by a
-    1 MP floor and a 200 MP ceiling so a hostile/fat-fingered env can neither
-    disable the guard nor wrap it to nonsense. ``CLIPPYSHOT_MAX_PAGE_PX`` overrides
-    the derivation (still floor/ceiling-clamped)."""
+    the LibreOffice/unoserver resident set, Python, and the encode). The DERIVED
+    budget is additionally capped at :data:`MAX_POSTPROCESS_PX` so every rendered
+    page stays trim/focus/scan-eligible. Bounded by a 1 MP floor and a 200 MP
+    ceiling so a hostile/fat-fingered env can neither disable the guard nor wrap it
+    to nonsense. ``CLIPPYSHOT_MAX_PAGE_PX`` overrides the derivation (honored up to
+    the 200 MP ceiling — an operator raising it above the post-process budget
+    knowingly forfeits derivatives on pages larger than that)."""
     override = os.environ.get("CLIPPYSHOT_MAX_PAGE_PX")
     if override:
         try:
@@ -175,7 +186,9 @@ def max_page_px(worker_memory_spec: str | None = None) -> int:
         mem_gb = 4.0
     rgba_budget_bytes = mem_gb * (1024.0 ** 3) / 8.0  # 1/8 of RAM for one page's RGBA
     px = int(rgba_budget_bytes / 4.0)                 # 4 bytes/px
-    return min(_MAX_PAGE_PX_CEILING, max(_MIN_PAGE_PX, px))
+    # Cap at the post-process budget so a rendered page can always be trimmed/
+    # focused/scanned (the derived value only exceeds it on >=4 GB workers).
+    return min(_MAX_PAGE_PX_CEILING, MAX_POSTPROCESS_PX, max(_MIN_PAGE_PX, px))
 
 
 def max_concurrent_page_ops(

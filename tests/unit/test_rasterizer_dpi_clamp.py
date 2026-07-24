@@ -14,8 +14,9 @@ from pathlib import Path
 
 import pytest
 
-from clippyshot.limits import max_page_px
+from clippyshot.limits import MAX_POSTPROCESS_PX, max_page_px
 from clippyshot.rasterizer.base import _effective_dpi
+from clippyshot.trimmer import _MAX_VECTOR_PIXELS
 from clippyshot.sandbox.base import SandboxRequest
 from clippyshot.types import SandboxResult
 
@@ -31,11 +32,24 @@ _TINY_PNG = bytes.fromhex(
 
 def test_max_page_px_derived_from_worker_memory(monkeypatch):
     monkeypatch.delenv("CLIPPYSHOT_MAX_PAGE_PX", raising=False)
-    # 4 GB worker → one page budgeted at ~1/8 of RAM (RGBA 4 B/px) = ~128 MP.
-    px4 = max_page_px("4g")
-    assert 100_000_000 < px4 < 160_000_000
-    # More RAM → larger budget (monotonic).
-    assert max_page_px("8g") > px4
+    # Below the post-process cap the budget scales with RAM (monotonic): a 2 GB
+    # worker (~1/8 = 64 MP) budgets more than a 1 GB one (~32 MP).
+    assert max_page_px("2g") > max_page_px("1g")
+    # At/above 4 GB the ~1/8-of-RAM figure exceeds the post-process cap, so it
+    # pins there — a rendered page must stay trim/focus/scan-eligible.
+    assert max_page_px("4g") == MAX_POSTPROCESS_PX
+    assert max_page_px("8g") == MAX_POSTPROCESS_PX
+
+
+def test_render_budget_never_exceeds_postprocess_budget(monkeypatch):
+    """A page we RENDER must always be one the derivative pipeline can consume —
+    otherwise giant SinglePageSheets spreadsheets (the reason trim/focus exists)
+    render but silently get no focused crop. The derived budget must never exceed
+    the trimmer's own materialization guard."""
+    monkeypatch.delenv("CLIPPYSHOT_MAX_PAGE_PX", raising=False)
+    assert _MAX_VECTOR_PIXELS == MAX_POSTPROCESS_PX
+    for mem in ("2g", "4g", "8g", "16g"):
+        assert max_page_px(mem) <= _MAX_VECTOR_PIXELS
 
 
 def test_max_page_px_env_override(monkeypatch):
