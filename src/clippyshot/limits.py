@@ -166,7 +166,13 @@ def max_page_px(worker_memory_spec: str | None = None) -> int:
     single page at ~1/8 of worker RAM for the RGBA bitmap (leaving the rest for
     the LibreOffice/unoserver resident set, Python, and the encode). The DERIVED
     budget is additionally capped at :data:`MAX_POSTPROCESS_PX` so every rendered
-    page stays trim/focus/scan-eligible. Bounded by a 1 MP floor and a 200 MP
+    page stays trim/focus/scan-eligible.
+
+    NOTE: the RAM figure comes from ``CLIPPYSHOT_WORKER_MEMORY`` (same source as
+    :func:`max_concurrent_page_ops`), which MUST track the worker's real cgroup
+    cap. A deploy that sets only the host-side ``BLASTBOX_WORKER_MEMORY`` and
+    leaves ``CLIPPYSHOT_WORKER_MEMORY`` at the 4 GB default on a smaller worker
+    would over-budget the render — keep the two in sync (deploy/docker/.env does). Bounded by a 1 MP floor and a 200 MP
     ceiling so a hostile/fat-fingered env can neither disable the guard nor wrap it
     to nonsense. ``CLIPPYSHOT_MAX_PAGE_PX`` overrides the derivation (honored up to
     the 200 MP ceiling — an operator raising it above the post-process budget

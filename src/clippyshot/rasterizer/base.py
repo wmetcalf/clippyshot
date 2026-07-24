@@ -32,13 +32,21 @@ _SANDBOX_OUT = Path("/sandbox/out")
 
 
 def _max_page_peak_mb(
-    page_sizes_mm: list[tuple[float, float]] | None, dpi: int
+    page_sizes_mm: list[tuple[float, float]] | None, dpi: int, cap_px: int = 0
 ) -> float:
     """Worst-case in-RAM RGBA buffer (MB) of the LARGEST page at ``dpi``.
 
     Returns 0.0 when page sizes are unknown (callers then fall back to the
     default per-page heuristic). 4 bytes/px (RGBA) is the conservative peak; the
     PNG encoder also holds the decoded buffer during the giant-page render.
+
+    ``cap_px`` (>0) caps each page's pixel count at the value the rasterizer will
+    actually RENDER it at (the per-page DPI clamp downscales oversized pages to
+    ``cap_px``). Sizing the shard-concurrency budget on the CLAMPED peak — not the
+    unclamped mediabox — stops a single oversized page from collapsing
+    ``shard_count`` to 1 (which would route the whole doc through the single-shot
+    path and clamp EVERY page, not just the oversized one). Safe because the
+    clamp bounds the actual render, so N concurrent clamped renders stay bounded.
     """
     if not page_sizes_mm:
         return 0.0
@@ -46,7 +54,10 @@ def _max_page_peak_mb(
     for w_mm, h_mm in page_sizes_mm:
         w_px = (w_mm / _MM_PER_INCH) * dpi
         h_px = (h_mm / _MM_PER_INCH) * dpi
-        peak = max(peak, w_px * h_px * 4.0 / (1024.0 * 1024.0))
+        px = w_px * h_px
+        if cap_px > 0:
+            px = min(px, float(cap_px))
+        peak = max(peak, px * 4.0 / (1024.0 * 1024.0))
     return peak
 
 
@@ -64,10 +75,13 @@ def _effective_dpi(
 
     Returns ``dpi`` unchanged when page sizes are unknown, the budget is disabled
     (<= 0), or every page already fits. Only ever LOWERS the DPI, and floors at
-    ``_MIN_DPI`` — because pdfium clamps the MediaBox to 14400pt, even the largest
-    possible page at 36 DPI (~7200px/side ≈ 52 MP) sits under any real budget, so
-    the floor is always safe. This turns an oversized-page OOM into a valid,
-    lower-resolution render."""
+    ``_MIN_DPI`` (the minimum ``Limits`` permits). Caveat: the floor can leave a
+    maximally-sized page ABOVE the budget — pdfium caps the MediaBox at 14400pt,
+    so a max page at 36 DPI is ~52 MP, which fits the DERIVED budget on any worker
+    >= ~1.7 GB (incl. the 3-4 GB fleet: 96-100 MP budget) but NOT a smaller worker
+    or a ``CLIPPYSHOT_MAX_PAGE_PX`` override below ~52 MP. In that regime 36 DPI is
+    the best we can do (Limits forbids less); the caller logs the residual. This
+    turns an oversized-page OOM into a valid, lower-resolution render."""
     if not page_sizes_mm or max_page_px <= 0:
         return dpi
     peak_px = 0.0
@@ -153,8 +167,11 @@ class ShardingRasterizer(ABC):
 
         The render DPI is clamped down if the largest page in THIS range would
         exceed ``budget_px`` pixels — so an oversized sheet renders (downscaled)
-        instead of OOM-wedging a memory-capped guest. Per-range (not global) so a
-        doc with one giant page keeps full resolution on its normal-page shards."""
+        instead of OOM-wedging a memory-capped guest. Per-range: a shard whose
+        pages all fit the budget keeps full resolution; only shards containing an
+        oversized page downscale. (Two cases still clamp the whole doc: a
+        <4-page doc, which never shards, and a shard the even-split happens to
+        put an oversized page into alongside normal ones.)"""
         range_sizes = (
             page_sizes_mm[first - 1:last] if page_sizes_mm else None
         )
@@ -165,6 +182,21 @@ class ShardingRasterizer(ABC):
                 "(largest page exceeds %d-px budget)",
                 self.name, dpi, eff_dpi, first, last, budget_px,
             )
+            # Residual: the _MIN_DPI floor can leave a maximally-sized page still
+            # over budget on a small/overridden worker (Limits forbids <36 DPI).
+            # Surface it distinctly — the render proceeds best-effort but the OOM
+            # guard is not fully honored in this (non-fleet) regime.
+            if range_sizes and budget_px > 0:
+                peak_px = max(
+                    ((w / _MM_PER_INCH) * eff_dpi) * ((h / _MM_PER_INCH) * eff_dpi)
+                    for w, h in range_sizes
+                )
+                if peak_px > budget_px:
+                    _log.warning(
+                        "%s: pages %d-%d still ~%.0f MP at the %d-DPI floor, over the "
+                        "%.0f-MP budget — raise worker memory / CLIPPYSHOT_MAX_PAGE_PX",
+                        self.name, first, last, peak_px / 1e6, eff_dpi, budget_px / 1e6,
+                    )
         _assert_positional(sandbox_pdf)
         argv = self._build_argv(
             sandbox_pdf=sandbox_pdf, out_dir=_SANDBOX_OUT, dpi=eff_dpi, first=first, last=last
@@ -229,13 +261,16 @@ class ShardingRasterizer(ABC):
         # 200 MB/page heuristic, so derive the peak from the ACTUAL largest page and let it
         # collapse the shard count to 1 — N concurrent multi-GB renders would otherwise exhaust
         # a host without a per-worker memory cgroup (the gVisor warm tier).
-        peak_mb = _max_page_peak_mb(page_sizes_mm, dpi)
+        # Per-page pixel budget: caps the SIZE of any one render (DPI-clamped in
+        # _run_range) so a single oversized page can't OOM the guest.
+        budget_px = max_page_px()
+        # Size the concurrency budget on the CLAMPED peak (cap_px=budget_px): an
+        # oversized page renders at <= budget_px, so it must NOT collapse
+        # shard_count to 1 — that would force the single-shot path and clamp the
+        # WHOLE doc's DPI instead of only the oversized page's shard.
+        peak_mb = _max_page_peak_mb(page_sizes_mm, dpi, cap_px=budget_px)
         mem_budget = max_concurrent_page_ops(per_page_peak_mb=peak_mb)
         shard_count = min(cpu_budget, mem_budget, max_pages)
-        # Per-page pixel budget: caps the SIZE of any one render (DPI-clamped in
-        # _run_range) so a single oversized page can't OOM the guest — orthogonal
-        # to shard_count, which caps how many pages render CONCURRENTLY.
-        budget_px = max_page_px()
         if max_pages < _MIN_PAGES_FOR_SHARDING or shard_count <= 1:
             # Single-shot fast path: one invocation for the whole range.
             self._run_range(

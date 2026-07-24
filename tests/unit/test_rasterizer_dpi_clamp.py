@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from clippyshot.limits import MAX_POSTPROCESS_PX, max_page_px
-from clippyshot.rasterizer.base import _effective_dpi
+from clippyshot.limits import MAX_POSTPROCESS_PX, max_concurrent_page_ops, max_page_px
+from clippyshot.rasterizer.base import _effective_dpi, _max_page_peak_mb
 from clippyshot.trimmer import _MAX_VECTOR_PIXELS
 from clippyshot.sandbox.base import SandboxRequest
 from clippyshot.types import SandboxResult
@@ -95,6 +95,29 @@ def test_effective_dpi_noop_when_sizes_unknown_or_budget_disabled():
     assert _effective_dpi(150, None, max_page_px=128_000_000) == 150
     assert _effective_dpi(150, [], max_page_px=128_000_000) == 150
     assert _effective_dpi(150, [(5080.0, 5080.0)], max_page_px=0) == 150
+
+
+# --- F4: a clamped giant page must not collapse the shard-concurrency budget ---
+
+def test_max_page_peak_mb_cap_bounds_the_giant_page():
+    """Without a cap, a 14400pt page peaks at multiple GB; with cap_px it reflects
+    the CLAMPED render size (<= budget), which is what actually gets allocated."""
+    uncapped = _max_page_peak_mb([(5080.0, 5080.0)], dpi=150)
+    capped = _max_page_peak_mb([(5080.0, 5080.0)], dpi=150, cap_px=100_000_000)
+    assert uncapped > 2000.0                      # ~3.4 GB unclamped
+    assert capped < uncapped
+    assert capped <= 100_000_000 * 4 / (1024 * 1024) + 1  # ~381 MB (100 MP RGBA)
+
+
+def test_clamped_giant_page_does_not_collapse_shard_budget():
+    """The bug: sizing shard_count on the UNCLAMPED giant peak collapses it to 1,
+    forcing the single-shot path to clamp the WHOLE doc. Budgeting on the clamped
+    peak keeps concurrency > 1 so normal-page shards render at full resolution."""
+    sizes = [(215.9, 279.4)] * 4 + [(5080.0, 5080.0)]  # 4 normal + 1 giant
+    uncapped_peak = _max_page_peak_mb(sizes, dpi=150)
+    capped_peak = _max_page_peak_mb(sizes, dpi=150, cap_px=100_000_000)
+    assert max_concurrent_page_ops("4g", per_page_peak_mb=uncapped_peak) == 1   # old: collapse
+    assert max_concurrent_page_ops("4g", per_page_peak_mb=capped_peak) > 1       # fixed: shards survive
 
 
 # --- integration: the clamp reaches the render argv -----------------------
