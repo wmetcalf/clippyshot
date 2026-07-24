@@ -562,18 +562,24 @@ async function loadResult(jobId, opts) {
       const jr = await fetch(API+'/v1/jobs/'+jobId);
       if (jr.ok) {
         const jdata = await jr.json();
-        if (jdata.worker_runtime) {
+        if (jdata && jdata.worker_runtime) {
           const rt = jdata.worker_runtime;
           const isWarm = rt === 'warm';
-          const isGvisor = isWarm || rt === 'runsc';  // warm slots restore under gVisor C/R
+          const tier = jdata.worker_tier || '';   // 'firecracker' | 'gvisor' for warm jobs
           const type = isWarm ? 'warm' : 'cold';
-          const detail = isWarm ? 'warm pool · gVisor C/R'
-            : (rt === 'runsc' ? 'gVisor (runsc)' : esc(rt));
-          const color = isWarm ? '#58a6ff' : (isGvisor ? '#3fb950' : '#d29922');
+          // Backend-accurate detail: a warm job is FC (hardware microVM) OR gVisor C/R — no
+          // longer assume gVisor. Cold is gVisor (runsc) or plain runc (namespace only).
+          let detail, note;
+          if (isWarm && tier === 'firecracker') { detail = 'warm pool · Firecracker microVM'; note = 'hardware-isolated'; }
+          else if (isWarm && tier === 'gvisor') { detail = 'warm pool · gVisor C/R'; note = 'syscall-level sandbox'; }
+          else if (isWarm) { detail = 'warm pool'; note = 'hardened'; }
+          else if (rt === 'runsc') { detail = 'gVisor (runsc)'; note = 'syscall-level sandbox'; }
+          else { detail = esc(rt); note = 'namespace only'; }
+          const hardened = isWarm || rt === 'runsc';
+          const color = isWarm ? '#58a6ff' : (hardened ? '#3fb950' : '#d29922');
           secRows.unshift(['Worker',
             '<span style="color:'+color+';font-weight:600">'+type+'</span>'
-            + ' <span style="color:#8b949e;font-size:.72rem">'+detail
-            + (isGvisor ? ' · syscall-level sandbox' : ' · namespace only')+'</span>']);
+            + ' <span style="color:#8b949e;font-size:.72rem">'+detail+' · '+note+'</span>']);
         }
         if (jdata.security_warnings && jdata.security_warnings.length) {
           secRows.push(['warnings',
@@ -834,14 +840,22 @@ async function refreshJobs() {
         if (ptot > 0 && pdone === 0) {
           detail += ' <span class="warn">all blank</span>';
         }
-        // Show worker runtime badge (gVisor vs runc)
+        // Worker badge — distinguishes the two warm backends (FC vs gVisor), not just warm/cold.
         if (j.worker_runtime) {
-          const isGvisor = j.worker_runtime === 'runsc';
-          const color = isGvisor ? '#3fb950' : '#d29922';
-          const label = isGvisor ? 'gVisor' : esc(j.worker_runtime);
-          const title = isGvisor
-            ? 'Worker ran under gVisor (runsc) — syscall-level sandboxing'
-            : 'Worker ran under standard runc — namespace isolation only';
+          const rt = j.worker_runtime, tier = j.worker_tier || '';
+          let label, color, title;
+          if (rt === 'warm') {
+            color = '#58a6ff';
+            label = tier === 'firecracker' ? 'FC' : (tier === 'gvisor' ? 'gVisor·warm' : 'warm');
+            title = tier === 'firecracker' ? 'Warm Firecracker microVM (hardware-isolated)'
+              : tier === 'gvisor' ? 'Warm gVisor C/R (syscall-level sandbox)' : 'Warm pool';
+          } else if (rt === 'runsc') {
+            color = '#3fb950'; label = 'gVisor';
+            title = 'Worker ran under gVisor (runsc) — syscall-level sandboxing';
+          } else {
+            color = '#d29922'; label = esc(rt);
+            title = 'Worker ran under standard runc — namespace isolation only';
+          }
           detail += ' <span style="color:'+color+';font-size:.72rem;margin-left:4px" title="'+title+'">['+label+']</span>';
         }
       }
