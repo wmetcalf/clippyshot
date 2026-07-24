@@ -140,6 +140,63 @@ def parse_memory_gb(spec: str) -> float:
         return 0.0
 
 
+# Per-page pixel budget. Sharding bounds page CONCURRENCY (how many render at
+# once) but NOT the size of a single page. A 14400pt SinglePageSheets sheet at
+# 150 DPI is ~30000px/side → ~900 MP → one ~3.6 GB RGBA bitmap (+ a comparable
+# PNG-encode buffer) that OOM-wedges a memory-capped warm guest — which then makes
+# zero progress and burns the whole worker timeout. The rasterizer clamps render
+# DPI so the largest page fits this budget: a valid downscaled image, not an OOM.
+_MIN_PAGE_PX = 1_000_000            # 1 MP floor — never clamp below a thumbnail.
+_MAX_PAGE_PX_CEILING = 200_000_000  # 200 MP hard ceiling regardless of RAM / env.
+
+# Largest page the MAIN-process derivative/scan pipeline (trimmer.py trim/focus,
+# scanners) will materialize as a numpy RGB array. A 100 MP page is ~300 MB RGB
+# plus transient int16/bool masks (~1.5 GB peak) — the knee for a 4 GB worker.
+# The rasterizer's per-page render budget is capped at this so a page we RENDER is
+# always one the post-processors can consume — otherwise the giant SinglePageSheets
+# spreadsheets that trim/focus exist for would render but never get a derivative.
+MAX_POSTPROCESS_PX = 100_000_000
+
+
+def max_page_px(worker_memory_spec: str | None = None) -> int:
+    """Largest single-page pixel area (w*h px) the rasterizer renders before it
+    downscales, derived from the worker's memory budget.
+
+    One page costs ~4 B/px RGBA plus a comparable PNG-encode buffer; budget a
+    single page at ~1/8 of worker RAM for the RGBA bitmap (leaving the rest for
+    the LibreOffice/unoserver resident set, Python, and the encode). The DERIVED
+    budget is additionally capped at :data:`MAX_POSTPROCESS_PX` so every rendered
+    page stays trim/focus/scan-eligible.
+
+    NOTE: the RAM figure comes from ``CLIPPYSHOT_WORKER_MEMORY`` (same source as
+    :func:`max_concurrent_page_ops`), which MUST track the worker's real cgroup
+    cap. A deploy that sets only the host-side ``BLASTBOX_WORKER_MEMORY`` and
+    leaves ``CLIPPYSHOT_WORKER_MEMORY`` at the 4 GB default on a smaller worker
+    would over-budget the render — keep the two in sync (deploy/docker/.env does). Bounded by a 1 MP floor and a 200 MP
+    ceiling so a hostile/fat-fingered env can neither disable the guard nor wrap it
+    to nonsense. ``CLIPPYSHOT_MAX_PAGE_PX`` overrides the derivation (honored up to
+    the 200 MP ceiling — an operator raising it above the post-process budget
+    knowingly forfeits derivatives on pages larger than that)."""
+    override = os.environ.get("CLIPPYSHOT_MAX_PAGE_PX")
+    if override:
+        try:
+            val = int(override)
+        except ValueError:
+            val = 0
+        if val > 0:
+            return min(_MAX_PAGE_PX_CEILING, max(_MIN_PAGE_PX, val))
+    mem_gb = parse_memory_gb(
+        worker_memory_spec or os.environ.get("CLIPPYSHOT_WORKER_MEMORY") or "4g"
+    )
+    if mem_gb <= 0:
+        mem_gb = 4.0
+    rgba_budget_bytes = mem_gb * (1024.0 ** 3) / 8.0  # 1/8 of RAM for one page's RGBA
+    px = int(rgba_budget_bytes / 4.0)                 # 4 bytes/px
+    # Cap at the post-process budget so a rendered page can always be trimmed/
+    # focused/scanned (the derived value only exceeds it on >=4 GB workers).
+    return min(_MAX_PAGE_PX_CEILING, MAX_POSTPROCESS_PX, max(_MIN_PAGE_PX, px))
+
+
 def max_concurrent_page_ops(
     worker_memory_spec: str | None = None, per_page_peak_mb: float | None = None
 ) -> int:

@@ -847,6 +847,31 @@ class Converter:
                         _h.update(_chunk)
                 input_sha256 = _h.hexdigest()
                 warnings = []
+                # Resolution-clamp visibility: the rasterizer downscales oversized
+                # pages to fit the per-page memory budget. Recover the ACTUAL
+                # rendered DPI per page (real px vs mediabox mm) and warn when it
+                # falls below the requested DPI — a downscaled page has coarser
+                # OCR/QR/detail that may MISS, and must not be reported as a
+                # full-resolution success (the clamp otherwise leaves no trace in
+                # metadata; render.dpi still shows the requested value).
+                _clamped_pages = []
+                for _rp in pages:
+                    if _rp.width_mm > 0:
+                        _eff_dpi = _rp.width_px * 25.4 / _rp.width_mm
+                        if _eff_dpi < options.limits.dpi * 0.95:
+                            _clamped_pages.append(
+                                {"index": _rp.index, "effective_dpi": round(_eff_dpi)}
+                            )
+                if _clamped_pages:
+                    warnings.append({
+                        "code": "resolution_clamped",
+                        "message": (
+                            f"{len(_clamped_pages)} page(s) rendered below the requested "
+                            f"{options.limits.dpi} DPI to fit the memory budget; OCR/QR and "
+                            "fine detail on these pages are degraded"
+                        ),
+                        "pages": _clamped_pages,
+                    })
                 if not detected.agreed_with_extension:
                     warnings.append({
                         "code": "extension_mismatch",

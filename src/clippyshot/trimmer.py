@@ -14,7 +14,12 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-_MAX_VECTOR_PIXELS = 100_000_000
+from clippyshot.limits import MAX_POSTPROCESS_PX
+
+# The main-process derivative pipeline won't materialize a numpy array larger than
+# this (shared with the rasterizer's render cap so a rendered page is always
+# post-processable — see clippyshot.limits.MAX_POSTPROCESS_PX).
+_MAX_VECTOR_PIXELS = MAX_POSTPROCESS_PX
 
 
 def _open_rgb_image(png_path: Path) -> Image.Image | None:
