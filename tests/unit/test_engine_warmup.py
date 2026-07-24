@@ -91,7 +91,10 @@ def test_warmup_writes_and_passes_hardened_profile(monkeypatch, tmp_path):
     assert xcu.exists(), "warmup() must write the hardened profile before starting the server"
     body = xcu.read_text()
     assert "DisableMacrosExecution" in body and "MacroSecurityLevel" in body
-    assert captured["user_installation"] == "file://%s" % prof.resolve()
+    # UnoServer (the FC/TCP transport) takes a PLAIN path — unoserver runs its own
+    # Path(...).as_uri(); a file:// URL makes it raise "relative path can't be
+    # expressed as a file URI". Only the soffice-pipe transport gets a file:// URL.
+    assert captured["user_installation"] == str(prof.resolve())
 
 
 def test_warmup_fails_closed_when_profile_unwritable(monkeypatch):
