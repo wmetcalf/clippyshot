@@ -58,7 +58,8 @@ def test_compose_stack_dispatcher_runs_blastbox_dispatch_with_socket_and_worker_
     assert "${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}:${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}" in dispatcher
     assert "/var/run/docker.sock:/var/run/docker.sock" in dispatcher
     assert 'group_add:' in dispatcher
-    assert '"${DOCKER_GID:-984}"' in dispatcher
+    # GID is now fail-loud (no silent :-984 default): unset -> compose errors, run node_env_sync.sh
+    assert '"${DOCKER_GID:?' in dispatcher
     assert 'test: ["CMD", "docker", "info"]' in dispatcher
     assert "ports:" not in dispatcher
     assert "image: ${CLIPPYSHOT_IMAGE:-clippyshot:dev}" in compose
