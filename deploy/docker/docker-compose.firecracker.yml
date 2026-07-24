@@ -26,7 +26,17 @@ services:
     devices:
       - /dev/kvm
     group_add:
-      - "${KVM_GID:-994}"
+      # Compose overlays REPLACE list values rather than merging them, so the docker
+      # gid inherited from docker-compose.yml is DROPPED here unless it is repeated.
+      # Without it this dispatcher has /dev/kvm but no docker socket access: it logs
+      # "runsc unavailable; falling back to runc (insecure)", REQUIRE_SECURE_RUNTIME
+      # then refuses every job, and the Firecracker tier silently never launches a
+      # worker while the gVisor tier absorbs the whole engine. Keep BOTH gids.
+      #
+      # No literal defaults: a wrong-but-plausible gid fails silently and is very hard
+      # to spot, so fail loudly instead. scripts/node_env_sync.sh writes these per host.
+      - "${KVM_GID:?unset — run scripts/node_env_sync.sh on this node}"
+      - "${DOCKER_GID:?unset — run scripts/node_env_sync.sh on this node}"
     environment:
       - BLASTBOX_DATABASE_URL=postgresql://${POSTGRES_USER:-clippyshot}:${POSTGRES_PASSWORD:-clippyshot-dev}@postgres:5432/${POSTGRES_DB:-clippyshot}
       - BLASTBOX_JOB_ROOT=${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}/jobs

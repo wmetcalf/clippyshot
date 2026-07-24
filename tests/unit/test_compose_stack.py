@@ -58,7 +58,8 @@ def test_compose_stack_dispatcher_runs_blastbox_dispatch_with_socket_and_worker_
     assert "${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}:${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}" in dispatcher
     assert "/var/run/docker.sock:/var/run/docker.sock" in dispatcher
     assert 'group_add:' in dispatcher
-    assert '"${DOCKER_GID:-984}"' in dispatcher
+    # GID is fail-loud (no silent :-984 default): unset -> compose errors, run node_env_sync.sh
+    assert '"${DOCKER_GID:?' in dispatcher
     assert 'test: ["CMD", "docker", "info"]' in dispatcher
     assert "ports:" not in dispatcher
     assert "image: ${CLIPPYSHOT_IMAGE:-clippyshot:dev}" in compose
@@ -114,3 +115,14 @@ def test_all_dispatchers_declare_clippyshot_reserved_keys():
         assert "BLASTBOX_ENGINE_CLIPPYSHOT_RESERVED_KEYS=" in compose, fname
         for key in must:
             assert key in compose, f"{key} not reserved in {fname}"
+
+
+def test_firecracker_dispatcher_declares_both_kvm_and_docker_gids():
+    """Compose overlays REPLACE list values, so the FC dispatcher's group_add must repeat
+    the docker gid it inherits from the base compose — else it has /dev/kvm but no docker
+    socket, falls back to insecure runc, REQUIRE_SECURE_RUNTIME refuses every job, and the
+    Firecracker tier silently never launches (the gVisor tier absorbs the whole engine)."""
+    compose = Path("deploy/docker/docker-compose.firecracker.yml").read_text(encoding="utf-8")
+    fc = compose.split("group_add:", 1)[1].split("environment:", 1)[0]
+    assert "KVM_GID:?" in fc, "FC dispatcher must fail loud on unset KVM_GID"
+    assert "DOCKER_GID:?" in fc, "FC dispatcher must repeat DOCKER_GID (overlays drop it)"

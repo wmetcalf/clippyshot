@@ -142,7 +142,7 @@ services:
     security_opt:
       - no-new-privileges:true
     group_add:
-      - "${DOCKER_GID:-984}"
+      - "${DOCKER_GID:?unset — run scripts/node_env_sync.sh on this node}"
     tmpfs:
       # Pure cold dispatcher — no warm scratch here (FC warm runs in the dispatcher-fc
       # sidecar with its own large /tmp; gVisor in dispatcher-gvisor). Keep this minimal.
