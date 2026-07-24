@@ -379,6 +379,7 @@ is the full reference** (every `CLIPPYSHOT_*` knob by group); the most common on
 | `CLIPPYSHOT_DPI` | `150` | Rasterization DPI |
 | `CLIPPYSHOT_RASTERIZER` | `pdfium` | PDF→PNG engine: `pdfium` (PDFium/pypdfium2, ~2× faster) or `pdftoppm` (poppler) |
 | `CLIPPYSHOT_WARM_UNO` | `0` | When `1`, `engine.warmup()` starts a persistent `unoserver` and the runner converts through it (parity-preserving; fail-closed to cold). Inert without `warmup()` |
+| `CLIPPYSHOT_WARM_OCR` | `0` | When `1`, `engine.warmup()` starts a persistent `tesserocr` OCR helper (model loaded once; fail-closed to the `tesseract` CLI). Cold-container jobs get a per-job helper automatically. `CLIPPYSHOT_OCR_ENGINE=tesseract_cli` forces the CLI. Both operator-only. See [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md). |
 | `CLIPPYSHOT_MAX_INPUT` | `104857600` | Max accepted upload size (100 MiB) |
 | `CLIPPYSHOT_MEM` | `8589934592` | Per-conversion RLIMIT_AS / VADDR cap (8 GiB — soffice mmaps 4–8 GB at ~500 MB RSS; the container `--memory` is the real RSS cap) |
 | `CLIPPYSHOT_TMPFS` | `1073741824` | Per-conversion tmpfs / RLIMIT_FSIZE cap (1 GiB) |

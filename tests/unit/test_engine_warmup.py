@@ -91,7 +91,10 @@ def test_warmup_writes_and_passes_hardened_profile(monkeypatch, tmp_path):
     assert xcu.exists(), "warmup() must write the hardened profile before starting the server"
     body = xcu.read_text()
     assert "DisableMacrosExecution" in body and "MacroSecurityLevel" in body
-    assert captured["user_installation"] == "file://%s" % prof.resolve()
+    # UnoServer (the FC/TCP transport) takes a PLAIN path — unoserver runs its own
+    # Path(...).as_uri(); a file:// URL makes it raise "relative path can't be
+    # expressed as a file URI". Only the soffice-pipe transport gets a file:// URL.
+    assert captured["user_installation"] == str(prof.resolve())
 
 
 def test_warmup_fails_closed_when_profile_unwritable(monkeypatch):
@@ -177,6 +180,120 @@ def test_warmup_priming_failure_is_nonfatal(monkeypatch):
     eng = ClippyShotEngine()
     eng.warmup()  # must NOT raise
     assert eng._uno_server is srv  # warm tier stays active despite priming failure
+
+
+def test_warm_ocr_off_by_default(monkeypatch):
+    monkeypatch.delenv("CLIPPYSHOT_WARM_OCR", raising=False)
+    monkeypatch.delenv("CLIPPYSHOT_WARM_UNO", raising=False)
+    eng = ClippyShotEngine()
+    eng.warmup()
+    assert eng._ocr_server is None
+
+
+def test_warm_ocr_starts_when_enabled(monkeypatch):
+    # OCR warm tier is independent of the UNO warm tier.
+    monkeypatch.setenv("CLIPPYSHOT_WARM_OCR", "1")
+    monkeypatch.delenv("CLIPPYSHOT_WARM_UNO", raising=False)
+    monkeypatch.delenv("CLIPPYSHOT_OCR_ENGINE", raising=False)
+    started = []
+
+    class FakeWarm:
+        def start(self):
+            started.append(True)
+
+        def is_ready(self):
+            return True
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr("clippyshot.ocr_warm.WarmOCR", lambda *a, **k: FakeWarm())
+    eng = ClippyShotEngine()
+    eng.warmup()
+    assert started == [True]
+    assert eng._ocr_server is not None
+
+
+def test_warm_ocr_nonfatal_on_start_failure(monkeypatch):
+    monkeypatch.setenv("CLIPPYSHOT_WARM_OCR", "1")
+
+    class FailWarm:
+        def start(self):
+            raise RuntimeError("tesserocr not installed")
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr("clippyshot.ocr_warm.WarmOCR", lambda *a, **k: FailWarm())
+    eng = ClippyShotEngine()
+    eng.warmup()  # must NOT raise — falls back to CLI
+    assert eng._ocr_server is None
+
+
+def test_warm_ocr_disabled_by_cli_engine(monkeypatch):
+    monkeypatch.setenv("CLIPPYSHOT_WARM_OCR", "1")
+    monkeypatch.setenv("CLIPPYSHOT_OCR_ENGINE", "tesseract_cli")
+
+    class FakeWarm:
+        def start(self):
+            raise AssertionError("must not start when forced to the CLI")
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr("clippyshot.ocr_warm.WarmOCR", lambda *a, **k: FakeWarm())
+    eng = ClippyShotEngine()
+    eng.warmup()
+    assert eng._ocr_server is None
+
+
+def _fake_sandbox(name):
+    return lambda: type("S", (), {"name": name})()
+
+
+def test_cold_ocr_helper_starts_on_container_backend(monkeypatch):
+    monkeypatch.delenv("CLIPPYSHOT_OCR_ENGINE", raising=False)
+    monkeypatch.setenv("CLIPPYSHOT_OCR", "1")  # cold helper only when OCR is enabled
+    monkeypatch.setattr("clippyshot.ocr_warm.WarmOCR",
+                        lambda *a, **k: type("W", (), {"start": lambda self: None,
+                                                       "stop": lambda self: None})())
+    monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", _fake_sandbox("container"))
+    eng = ClippyShotEngine()
+    eng._maybe_start_cold_ocr_helper()
+    assert eng._ocr_server is not None
+
+
+def test_cold_ocr_helper_skipped_when_ocr_disabled(monkeypatch):
+    # OCR off by default → a non-OCR container job must NOT spawn a helper.
+    monkeypatch.delenv("CLIPPYSHOT_OCR", raising=False)
+    monkeypatch.setattr("clippyshot.ocr_warm.WarmOCR",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not start")))
+    monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", _fake_sandbox("container"))
+    eng = ClippyShotEngine()
+    eng._maybe_start_cold_ocr_helper()
+    assert eng._ocr_server is None
+
+
+def test_cold_ocr_helper_skipped_on_baremetal(monkeypatch):
+    monkeypatch.setenv("CLIPPYSHOT_OCR", "1")
+    monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", _fake_sandbox("bwrap"))
+    eng = ClippyShotEngine()
+    eng._maybe_start_cold_ocr_helper()
+    assert eng._ocr_server is None
+
+
+def test_cold_ocr_helper_nonfatal_when_start_fails(monkeypatch):
+    monkeypatch.setenv("CLIPPYSHOT_OCR", "1")
+    monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", _fake_sandbox("container"))
+
+    def _boom(self):
+        raise RuntimeError("tesserocr missing in this container")
+
+    monkeypatch.setattr("clippyshot.ocr_warm.WarmOCR",
+                        lambda *a, **k: type("W", (), {"start": _boom, "stop": lambda self: None})())
+    eng = ClippyShotEngine()
+    eng._maybe_start_cold_ocr_helper()  # must NOT raise
+    assert eng._ocr_server is None
 
 
 def test_detonate_maps_detection_error_to_rejected(tmp_path):
