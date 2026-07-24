@@ -93,3 +93,24 @@ def test_tier_routing_env_wired_in_compose():
     for fname in ("docker-compose.yml", "docker-compose.firecracker.yml", "docker-compose.gvisor.yml"):
         compose = Path(f"deploy/docker/{fname}").read_text(encoding="utf-8")
         assert "BLASTBOX_MAX_QUEUED_AGE_S=${BLASTBOX_MAX_QUEUED_AGE_S:-0}" in compose, fname
+
+
+def test_all_dispatchers_declare_clippyshot_reserved_keys():
+    """blastbox core is engine-agnostic; ClippyShot declares its OWN security-posture knobs
+    as reserved here. Every dispatcher (cold + FC + gVisor warm sidecars) MUST set
+    BLASTBOX_ENGINE_CLIPPYSHOT_RESERVED_KEYS with the 4 sandbox/insecure/disclose/warm-diag
+    keys, dropped unconditionally from client job.params — a warm tier missing it would let a
+    client flip that worker's posture."""
+    must = {
+        "CLIPPYSHOT_WARM_DIAG_FILE", "CLIPPYSHOT_SANDBOX",
+        "CLIPPYSHOT_WARN_ON_INSECURE", "CLIPPYSHOT_DISCLOSE_SECURITY_INTERNALS",
+    }
+    for fname in (
+        "docker-compose.yml",
+        "docker-compose.firecracker.yml",
+        "docker-compose.gvisor.yml",
+    ):
+        compose = Path(f"deploy/docker/{fname}").read_text(encoding="utf-8")
+        assert "BLASTBOX_ENGINE_CLIPPYSHOT_RESERVED_KEYS=" in compose, fname
+        for key in must:
+            assert key in compose, f"{key} not reserved in {fname}"
