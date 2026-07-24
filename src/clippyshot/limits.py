@@ -140,6 +140,44 @@ def parse_memory_gb(spec: str) -> float:
         return 0.0
 
 
+# Per-page pixel budget. Sharding bounds page CONCURRENCY (how many render at
+# once) but NOT the size of a single page. A 14400pt SinglePageSheets sheet at
+# 150 DPI is ~30000px/side → ~900 MP → one ~3.6 GB RGBA bitmap (+ a comparable
+# PNG-encode buffer) that OOM-wedges a memory-capped warm guest — which then makes
+# zero progress and burns the whole worker timeout. The rasterizer clamps render
+# DPI so the largest page fits this budget: a valid downscaled image, not an OOM.
+_MIN_PAGE_PX = 1_000_000            # 1 MP floor — never clamp below a thumbnail.
+_MAX_PAGE_PX_CEILING = 200_000_000  # 200 MP hard ceiling regardless of RAM / env.
+
+
+def max_page_px(worker_memory_spec: str | None = None) -> int:
+    """Largest single-page pixel area (w*h px) the rasterizer renders before it
+    downscales, derived from the worker's memory budget.
+
+    One page costs ~4 B/px RGBA plus a comparable PNG-encode buffer; budget a
+    single page at ~1/8 of worker RAM for the RGBA bitmap (leaving the rest for
+    the LibreOffice/unoserver resident set, Python, and the encode). Bounded by a
+    1 MP floor and a 200 MP ceiling so a hostile/fat-fingered env can neither
+    disable the guard nor wrap it to nonsense. ``CLIPPYSHOT_MAX_PAGE_PX`` overrides
+    the derivation (still floor/ceiling-clamped)."""
+    override = os.environ.get("CLIPPYSHOT_MAX_PAGE_PX")
+    if override:
+        try:
+            val = int(override)
+        except ValueError:
+            val = 0
+        if val > 0:
+            return min(_MAX_PAGE_PX_CEILING, max(_MIN_PAGE_PX, val))
+    mem_gb = parse_memory_gb(
+        worker_memory_spec or os.environ.get("CLIPPYSHOT_WORKER_MEMORY") or "4g"
+    )
+    if mem_gb <= 0:
+        mem_gb = 4.0
+    rgba_budget_bytes = mem_gb * (1024.0 ** 3) / 8.0  # 1/8 of RAM for one page's RGBA
+    px = int(rgba_budget_bytes / 4.0)                 # 4 bytes/px
+    return min(_MAX_PAGE_PX_CEILING, max(_MIN_PAGE_PX, px))
+
+
 def max_concurrent_page_ops(
     worker_memory_spec: str | None = None, per_page_peak_mb: float | None = None
 ) -> int:

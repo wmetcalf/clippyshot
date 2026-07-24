@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 from abc import ABC, abstractmethod
@@ -14,7 +15,7 @@ from pypdf import PdfReader
 
 from clippyshot._argv import assert_positional as _assert_positional
 from clippyshot.errors import RasterizeError
-from clippyshot.limits import Limits, max_concurrent_page_ops
+from clippyshot.limits import Limits, max_concurrent_page_ops, max_page_px
 from clippyshot.sandbox.base import Mount, Sandbox, SandboxRequest
 from clippyshot.types import RasterizedPage
 
@@ -47,6 +48,37 @@ def _max_page_peak_mb(
         h_px = (h_mm / _MM_PER_INCH) * dpi
         peak = max(peak, w_px * h_px * 4.0 / (1024.0 * 1024.0))
     return peak
+
+
+# Legibility / Limits floor: never clamp below the minimum DPI a render is allowed.
+_MIN_DPI = 36
+
+
+def _effective_dpi(
+    dpi: int,
+    page_sizes_mm: list[tuple[float, float]] | None,
+    max_page_px: int,
+) -> int:
+    """DPI clamped so the LARGEST page in ``page_sizes_mm`` renders within
+    ``max_page_px`` pixels.
+
+    Returns ``dpi`` unchanged when page sizes are unknown, the budget is disabled
+    (<= 0), or every page already fits. Only ever LOWERS the DPI, and floors at
+    ``_MIN_DPI`` — because pdfium clamps the MediaBox to 14400pt, even the largest
+    possible page at 36 DPI (~7200px/side ≈ 52 MP) sits under any real budget, so
+    the floor is always safe. This turns an oversized-page OOM into a valid,
+    lower-resolution render."""
+    if not page_sizes_mm or max_page_px <= 0:
+        return dpi
+    peak_px = 0.0
+    for w_mm, h_mm in page_sizes_mm:
+        w_px = (w_mm / _MM_PER_INCH) * dpi
+        h_px = (h_mm / _MM_PER_INCH) * dpi
+        peak_px = max(peak_px, w_px * h_px)
+    if peak_px <= max_page_px:
+        return dpi
+    scale = math.sqrt(max_page_px / peak_px)
+    return max(_MIN_DPI, int(dpi * scale))
 
 
 @runtime_checkable
@@ -114,11 +146,28 @@ class ShardingRasterizer(ABC):
         first: int,
         last: int,
         pdf_parent: Path,
+        page_sizes_mm: list[tuple[float, float]] | None = None,
+        budget_px: int = 0,
     ) -> None:
-        """Run a single render invocation over the [first, last] page range."""
+        """Run a single render invocation over the [first, last] page range.
+
+        The render DPI is clamped down if the largest page in THIS range would
+        exceed ``budget_px`` pixels — so an oversized sheet renders (downscaled)
+        instead of OOM-wedging a memory-capped guest. Per-range (not global) so a
+        doc with one giant page keeps full resolution on its normal-page shards."""
+        range_sizes = (
+            page_sizes_mm[first - 1:last] if page_sizes_mm else None
+        )
+        eff_dpi = _effective_dpi(dpi, range_sizes, budget_px)
+        if eff_dpi != dpi:
+            _log.warning(
+                "%s: clamped render DPI %d→%d for pages %d-%d "
+                "(largest page exceeds %d-px budget)",
+                self.name, dpi, eff_dpi, first, last, budget_px,
+            )
         _assert_positional(sandbox_pdf)
         argv = self._build_argv(
-            sandbox_pdf=sandbox_pdf, out_dir=_SANDBOX_OUT, dpi=dpi, first=first, last=last
+            sandbox_pdf=sandbox_pdf, out_dir=_SANDBOX_OUT, dpi=eff_dpi, first=first, last=last
         )
         req = SandboxRequest(
             argv=argv,
@@ -130,7 +179,7 @@ class ShardingRasterizer(ABC):
             limits=Limits(
                 timeout_s=self._timeout,
                 max_pages=last - first + 1,
-                dpi=dpi,
+                dpi=eff_dpi,
             ),
             env=self._env(),
             attach_apparmor=self._attach_apparmor(),
@@ -183,11 +232,16 @@ class ShardingRasterizer(ABC):
         peak_mb = _max_page_peak_mb(page_sizes_mm, dpi)
         mem_budget = max_concurrent_page_ops(per_page_peak_mb=peak_mb)
         shard_count = min(cpu_budget, mem_budget, max_pages)
+        # Per-page pixel budget: caps the SIZE of any one render (DPI-clamped in
+        # _run_range) so a single oversized page can't OOM the guest — orthogonal
+        # to shard_count, which caps how many pages render CONCURRENTLY.
+        budget_px = max_page_px()
         if max_pages < _MIN_PAGES_FOR_SHARDING or shard_count <= 1:
             # Single-shot fast path: one invocation for the whole range.
             self._run_range(
                 sandbox_pdf=sandbox_pdf, out_dir=out_dir, dpi=dpi,
                 first=1, last=max_pages, pdf_parent=pdf_path.parent,
+                page_sizes_mm=page_sizes_mm, budget_px=budget_px,
             )
         else:
             # Even split; last shard absorbs the remainder.
@@ -205,6 +259,7 @@ class ShardingRasterizer(ABC):
                         self._run_range,
                         sandbox_pdf=sandbox_pdf, out_dir=out_dir, dpi=dpi,
                         first=first, last=last, pdf_parent=pdf_path.parent,
+                        page_sizes_mm=page_sizes_mm, budget_px=budget_px,
                     )
                     for first, last in ranges
                 ]
