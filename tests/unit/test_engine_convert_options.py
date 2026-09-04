@@ -74,3 +74,29 @@ def test_malformed_params_fall_back(monkeypatch):
     assert o.qr_formats == "qr_code,micro_qr_code,rmqr_code"
     assert o.ocr_psm == 3
     assert o.ocr_lang == "eng+Latin"
+
+
+def test_a_non_ocr_job_does_not_start_the_ocr_helper(monkeypatch, tmp_path):
+    """`_get_converter` runs for EVERY detonation.
+
+    Starting the helper unconditionally made non-OCR conversions -- the default
+    -- spawn and hold a tesserocr process, and pay up to `ready_timeout_s`
+    waiting for a slow one before work that never touches OCR.
+    """
+    from clippyshot.engine import ClippyShotEngine
+
+    started = []
+    engine = ClippyShotEngine()
+    monkeypatch.setattr(
+        engine, "_maybe_start_cold_ocr_helper", lambda: started.append(True)
+    )
+    monkeypatch.setattr(
+        "clippyshot.engine._build_converter", lambda **kw: object()
+    )
+
+    engine._get_converter(ocr_enabled=False)
+    assert started == [], "a non-OCR job must not start the helper"
+
+    engine._converter = None  # next job, this one wants OCR
+    engine._get_converter(ocr_enabled=True)
+    assert started == [True], "an OCR job must still start it"

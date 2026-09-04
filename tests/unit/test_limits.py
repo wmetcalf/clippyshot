@@ -75,3 +75,60 @@ def test_timeout_too_long_rejected():
 
 def test_default_limits_pass_validation():
     Limits()  # should not raise
+
+
+def test_the_worker_memory_budget_follows_the_blastbox_limits(monkeypatch):
+    """Only CLIPPYSHOT_WORKER_MEMORY was consulted.
+
+    A deployment that sets the blastbox-side limit and not this one budgeted
+    every page against the 4 GB default -- twice what an FC guest at
+    BLASTBOX_FC_MEM_MIB=2048 actually has.
+    """
+    from clippyshot.limits import parse_memory_gb, resolve_worker_memory
+
+    for name in ("CLIPPYSHOT_WORKER_MEMORY", "BLASTBOX_WORKER_MEMORY", "BLASTBOX_FC_MEM_MIB"):
+        monkeypatch.delenv(name, raising=False)
+
+    monkeypatch.setenv("BLASTBOX_FC_MEM_MIB", "2048")
+    assert parse_memory_gb(resolve_worker_memory()) == 2.0
+
+    monkeypatch.setenv("BLASTBOX_WORKER_MEMORY", "3g")
+    assert parse_memory_gb(resolve_worker_memory()) == 3.0, "the explicit spec beats the guest MiB"
+
+    monkeypatch.setenv("CLIPPYSHOT_WORKER_MEMORY", "1g")
+    assert parse_memory_gb(resolve_worker_memory()) == 1.0, "clippyshot's own name wins"
+
+    assert resolve_worker_memory("512m") == "512m", "an explicit argument beats every env"
+
+
+def test_detection_may_only_lower_the_budget(monkeypatch, tmp_path):
+    """MemTotal in an unlimited container is the HOST's RAM.
+
+    Budgeting a page against a 64 GB host would OOM the worker -- worse than
+    the 4 GB assumption it replaced -- so a detected figure is used only when
+    it is smaller.
+    """
+    import clippyshot.limits as limits
+
+    for name in ("CLIPPYSHOT_WORKER_MEMORY", "BLASTBOX_WORKER_MEMORY", "BLASTBOX_FC_MEM_MIB"):
+        monkeypatch.delenv(name, raising=False)
+
+    big = tmp_path / "meminfo-big"
+    big.write_text("MemTotal:       65225456 kB\nMemFree:  100 kB\n")
+    monkeypatch.setattr(limits, "_CGROUP_MAX", str(tmp_path / "absent"))
+    monkeypatch.setattr(limits, "_MEMINFO", str(big))
+    assert limits.resolve_worker_memory() == "4g", "a 62 GB host must not raise the budget"
+
+    small = tmp_path / "meminfo-small"
+    small.write_text("MemTotal:        2097152 kB\n")
+    monkeypatch.setattr(limits, "_MEMINFO", str(small))
+    assert limits.parse_memory_gb(limits.resolve_worker_memory()) == 2.0, (
+        "a 2 GB guest must lower it"
+    )
+
+    cg = tmp_path / "memory.max"
+    cg.write_text("1073741824\n")  # 1 GiB, a real container limit
+    monkeypatch.setattr(limits, "_CGROUP_MAX", str(cg))
+    assert limits.parse_memory_gb(limits.resolve_worker_memory()) == 1.0, (
+        "the cgroup limit is the container's real cap and beats MemTotal"
+    )

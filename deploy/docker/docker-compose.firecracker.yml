@@ -34,9 +34,12 @@ services:
       # worker while the gVisor tier absorbs the whole engine. Keep BOTH gids.
       #
       # No literal defaults: a wrong-but-plausible gid fails silently and is very hard
-      # to spot, so fail loudly instead. scripts/node_env_sync.sh writes these per host.
-      - "${KVM_GID:?unset — run scripts/node_env_sync.sh on this node}"
-      - "${DOCKER_GID:?unset — run scripts/node_env_sync.sh on this node}"
+      # to spot, so fail loudly instead. ./deploy/docker/clippyshot-compose detects both
+      # from /dev/kvm and the docker socket on THIS host and writes them to .env, so the
+      # documented startup path populates them; the refusal below is for a direct
+      # `docker compose` that skipped the wrapper.
+      - "${KVM_GID:?unset — start via ./deploy/docker/clippyshot-compose, which detects it from /dev/kvm}"
+      - "${DOCKER_GID:?unset — start via ./deploy/docker/clippyshot-compose, which detects it from the docker socket}"
     environment:
       - BLASTBOX_DATABASE_URL=postgresql://${POSTGRES_USER:-clippyshot}:${POSTGRES_PASSWORD:-clippyshot-dev}@postgres:5432/${POSTGRES_DB:-clippyshot}
       - BLASTBOX_JOB_ROOT=${CLIPPYSHOT_DATA_DIR:-/var/lib/clippyshot}/jobs

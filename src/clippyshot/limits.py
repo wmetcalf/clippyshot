@@ -122,6 +122,69 @@ _PER_PAGE_PEAK_MB = 200
 _ABSOLUTE_PAGE_OP_CEILING = 8
 
 
+def resolve_worker_memory(explicit: str | None = None) -> str:
+    """The memory this worker actually has, as a docker-style spec.
+
+    Only ``CLIPPYSHOT_WORKER_MEMORY`` was consulted, so a deployment that sets
+    the blastbox-side limit and not this one budgeted for the 4 GB default on a
+    smaller worker -- the FC guest runs at ``BLASTBOX_FC_MEM_MIB`` (2048 on the
+    stock overlay) and the cold worker at ``BLASTBOX_WORKER_MEMORY`` (3g on the
+    fleet). Budgeting a page at twice the memory the worker has is how an
+    oversized render OOMs a guest that had a correct limit configured all along.
+
+    In order: this call's own argument, the clippyshot name, the blastbox names,
+    then what the OS says -- the cgroup limit (the container's REAL cap; MemTotal
+    reports the host's RAM inside a container) and finally MemTotal, which is the
+    right answer inside a microVM guest. ``4g`` only when nothing answers.
+    """
+    for value in (explicit, os.environ.get("CLIPPYSHOT_WORKER_MEMORY"),
+                  os.environ.get("BLASTBOX_WORKER_MEMORY")):
+        if value and value.strip():
+            return value.strip()
+    mib = (os.environ.get("BLASTBOX_FC_MEM_MIB") or "").strip()
+    if mib.isdigit() and int(mib) > 0:
+        return f"{mib}m"
+    # Detection may only LOWER the budget. `MemTotal` inside a container with no
+    # memory limit reports the HOST's RAM -- on a 64 GB node that would budget a
+    # single page against 64 GB and OOM the worker, which is worse than the 4 GB
+    # assumption it replaced. Below the default it is exactly the signal we want:
+    # an FC guest at 2048 MiB reads its own 2 GB and stops being budgeted as 4.
+    for path, unit in ((_CGROUP_MAX, ""), (_MEMINFO, "k")):
+        detected = _read_memory_limit(path, unit)
+        if detected and 0 < parse_memory_gb(detected) < _DEFAULT_WORKER_GB:
+            return detected
+    return _DEFAULT_WORKER_MEMORY
+
+
+_DEFAULT_WORKER_MEMORY = "4g"
+_DEFAULT_WORKER_GB = 4.0
+_CGROUP_MAX = "/sys/fs/cgroup/memory.max"
+_MEMINFO = "/proc/meminfo"
+
+
+def _read_memory_limit(path: str, unit: str) -> str | None:
+    """A memory spec read from the OS, or None when it cannot be read.
+
+    Never raises and never returns a nonsense figure: an unreadable file, the
+    cgroup's literal ``max`` (no limit set), or a non-numeric line all mean "ask
+    the next source", because a wrong number here silently mis-sizes every page
+    budget on the worker.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    if path == _MEMINFO:
+        for line in text.splitlines():
+            if line.startswith("MemTotal:"):
+                parts = line.split()
+                return f"{parts[1]}{unit}" if len(parts) > 1 and parts[1].isdigit() else None
+        return None
+    value = text.strip()
+    return f"{value}{unit}" if value.isdigit() and int(value) > 0 else None
+
+
 def parse_memory_gb(spec: str) -> float:
     """Parse a docker-style memory spec like '4g', '512m', '1024' into GB."""
     if not spec:
@@ -185,9 +248,7 @@ def max_page_px(worker_memory_spec: str | None = None) -> int:
             val = 0
         if val > 0:
             return min(_MAX_PAGE_PX_CEILING, max(_MIN_PAGE_PX, val))
-    mem_gb = parse_memory_gb(
-        worker_memory_spec or os.environ.get("CLIPPYSHOT_WORKER_MEMORY") or "4g"
-    )
+    mem_gb = parse_memory_gb(resolve_worker_memory(worker_memory_spec))
     if mem_gb <= 0:
         mem_gb = 4.0
     rgba_budget_bytes = mem_gb * (1024.0 ** 3) / 8.0  # 1/8 of RAM for one page's RGBA
@@ -216,11 +277,7 @@ def max_concurrent_page_ops(
     cgroup OOM-kills cleanly either way; this protects the gVisor warm tier,
     which runs without a per-worker memory cgroup.
     """
-    mem_gb = parse_memory_gb(
-        worker_memory_spec
-        or os.environ.get("CLIPPYSHOT_WORKER_MEMORY")
-        or "4g"
-    )
+    mem_gb = parse_memory_gb(resolve_worker_memory(worker_memory_spec))
     # Leave half the worker memory for the Python runtime, LibreOffice, and
     # transient allocations.
     usable_mb = max(1.0, mem_gb * 1024.0 * 0.5)

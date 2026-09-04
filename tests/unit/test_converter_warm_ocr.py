@@ -11,7 +11,7 @@ class Helper:
     def is_ready(self):
         return True
 
-    def ocr(self, png, *, lang, psm, timeout_s):
+    def ocr(self, png, *, lang, psm, timeout_s, deadline=None):
         self.calls += 1
         if self.raises:
             raise OCRError("boom")
@@ -99,3 +99,42 @@ def test_no_helper_uses_cli(tmp_path):
         _ocr_fn=cli, ocr_helper=None,
     )
     assert ocr_obj["text"] == "cli only" and called["cli"] == 1
+
+
+def test_the_converter_hands_the_helper_an_absolute_deadline(tmp_path):
+    """A duration would decay while the page waits on WarmOCR's lock.
+
+    This asserts only the contract the converter owns -- that it passes an
+    instant derived from the remaining budget. Whether the wait is actually
+    deducted is a property of the LOCK, and is tested against the real one in
+    test_ocr_warm.py; a fake helper here has no lock and could never show it.
+    """
+    import time as _time
+
+    seen = {}
+
+    class Recording:
+        def is_ready(self):
+            return True
+
+        def ocr(self, png, *, lang, psm, timeout_s, deadline=None):
+            seen["deadline"] = deadline
+            seen["at"] = _time.monotonic()
+            return OCRResult("warm", 3, 1)
+
+    rec = {"file": "page-001.png", "index": 1, "width": 100, "height": 100}
+    (tmp_path / "page-001.png").write_bytes(b"x")
+
+    def cli(scan_png, *, lang, psm, timeout_s, argv_runner=None):
+        raise AssertionError("the warm path must not fall back here")
+
+    _process_page_scanners(
+        tmp_path, rec, is_blank=False, qr_enabled=False, qr_formats="", qr_timeout_s=5,
+        ocr_enabled=True, ocr_lang="eng", ocr_psm=3, ocr_time_left=lambda: 42.0,
+        has_images=True, ocr_all=True, _ocr_fn=cli, ocr_helper=Recording(),
+    )
+    assert seen["deadline"] is not None, "the helper must be given a deadline"
+    budget_left = seen["deadline"] - seen["at"]
+    assert 41.0 < budget_left <= 42.0, (
+        f"the deadline must carry the remaining 42s budget, got {budget_left}"
+    )

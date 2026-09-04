@@ -410,12 +410,17 @@ class ClippyShotEngine:
         atexit.register(srv.stop)
         self._ocr_server = srv
 
-    def _get_converter(self):
+    def _get_converter(self, ocr_enabled: bool = True):
         # Lock the lazy init: concurrent detonate() calls on one engine must not
         # build duplicate converters or spawn duplicate cold-OCR helpers.
         with self._converter_lock:
             if self._converter is None:
-                if self._ocr_server is None:
+                # Only when this job will actually OCR. `_get_converter` runs for
+                # EVERY detonation, and starting the helper unconditionally made
+                # non-OCR conversions -- the default -- spawn and hold a tesserocr
+                # process, and pay up to `ready_timeout_s` waiting for a slow one
+                # before doing work that never touches OCR.
+                if ocr_enabled and self._ocr_server is None:
                     self._maybe_start_cold_ocr_helper()
                 self._converter = _build_converter(
                     uno_server=self._uno_server, ocr_helper=self._ocr_server
@@ -514,7 +519,7 @@ class ClippyShotEngine:
 
         from clippyshot.errors import DetectionError
 
-        converter = self._get_converter()
+        converter = self._get_converter(ocr_enabled=cs_opts.ocr_enabled)
         try:
             result = converter.convert(input, outdir, cs_opts)
         except DetectionError as exc:
