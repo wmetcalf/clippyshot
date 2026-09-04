@@ -1,9 +1,16 @@
 # syntax=docker/dockerfile:1.7
 
+# The base, as an ARG so a build can be PINNED to a digest and stamped with it.
+# Declared before the first FROM, which is the only place an ARG can
+# parameterize one. Both stages take it: they are the same image, and the
+# builder's output is copied into the runtime, so a pin that covered only one
+# of them would record a provenance the artifact does not have.
+ARG BASE_IMAGE=ubuntu:24.04
+
 #####################
 # Stage 1 — builder #
 #####################
-FROM ubuntu:24.04 AS builder
+FROM ${BASE_IMAGE} AS builder
 ARG NSJAIL_REF=3.4
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -46,7 +53,7 @@ RUN curl -fsSL -o /tmp/nono.tgz \
 #####################
 # Stage 2 — runtime #
 #####################
-FROM ubuntu:24.04 AS runtime
+FROM ${BASE_IMAGE} AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -148,9 +155,16 @@ RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin clippy \
 WORKDIR /tmp/build
 COPY pyproject.toml /tmp/build/pyproject.toml
 COPY src /tmp/build/src
+# The blastbox version this image INSTALLS. Without it, `clippyshot[host]`
+# resolves the >= floor to whatever is newest on PyPI at build time, so the
+# provenance label names one version while the venv holds another -- the
+# label/contents disagreement `blastbox doctor` exists to catch. Caught for
+# real on toolz2: the stamp said 0.1.34 and the image contained 0.1.35.
+# Keep the default in sync with the floor in pyproject.toml.
+ARG BLASTBOX_VERSION=0.1.35
 RUN python3 -m venv /opt/clippyshot \
     && /opt/clippyshot/bin/pip install --upgrade pip \
-    && /opt/clippyshot/bin/pip install '/tmp/build[host]' 'blastbox[s3]' \
+    && /opt/clippyshot/bin/pip install '/tmp/build[host]' "blastbox[s3]==${BLASTBOX_VERSION}" \
     && rm -rf /tmp/build
 
 ENV PATH=/opt/clippyshot/bin:$PATH
