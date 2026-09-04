@@ -8,6 +8,7 @@ stub `blastbox` on PATH and run the real script.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -16,6 +17,12 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "build_images.sh"
+
+# Read from the script rather than repeated as a literal. Every blastbox bump
+# otherwise breaks these tests in a way that looks like the wrapper is broken:
+# the stub reports the old version, the gate correctly refuses it, and six
+# tests fail for a reason that has nothing to do with what they check.
+BB_MIN = re.search(r"^BB_MIN=(\S+)", SCRIPT.read_text(), re.MULTILINE).group(1)
 
 
 @pytest.fixture
@@ -26,7 +33,7 @@ def stub_cli(tmp_path: Path) -> Path:
     stub = d / "blastbox"
     stub.write_text(
         "#!/usr/bin/env bash\n"
-        'if [ "$1" = version ]; then echo "blastbox 0.1.34"; exit 0; fi\n'
+        f'if [ "$1" = version ]; then echo "blastbox {BB_MIN}"; exit 0; fi\n'
         'printf "%s\\n" "$@"\n'
     )
     stub.chmod(0o755)
@@ -43,33 +50,33 @@ def _run(binpath: Path, *args: str) -> subprocess.CompletedProcess[str]:
 def test_a_tag_alone_runs_without_an_unbound_variable(stub_cli: Path) -> None:
     """`set -u` plus an empty array is the classic way a wrapper dies on its
     simplest invocation."""
-    p = _run(stub_cli, "bb0134")
+    p = _run(stub_cli, "tagX")
     assert p.returncode == 0, p.stderr
     lines = p.stdout.split()
-    assert "build-images" in lines and "--tag" in lines and "bb0134" in lines
+    assert "build-images" in lines and "--tag" in lines and "tagX" in lines
     assert "--blastbox-version" not in lines
 
 
 def test_a_bare_version_becomes_the_flag(stub_cli: Path) -> None:
     """How this script was called before it became a wrapper."""
-    p = _run(stub_cli, "bb0134", "0.1.34")
+    p = _run(stub_cli, "tagX", "9.9.9")
     assert p.returncode == 0, p.stderr
     out = p.stdout.split()
-    assert out[out.index("--blastbox-version") + 1] == "0.1.34"
+    assert out[out.index("--blastbox-version") + 1] == "9.9.9"
 
 
 def test_flags_pass_through(stub_cli: Path) -> None:
-    p = _run(stub_cli, "bb0134", "--dry-run")
+    p = _run(stub_cli, "tagX", "--dry-run")
     assert p.returncode == 0, p.stderr
     assert "--dry-run" in p.stdout.split()
     assert "--blastbox-version" not in p.stdout.split()
 
 
 def test_a_version_and_a_flag_together(stub_cli: Path) -> None:
-    p = _run(stub_cli, "bb0134", "0.1.34", "--dry-run")
+    p = _run(stub_cli, "tagX", "9.9.9", "--dry-run")
     assert p.returncode == 0, p.stderr
     out = p.stdout.split()
-    assert out[out.index("--blastbox-version") + 1] == "0.1.34"
+    assert out[out.index("--blastbox-version") + 1] == "9.9.9"
     assert "--dry-run" in out
 
 
@@ -85,7 +92,7 @@ def test_an_old_blastbox_is_refused_with_the_reason(tmp_path: Path) -> None:
         'echo SHOULD-NOT-RUN\n'
     )
     stub.chmod(0o755)
-    p = _run(d, "bb0134")
+    p = _run(d, "tagX")
     assert p.returncode == 2
     assert "too old" in p.stderr
     assert "SHOULD-NOT-RUN" not in p.stdout
@@ -98,11 +105,11 @@ def test_a_source_build_of_the_minimum_counts(tmp_path: Path) -> None:
     stub = d / "blastbox"
     stub.write_text(
         "#!/usr/bin/env bash\n"
-        'if [ "$1" = version ]; then echo "blastbox 0.1.34+g9fa494f"; exit 0; fi\n'
+        f'if [ "$1" = version ]; then echo "blastbox {BB_MIN}+g9fa494f"; exit 0; fi\n'
         'printf "%s\\n" "$@"\n'
     )
     stub.chmod(0o755)
-    p = _run(d, "bb0134")
+    p = _run(d, "tagX")
     assert p.returncode == 0, p.stderr + p.stdout
 
 
@@ -115,17 +122,17 @@ def test_a_missing_cli_names_the_version_to_install(tmp_path: Path) -> None:
     # and the test then fails on the wrong FileNotFoundError.
     bash = shutil.which("bash") or "/bin/bash"
     p = subprocess.run(
-        [bash, str(SCRIPT), "bb0134"],
+        [bash, str(SCRIPT), "tagX"],
         capture_output=True, text=True, env={**os.environ, "PATH": str(empty)}, check=False,
     )
     assert p.returncode == 2
-    assert "0.1.34" in p.stderr, p.stderr
+    assert BB_MIN in p.stderr, p.stderr
     assert "unbound" not in p.stderr.lower()
 
 
 def test_the_old_export_script_refuses_and_points_at_the_new_one() -> None:
     p = subprocess.run(
-        ["bash", str(REPO / "scripts" / "export_warm_rootfs.sh"), "bb0134"],
+        ["bash", str(REPO / "scripts" / "export_warm_rootfs.sh"), "tagX"],
         capture_output=True, text=True, check=False,
     )
     assert p.returncode == 2

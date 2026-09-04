@@ -21,7 +21,7 @@ set -euo pipefail
 # Declared ONCE, above the first message that mentions it. Written out by hand
 # in two places, this drifted before: the script told an operator to install a
 # version it then rejected.
-BB_MIN=0.1.34
+BB_MIN=0.1.35
 
 TAG="${1:?usage: build_images.sh <tag> [blastbox-version] [--dry-run]}"
 shift
