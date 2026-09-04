@@ -99,3 +99,41 @@ def test_no_helper_uses_cli(tmp_path):
         _ocr_fn=cli, ocr_helper=None,
     )
     assert ocr_obj["text"] == "cli only" and called["cli"] == 1
+
+
+def test_warm_call_uses_the_budget_left_when_it_reaches_the_helper(tmp_path):
+    """WarmOCR serialises every caller on one lock.
+
+    A page queued behind a slow warm call would otherwise reach the helper
+    still holding the timeout computed BEFORE the wait, so one 60s job budget
+    could be spent several times over.
+    """
+    seen = {}
+
+    class Recording:
+        def is_ready(self):
+            return True
+
+        def ocr(self, png, *, lang, psm, timeout_s):
+            seen["timeout_s"] = timeout_s
+            return OCRResult("warm", 3, 1)
+
+    calls = {"n": 0}
+
+    def time_left():
+        calls["n"] += 1
+        # First read prices the page; by the time the lock is free, 9s remain.
+        return 55.0 if calls["n"] == 1 else 9.0
+
+    rec = {"file": "page-001.png", "index": 1, "width": 100, "height": 100}
+    (tmp_path / "page-001.png").write_bytes(b"x")
+
+    def cli(scan_png, *, lang, psm, timeout_s, argv_runner=None):
+        raise AssertionError("the warm path must not fall back here")
+
+    _process_page_scanners(
+        tmp_path, rec, is_blank=False, qr_enabled=False, qr_formats="", qr_timeout_s=5,
+        ocr_enabled=True, ocr_lang="eng", ocr_psm=3, ocr_time_left=time_left,
+        has_images=True, ocr_all=True, _ocr_fn=cli, ocr_helper=Recording(),
+    )
+    assert seen["timeout_s"] == 9, "the warm call must be priced when it runs, not when queued"

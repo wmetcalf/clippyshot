@@ -411,9 +411,20 @@ def _process_page_scanners(
                         # hiccup is NOT a scanner failure — fall closed to the cold
                         # CLI path for this page (never fail the page on a warm error).
                         try:
+                            # Recomputed HERE, not reused from before the queue.
+                            # WarmOCR serialises every caller on one lock, so a
+                            # page waiting behind a slow call would otherwise
+                            # reach the helper with the full per-page timeout
+                            # still in hand and stretch a 60s job budget across
+                            # several pages. Same reasoning as `_ocr_cold`.
+                            warm_timeout = (
+                                int(ocr_time_left())
+                                if ocr_time_left is not None
+                                else per_call_timeout
+                            )
                             result = ocr_helper.ocr(
                                 scan_png, lang=ocr_lang, psm=ocr_psm,
-                                timeout_s=per_call_timeout,
+                                timeout_s=max(1, warm_timeout),
                             )
                         except Exception as warm_exc:  # noqa: BLE001
                             warnings.append({

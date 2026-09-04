@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Wrapper for `docker compose` that auto-detects the host's docker-socket
-# GID and writes it to deploy/docker/.env so the dispatcher container's
-# `group_add` matches the host socket's group. Without this, the
-# dispatcher (running as UID 10001) can't read /var/run/docker.sock and
-# fails to launch worker containers.
+# Wrapper for `docker compose` that auto-detects the host GIDs the
+# containers need and writes them to deploy/docker/.env so each service's
+# `group_add` matches the host. Without this, the dispatcher (running as
+# UID 10001) can't read /var/run/docker.sock and fails to launch worker
+# containers -- and the Firecracker overlay can't open /dev/kvm.
 #
 # Usage — same as `docker compose`:
 #   ./deploy/docker/clippyshot-compose up -d
@@ -32,11 +32,29 @@ else
     exit 1
 fi
 
-# Write DOCKER_GID into deploy/docker/.env without clobbering other vars
+# The Firecracker overlay's `group_add` requires KVM_GID with no default
+# (`${KVM_GID:?...}`), so compose aborts during interpolation before any
+# service starts. Detected the same way as the docker socket -- from the
+# device that actually exists on this host -- because the kvm GID differs
+# per distro (Ubuntu 108, Debian 104, RHEL 36) and a wrong one silently
+# costs the guest its /dev/kvm access. Absent /dev/kvm this stays unset:
+# the FC overlay then refuses with its own message, while the cold and
+# gVisor tiers, which do not need it, keep working.
+KVM_DEV="${KVM_DEV:-/dev/kvm}"
+if [ -c "$KVM_DEV" ]; then
+    DETECTED_KVM_GID="$(stat -c '%g' "$KVM_DEV")"
+elif [ -n "${KVM_GID:-}" ]; then
+    DETECTED_KVM_GID="$KVM_GID"
+else
+    DETECTED_KVM_GID=""
+fi
+
+# Write the detected GIDs into deploy/docker/.env without clobbering other vars
 # the operator may have set (CLIPPYSHOT_ENABLE_OCR, CLIPPYSHOT_WORKER_*, etc.).
 touch .env
-grep -v '^DOCKER_GID=' .env > .env.tmp || true
+grep -v -e '^DOCKER_GID=' -e '^KVM_GID=' .env > .env.tmp || true
 mv .env.tmp .env
 echo "DOCKER_GID=$SOCKET_GID" >> .env
+[ -n "$DETECTED_KVM_GID" ] && echo "KVM_GID=$DETECTED_KVM_GID" >> .env
 
 exec docker compose "$@"
