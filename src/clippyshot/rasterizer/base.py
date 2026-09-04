@@ -31,6 +31,36 @@ _SANDBOX_IN = Path("/sandbox/in")
 _SANDBOX_OUT = Path("/sandbox/out")
 
 
+def _dpi_runs(
+    page_sizes_mm: list[tuple[float, float]] | None, dpi: int, budget_px: int
+) -> list[tuple[int, int]]:
+    """Maximal runs of consecutive pages that clamp to the SAME dpi.
+
+    The pixel budget is a per-PAGE constraint, but the dpi decision is made per
+    render INVOCATION, so one oversized page dragged every page it shared an
+    invocation with down to its own reduced dpi. Measured on a 14400 pt sheet
+    among A4s: a document below the sharding threshold rendered ENTIRELY at
+    50 dpi instead of 150, and above it the shard that absorbed the remainder
+    took three ordinary pages down with the giant.
+
+    Splitting on the clamped dpi keeps that reduction where it belongs. Runs of
+    equal dpi are contiguous page ranges because the engines render ranges, not
+    page lists; a document whose pages all clamp alike -- which is nearly all of
+    them -- yields exactly one run and the previous behaviour, invocation for
+    invocation.
+    """
+    if not page_sizes_mm:
+        return []
+    per_page = [_effective_dpi(dpi, [size], budget_px) for size in page_sizes_mm]
+    runs: list[tuple[int, int]] = []
+    start = 0
+    for index in range(1, len(per_page) + 1):
+        if index == len(per_page) or per_page[index] != per_page[start]:
+            runs.append((start + 1, index))
+            start = index
+    return runs
+
+
 def _max_page_peak_mb(
     page_sizes_mm: list[tuple[float, float]] | None, dpi: int, cap_px: int = 0
 ) -> float:
@@ -151,6 +181,72 @@ class ShardingRasterizer(ABC):
         (e.g. pdfium reading its bundled libpdfium under sys.prefix) overrides to False."""
         return True
 
+    def _render_page_run(
+        self,
+        *,
+        sandbox_pdf: Path,
+        out_dir: Path,
+        dpi: int,
+        first: int,
+        last: int,
+        pdf_parent: Path,
+        page_sizes_mm: list[tuple[float, float]] | None,
+        budget_px: int,
+    ) -> None:
+        """Render one run of same-clamped-dpi pages, sharded across invocations."""
+        run_pages = last - first + 1
+        run_sizes = page_sizes_mm[first - 1 : last] if page_sizes_mm else page_sizes_mm
+        cpus = os.cpu_count() or 2
+        cpu_budget = max(1, cpus // 2)
+        # Size-aware memory budget: a page rendered from an oversized mediabox (e.g. a
+        # 14400pt SinglePageSheets sheet → ~30000px → ~2.7 GB RGBA) costs far more than the
+        # 200 MB/page heuristic, so derive the peak from the ACTUAL largest page and let it
+        # collapse the shard count to 1 — N concurrent multi-GB renders would otherwise exhaust
+        # a host without a per-worker memory cgroup (the gVisor warm tier).
+        # Per-page pixel budget: caps the SIZE of any one render (DPI-clamped in
+        # _run_range) so a single oversized page can't OOM the guest.
+        # Size the concurrency budget on the CLAMPED peak (cap_px=budget_px): an
+        # oversized page renders at <= budget_px, so it must NOT collapse
+        # shard_count to 1 — that would force the single-shot path and clamp the
+        # WHOLE doc's DPI instead of only the oversized page's shard.
+        peak_mb = _max_page_peak_mb(run_sizes, dpi, cap_px=budget_px)
+        mem_budget = max_concurrent_page_ops(per_page_peak_mb=peak_mb)
+        shard_count = min(cpu_budget, mem_budget, run_pages)
+        if run_pages < _MIN_PAGES_FOR_SHARDING or shard_count <= 1:
+            # Single-shot fast path: one invocation for the whole range.
+            self._run_range(
+                sandbox_pdf=sandbox_pdf, out_dir=out_dir, dpi=dpi,
+                first=first, last=last, pdf_parent=pdf_parent,
+                page_sizes_mm=page_sizes_mm, budget_px=budget_px,
+            )
+        else:
+            # Even split; last shard absorbs the remainder.
+            per_shard = run_pages // shard_count
+            ranges: list[tuple[int, int]] = []
+            for i in range(shard_count):
+                shard_first = first + i * per_shard
+                shard_last = last if i == shard_count - 1 else first + (i + 1) * per_shard - 1
+                ranges.append((shard_first, shard_last))
+
+            errors: list[Exception] = []
+            with ThreadPoolExecutor(max_workers=shard_count) as ex:
+                futures = [
+                    ex.submit(
+                        self._run_range,
+                        sandbox_pdf=sandbox_pdf, out_dir=out_dir, dpi=dpi,
+                        first=shard_first, last=shard_last, pdf_parent=pdf_parent,
+                        page_sizes_mm=page_sizes_mm, budget_px=budget_px,
+                    )
+                    for shard_first, shard_last in ranges
+                ]
+                for fut in as_completed(futures):
+                    try:
+                        fut.result()
+                    except Exception as e:
+                        errors.append(e)
+            if errors:
+                raise errors[0]
+
     def _run_range(
         self,
         *,
@@ -169,9 +265,13 @@ class ShardingRasterizer(ABC):
         exceed ``budget_px`` pixels — so an oversized sheet renders (downscaled)
         instead of OOM-wedging a memory-capped guest. Per-range: a shard whose
         pages all fit the budget keeps full resolution; only shards containing an
-        oversized page downscale. (Two cases still clamp the whole doc: a
-        <4-page doc, which never shards, and a shard the even-split happens to
-        put an oversized page into alongside normal ones.)"""
+        oversized page downscale.
+
+        The caller splits pages into runs of equal clamped dpi before sharding
+        (`_dpi_runs`), so an oversized page no longer shares an invocation with
+        pages that fit -- which used to clamp a <4-page document entirely, and
+        take whichever ordinary pages the even split put in the giant's shard
+        down with it."""
         range_sizes = (
             page_sizes_mm[first - 1:last] if page_sizes_mm else None
         )
@@ -254,57 +354,22 @@ class ShardingRasterizer(ABC):
         #     concurrently — otherwise a pathological spreadsheet
         #     render (one page can be 150MB+ uncompressed) can OOM
         #     the worker's cgroup.
-        cpus = os.cpu_count() or 2
-        cpu_budget = max(1, cpus // 2)
-        # Size-aware memory budget: a page rendered from an oversized mediabox (e.g. a
-        # 14400pt SinglePageSheets sheet → ~30000px → ~2.7 GB RGBA) costs far more than the
-        # 200 MB/page heuristic, so derive the peak from the ACTUAL largest page and let it
-        # collapse the shard count to 1 — N concurrent multi-GB renders would otherwise exhaust
-        # a host without a per-worker memory cgroup (the gVisor warm tier).
-        # Per-page pixel budget: caps the SIZE of any one render (DPI-clamped in
-        # _run_range) so a single oversized page can't OOM the guest.
+        # Split on the CLAMPED dpi first, then shard within each run. The
+        # budget is per PAGE but the dpi decision is per INVOCATION, so an
+        # oversized page used to take every page sharing its invocation down to
+        # its own reduced dpi. A document whose pages clamp alike -- nearly all
+        # of them -- yields one run and the identical work as before.
         budget_px = max_page_px()
-        # Size the concurrency budget on the CLAMPED peak (cap_px=budget_px): an
-        # oversized page renders at <= budget_px, so it must NOT collapse
-        # shard_count to 1 — that would force the single-shot path and clamp the
-        # WHOLE doc's DPI instead of only the oversized page's shard.
-        peak_mb = _max_page_peak_mb(page_sizes_mm, dpi, cap_px=budget_px)
-        mem_budget = max_concurrent_page_ops(per_page_peak_mb=peak_mb)
-        shard_count = min(cpu_budget, mem_budget, max_pages)
-        if max_pages < _MIN_PAGES_FOR_SHARDING or shard_count <= 1:
-            # Single-shot fast path: one invocation for the whole range.
-            self._run_range(
+        runs = _dpi_runs(page_sizes_mm, dpi, budget_px) or [(1, max_pages)]
+        for run_first, run_last in runs:
+            if run_first > max_pages:
+                break
+            self._render_page_run(
                 sandbox_pdf=sandbox_pdf, out_dir=out_dir, dpi=dpi,
-                first=1, last=max_pages, pdf_parent=pdf_path.parent,
-                page_sizes_mm=page_sizes_mm, budget_px=budget_px,
+                first=run_first, last=min(run_last, max_pages),
+                pdf_parent=pdf_path.parent, page_sizes_mm=page_sizes_mm,
+                budget_px=budget_px,
             )
-        else:
-            # Even split; last shard absorbs the remainder.
-            per_shard = max_pages // shard_count
-            ranges: list[tuple[int, int]] = []
-            for i in range(shard_count):
-                first = i * per_shard + 1
-                last = max_pages if i == shard_count - 1 else (i + 1) * per_shard
-                ranges.append((first, last))
-
-            errors: list[Exception] = []
-            with ThreadPoolExecutor(max_workers=shard_count) as ex:
-                futures = [
-                    ex.submit(
-                        self._run_range,
-                        sandbox_pdf=sandbox_pdf, out_dir=out_dir, dpi=dpi,
-                        first=first, last=last, pdf_parent=pdf_path.parent,
-                        page_sizes_mm=page_sizes_mm, budget_px=budget_px,
-                    )
-                    for first, last in ranges
-                ]
-                for fut in as_completed(futures):
-                    try:
-                        fut.result()
-                    except Exception as e:
-                        errors.append(e)
-            if errors:
-                raise errors[0]
 
         # Engines write page-1.png / page-01.png / ... (zero-padding varies by
         # engine and page count). Ignore derivative files like
