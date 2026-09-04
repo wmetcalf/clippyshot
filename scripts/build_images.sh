@@ -139,7 +139,11 @@ BB_HAVE="$(blastbox version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -1
   echo "rootfs: 0.1.35 refuses to rebuild an artifact someone had grown," >&2
   echo "and versions before 0.1.38 can leak secret build args into failure" >&2
   echo "output and be hung by a FIFO planted at the publish lock path." >&2
-  echo "Before 0.1.39, `docker build -t` moved the LIVE fleet tag as soon as" >&2
+  # ESCAPED. Inside a double-quoted string bash reads backticks as command
+  # substitution, so this line RAN `docker build -t` while composing a
+  # refusal -- printing an unrelated docker error, or `command not found`,
+  # and dropping the command text out of the explanation entirely.
+  echo "Before 0.1.39, \`docker build -t\` moved the LIVE fleet tag as soon as" >&2
   echo "one image succeeded -- so a worker could pull an image nothing had" >&2
   echo "verified, and a mid-chain failure left the tags on a mixture of two" >&2
   echo "builds. Its published children also recorded a base reference the" >&2
