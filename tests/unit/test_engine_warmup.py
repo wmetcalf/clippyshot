@@ -1,6 +1,8 @@
 """Tests for ClippyShotEngine.warmup() — the warm-tier server seam."""
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from clippyshot.engine import ClippyShotEngine
@@ -195,6 +197,17 @@ def test_warm_ocr_starts_when_enabled(monkeypatch):
     monkeypatch.setenv("CLIPPYSHOT_WARM_OCR", "1")
     monkeypatch.delenv("CLIPPYSHOT_WARM_UNO", raising=False)
     monkeypatch.delenv("CLIPPYSHOT_OCR_ENGINE", raising=False)
+
+    # Pin the backend. Warm OCR is declined where each scanner call is
+    # sandboxed (nsjail/bwrap), so leaving this to whatever the DEVELOPER's
+    # machine happens to select made the outcome depend on the host rather
+    # than on the behaviour under test.
+    class _ContainerTier:
+        name = "container"
+
+    monkeypatch.setattr(
+        "clippyshot.sandbox.detect.select_sandbox", lambda **kw: _ContainerTier()
+    )
     started = []
 
     class FakeWarm:
@@ -322,3 +335,101 @@ def test_detonate_maps_detection_error_to_rejected(tmp_path):
     assert res.artifacts == []
     assert any(w.code == "rejected" for w in res.warnings)
     assert "unsupported_type" in res.warnings[0].message
+
+
+@pytest.mark.parametrize("backend", ["nsjail", "bwrap"])
+def test_warm_ocr_declines_where_each_scanner_call_is_sandboxed(monkeypatch, backend):
+    """The cold path wraps every `tesseract` call; the warm helper is outside it.
+
+    Enabling warm OCR there would hand the untrusted PNG to an UNSANDBOXED
+    image parser while the cold path beside it is careful not to.
+    `_maybe_start_cold_ocr_helper` already declines for this reason.
+    """
+    from clippyshot.engine import ClippyShotEngine
+
+    monkeypatch.setenv("CLIPPYSHOT_WARM_OCR", "1")
+    monkeypatch.delenv("CLIPPYSHOT_OCR_ENGINE", raising=False)
+
+    class Fake:
+        name = backend
+
+    monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", lambda **kw: Fake())
+    started = []
+    monkeypatch.setattr(
+        "clippyshot.ocr_warm.WarmOCR", lambda *a, **k: started.append(True)
+    )
+
+    engine = ClippyShotEngine()
+    engine._warmup_ocr()
+    assert started == [], f"{backend} sandboxes each call; the warm helper must not start"
+    assert engine._ocr_server is None
+
+
+def test_warm_ocr_still_starts_where_the_worker_itself_is_the_boundary(monkeypatch):
+    """A container/guest tier has no per-call sandbox to bypass.
+
+    Keyed on the two per-call backends rather than on "is it a container", so a
+    warm FC/gVisor guest keeps the warm tier this feature exists for.
+    """
+    from clippyshot.engine import ClippyShotEngine
+
+    monkeypatch.setenv("CLIPPYSHOT_WARM_OCR", "1")
+    monkeypatch.delenv("CLIPPYSHOT_OCR_ENGINE", raising=False)
+
+    class Fake:
+        name = "container"
+
+    started = []
+
+    class FakeWarm:
+        def start(self):
+            started.append(True)
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", lambda **kw: Fake())
+    monkeypatch.setattr("clippyshot.ocr_warm.WarmOCR", lambda *a, **k: FakeWarm())
+
+    engine = ClippyShotEngine()
+    engine._warmup_ocr()
+    assert started == [True], "a container tier must keep its warm helper"
+    assert engine._ocr_server is not None
+
+
+def test_warm_ocr_survives_an_unresolvable_sandbox(monkeypatch, caplog):
+    """A warm guest need not resolve a backend at all.
+
+    With no nsjail/bwrap and no container marker, selection RAISES -- and that
+    is the shape a warm FC/gVisor guest takes, so declining on it would disable
+    the warm tier this feature exists for. Left open and logged: the scanners
+    fail on their own in that state, so refusing here protects nothing.
+    """
+    from clippyshot.errors import SandboxUnavailable
+    from clippyshot.engine import ClippyShotEngine
+
+    monkeypatch.setenv("CLIPPYSHOT_WARM_OCR", "1")
+    monkeypatch.delenv("CLIPPYSHOT_OCR_ENGINE", raising=False)
+
+    def _refuse(**kw):
+        raise SandboxUnavailable("no backend on this host")
+
+    started = []
+
+    class FakeWarm:
+        def start(self):
+            started.append(True)
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", _refuse)
+    monkeypatch.setattr("clippyshot.ocr_warm.WarmOCR", lambda *a, **k: FakeWarm())
+
+    engine = ClippyShotEngine()
+    with caplog.at_level(logging.WARNING, logger="clippyshot.engine"):
+        engine._warmup_ocr()
+    assert started == [True], "an unresolvable backend must not disable the warm tier"
+    assert any("could not determine the sandbox" in r.message for r in caplog.records), (
+        "the ambiguity must be logged, not silent"
+    )
