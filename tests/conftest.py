@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -27,33 +28,33 @@ needs_soffice = pytest.mark.skipif(not _have("soffice"), reason="LibreOffice not
 needs_pdftoppm = pytest.mark.skipif(not _have("pdftoppm"), reason="poppler-utils not installed")
 
 
-def _sandbox_smoketest_passes(backend: str) -> bool:
-    """Whether THIS host can run the sandbox we actually ship.
+def _host_allows_userns(argv: list[str]) -> bool:
+    """Whether THIS HOST permits the unprivileged user namespace these need.
 
-    Asks the backend itself rather than a hand-written approximation of it. The
-    approximation drifted: the nsjail probe bind-mounted only `/usr`, so on any
-    merged-usr distro -- Ubuntu 24.04, which is the fleet -- the loader at
-    /lib64 was missing inside the jail and NOTHING dynamically linked could
-    exec. That is `execve: No such file or directory`, which the probe reported
-    as "cannot create user namespaces", telling operators to load an AppArmor
-    profile that would not have helped. Four nsjail tests skipped on every such
-    host, i.e. everywhere, while the real backend -- which recreates those
-    symlinks inside the jail -- worked fine.
+    Deliberately NOT our backend's own smoketest: gating a backend's tests on
+    that backend working makes a regression skip the very tests meant to catch
+    it, so a broken mount or seccomp argument would read as "unsupported host".
+    This asks the external tool to do the one thing the host can forbid --
+    create a userns and exec -- with the whole root bound read-only.
+
+    The root bind matters: the previous probe mounted only `/usr`, so on a
+    merged-usr distro the loader at /lib64 was missing inside the jail and
+    NOTHING could exec. That is a probe bug, and it read as a host limitation.
     """
-    if not _have(backend):
-        return False
     try:
-        if backend == "bwrap":
-            from clippyshot.sandbox.bwrap import BwrapSandbox as Sandbox
-        else:
-            from clippyshot.sandbox.nsjail import NsjailSandbox as Sandbox
-        return Sandbox().smoketest().exit_code == 0
-    except Exception:  # noqa: BLE001 - any failure means "cannot run here"
+        proc = subprocess.run(argv, capture_output=True, timeout=10)
+        return proc.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return False
 
 
 def _bwrap_can_create_userns() -> bool:
-    return _sandbox_smoketest_passes("bwrap")
+    if not _have("bwrap"):
+        return False
+    return _host_allows_userns(
+        ["bwrap", "--unshare-user", "--die-with-parent", "--ro-bind", "/", "/",
+         "--", "/bin/true"]
+    )
 
 
 _BWRAP_USERNS_REASON = (
@@ -68,7 +69,13 @@ needs_bwrap_userns = pytest.mark.skipif(
 
 
 def _nsjail_can_create_userns() -> bool:
-    return _sandbox_smoketest_passes("nsjail")
+    if not _have("nsjail"):
+        return False
+    return _host_allows_userns(
+        ["nsjail", "--mode", "o", "--quiet", "--really_quiet", "--disable_proc",
+         "--iface_no_lo", "--user", "65534", "--group", "65534",
+         "--bindmount_ro", "/:/", "--", "/bin/true"]
+    )
 
 
 _NSJAIL_USERNS_REASON = (

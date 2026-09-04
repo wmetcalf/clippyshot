@@ -1,3 +1,4 @@
+import pytest
 from pathlib import Path
 
 
@@ -117,3 +118,34 @@ def test_nsjail_skips_proc_apparmor_when_binary_does_not_support_it():
     argv = sb._build_argv(SandboxRequest(argv=["/bin/true"], limits=Limits()))  # noqa: SLF001
 
     assert "--proc_apparmor" not in argv
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "stderr", "elapsed_s", "timeout_s", "expected", "why"),
+    [
+        (109, b"", 0.01, 30.0, True, "109 is nsjail saying it enforced the limit"),
+        (1, b"time >= 5", 0.5, 30.0, True, "the stderr marker says so outright"),
+        (137, b"", 1.007, 1.0, True, "SIGKILL at the deadline (measured shape)"),
+        (143, b"", 5.0, 5.0, True, "SIGTERM at the deadline"),
+        (137, b"", 0.02, 30.0, False, "SIGKILL nowhere near the deadline: an OOM kill"),
+        (143, b"", 0.10, 60.0, False, "SIGTERM nowhere near the deadline"),
+        (139, b"", 5.0, 5.0, False, "SIGSEGV is the command crashing, not a deadline"),
+        (1, b"", 5.0, 5.0, False, "an ordinary non-zero exit is not a kill"),
+        (0, b"", 5.0, 5.0, False, "success is not a kill"),
+    ],
+)
+def test_only_a_deadline_kill_is_reported_as_killed(
+    exit_code, stderr, elapsed_s, timeout_s, expected, why
+):
+    """`killed` is read as "timed out" downstream.
+
+    LibreOfficeRunner treats it that way and the UI renders it as a timeout, so
+    reporting every signal death as a kill would misdiagnose memory exhaustion
+    as a deadline -- while recognising only 109 (as this once did) misses the
+    137 the worker image's nsjail actually returns.
+    """
+    from clippyshot.sandbox.nsjail import _is_deadline_kill
+
+    assert _is_deadline_kill(
+        exit_code, stderr, elapsed_s=elapsed_s, timeout_s=timeout_s
+    ) is expected, why

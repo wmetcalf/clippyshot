@@ -66,6 +66,39 @@ _USR_SYMLINKS = {
 }
 
 
+def _is_deadline_kill(
+    exit_code: int, stderr: bytes, *, elapsed_s: float, timeout_s: float
+) -> bool:
+    """Whether nsjail stopped the child for exceeding its deadline.
+
+    `killed` is read as "timed out" -- `LibreOfficeRunner` treats it that way
+    and the UI renders it as a timeout -- so this must not fire for every death
+    by signal. Three kinds of evidence, and they are not equal:
+
+    * 109, and the stderr markers, are nsjail SAYING it enforced the limit.
+      Unambiguous, so they stand alone.
+    * 137 / 143 are only "died by SIGKILL / SIGTERM", which an OOM kill or a
+      child killing itself produces just as well. Reporting those as timeouts
+      would misdiagnose memory exhaustion as a deadline, so they count only
+      when the run actually REACHED the deadline.
+
+    Other signal deaths never count: a SIGSEGV (139) is the command crashing,
+    not the sandbox stopping it. The version spread is real -- the nsjail in
+    the worker image returns 137 where this code once assumed only 109.
+    """
+    if exit_code == 109:
+        return True
+    if exit_code != 0 and (
+        b"time >=" in stderr or b"timed out" in stderr.lower()
+    ):
+        return True
+    if exit_code in (128 + signal.SIGKILL, 128 + signal.SIGTERM):
+        # A small tolerance: the deadline fires at the limit, and the measured
+        # elapsed time straddles it (1007 ms against a 1 s limit, measured).
+        return elapsed_s + 0.05 >= timeout_s
+    return False
+
+
 class NsjailSandbox:
     name = "nsjail"
 
@@ -172,11 +205,12 @@ class NsjailSandbox:
         # failed" got the wrong answer -- and with --quiet there is no stderr to
         # fall back on. Signal deaths other than KILL/TERM stay unkilled: a
         # SIGSEGV (139) is the command crashing, not the sandbox stopping it.
-        _KILLED_EXITS = (109, 128 + signal.SIGKILL, 128 + signal.SIGTERM)
-        if exit_code in _KILLED_EXITS or (exit_code != 0 and (
-            b"time >=" in (stderr or b"") or b"timed out" in (stderr or b"").lower()
-        )):
-            killed = True
+        if not killed:
+            killed = _is_deadline_kill(
+                exit_code, stderr or b"",
+                elapsed_s=time.monotonic() - start,
+                timeout_s=float(request.limits.timeout_s),
+            )
 
         duration_ms = int((time.monotonic() - start) * 1000)
         return SandboxResult(
