@@ -1,0 +1,61 @@
+# ClippyShot's image chain, declared once.
+#
+# Before this file there was no build path at all: the chain lived in
+# blastbox's deploy/redeploy-warm.sh as a block of preset variables, and
+# rebuilding meant reading that script to find out what built what. Two of the
+# four Dockerfiles live in blastbox rather than here, which is exactly the kind
+# of thing nobody remembers a year later.
+#
+# Build and export with:
+#   BLASTBOX_SRC=<blastbox source tree> blastbox build-images . --tag <tag>
+# Add --dry-run to see exactly what it would do and touch nothing.
+
+[engine]
+name = "clippyshot"
+
+# The one image built from THIS repo. Everything else is layered on it.
+[[image]]
+name = "clippyshot"
+dockerfile = "deploy/docker/Dockerfile"
+base = "ubuntu:24.04"
+
+# Built from blastbox's tree, and stamped with THAT tree's revision -- ours
+# would name a commit that does not contain the file which built them.
+[[image]]
+name = "clippyshot-cold-worker"
+dockerfile = "deploy/docker/Dockerfile.clippyshot-cold-worker"
+base = "clippyshot"
+context = "$BLASTBOX_SRC"
+
+# NOTE THE ARG NAME. This one is `BASE`, not `BASE_IMAGE`, because it is the
+# shared gVisor shim rather than an engine-specific file. docker silently
+# ignores a --build-arg the Dockerfile does not declare, so getting this wrong
+# pins nothing and stamps a digest the build never used; `blastbox build-images`
+# refuses rather than building that.
+[[image]]
+name = "clippyshot-warm-gvisor"
+dockerfile = "deploy/gvisor/Dockerfile.shim"
+base = "clippyshot"
+base_arg = "BASE"
+context = "$BLASTBOX_SRC"
+
+[[image]]
+name = "clippyshot-fc-worker"
+dockerfile = "deploy/firecracker/Dockerfile.clippyshot"
+base = "clippyshot"
+context = "$BLASTBOX_SRC"
+
+[[rootfs]]
+kind = "dir"
+image = "clippyshot-warm-gvisor"
+dest = "${CLIPPYSHOT_GVISOR_DIR:-/home/coz/clippyshot-gvisor}/rootfs"
+
+[[rootfs]]
+kind = "ext4"
+image = "clippyshot-fc-worker"
+dest = "${CLIPPYSHOT_FC_DIR:-/home/coz/clippyshot-fc}/rootfs.ext4"
+# 7000 MiB: this engine carries LibreOffice and a tesseract data set, so it is
+# several times the size of the other two engines' rootfs.
+size_mib = 7000
+# The guest boots /init, which execs run_guest.py against a baked guest.env.
+requires = ["/init", "/opt/blastbox/guest.env"]
