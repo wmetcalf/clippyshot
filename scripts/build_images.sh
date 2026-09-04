@@ -21,7 +21,7 @@ set -euo pipefail
 # Declared ONCE, above the first message that mentions it. Written out by hand
 # in two places, this drifted before: the script told an operator to install a
 # version it then rejected.
-BB_MIN=0.1.35
+BB_MIN=0.1.38
 
 TAG="${1:?usage: build_images.sh <tag> [blastbox-version] [--dry-run]}"
 shift
@@ -55,7 +55,10 @@ BB_HAVE="$(blastbox version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -1
 # segment, so a source build of the minimum counts as meeting it.
 [ "$(printf '%s\n%s\n' "$BB_MIN" "$BB_HAVE" | sort -V | head -1)" = "$BB_MIN" ] || {
   echo "blastbox $BB_HAVE is too old; need >= $BB_MIN." >&2
-  echo "Earlier versions have \`build-images\` but only validate the plan." >&2
+  echo "Earlier versions have defects on the path that REPLACES a live" >&2
+  echo "rootfs: 0.1.35 refuses to rebuild an artifact someone had grown," >&2
+  echo "and versions before 0.1.38 can leak secret build args into failure" >&2
+  echo "output and be hung by a FIFO planted at the publish lock path." >&2
   echo "  pip install --upgrade 'blastbox>=$BB_MIN'" >&2
   exit 2
 }
