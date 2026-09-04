@@ -262,3 +262,37 @@ def test_a_call_whose_budget_expired_while_queued_is_refused():
             Path("/x/page-001.png"), lang="eng", psm=3,
             timeout_s=60, deadline=time.monotonic() - 0.01,
         )
+
+
+def test_the_helper_caches_a_bounded_number_of_language_apis():
+    """`lang` and `psm` are job-controlled, and the image ships every language.
+
+    An unbounded cache let a long-lived warm slot accumulate one loaded model
+    per distinct pair until it exhausted the slot's memory.
+    """
+    import clippyshot.ocr_warm as ow
+
+    ended = []
+
+    class FakeAPI:
+        def __init__(self, **kw):
+            self.kw = kw
+
+        def SetVariable(self, *a):
+            pass
+
+        def End(self):
+            ended.append(self.kw.get("lang"))
+
+    api_for = ow._build_api_cache(lambda **kw: FakeAPI(**kw), tessdata=None)
+
+    for lang in ("eng", "deu", "fra", "spa", "ita", "por"):
+        api_for(lang, 3)
+    assert ended == ["eng", "deu"], f"the two oldest must be End()ed, got {ended}"
+
+    # A repeat use is a cache HIT and refreshes recency: it must not be evicted
+    # next, and must not construct a second API for the same pair.
+    before = api_for("fra", 3)
+    assert api_for("fra", 3) is before, "a cached pair must be reused, not rebuilt"
+    api_for("nld", 3)
+    assert "fra" not in ended, "the recently used entry must survive eviction"

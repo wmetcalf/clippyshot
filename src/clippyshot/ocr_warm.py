@@ -24,6 +24,7 @@ the sandboxed CLI enforces.
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 import os
 import queue
 import subprocess
@@ -41,6 +42,10 @@ from clippyshot.ocr import (
     OCRResult,
     validate_lang,
 )
+
+# How many (lang, psm) tesseract APIs one helper keeps loaded. Each holds a
+# language model; four covers realistic per-job variation without unbounded growth.
+MAX_CACHED_APIS = 4
 
 
 class WarmOCR:
@@ -204,6 +209,42 @@ class WarmOCR:
             pass
 
 
+def _build_api_cache(make_api, tessdata):
+    """A BOUNDED, least-recently-used `(lang, psm) -> API` cache.
+
+    `lang` and `psm` are job-controlled through the fleet's parameter allowlist
+    and the image installs `tesseract-ocr-all`, so an unbounded cache let a
+    long-lived warm slot accumulate one loaded model per distinct pair until it
+    exhausted the slot's memory. Evicted APIs are End()ed so tesseract frees the
+    model rather than leaving it to the GC.
+
+    Takes its constructor so the policy can be tested without tesserocr.
+    """
+    apis: OrderedDict = OrderedDict()
+
+    def api_for(lang: str, psm: int):
+        key = (lang, psm)
+        if key in apis:
+            apis.move_to_end(key)
+            return apis[key]
+        kw = {"lang": lang, "psm": psm}
+        if tessdata is not None:
+            kw["path"] = tessdata
+        api = make_api(**kw)
+        # Match the CLI path's --dpi 150 (DEFAULT_DPI in clippyshot.ocr).
+        api.SetVariable("user_defined_dpi", "150")
+        apis[key] = api
+        while len(apis) > MAX_CACHED_APIS:
+            _, evicted = apis.popitem(last=False)
+            try:
+                evicted.End()
+            except Exception:  # noqa: BLE001 - eviction must never fail a job
+                pass
+        return apis[key]
+
+    return api_for
+
+
 def _serve() -> None:  # pragma: no cover - runs in the helper subprocess
     """Helper-subprocess loop: load tesserocr once per (lang, psm), then serve
     one page per stdin request. A per-request failure is non-fatal (returns an
@@ -230,19 +271,7 @@ def _serve() -> None:  # pragma: no cover - runs in the helper subprocess
         return None  # let tesserocr use its default (errors if no models)
 
     tessdata = _tessdata_dir()
-    apis: dict[tuple[str, int], PyTessBaseAPI] = {}
-
-    def api_for(lang: str, psm: int) -> PyTessBaseAPI:
-        key = (lang, psm)
-        if key not in apis:
-            kw = {"lang": lang, "psm": psm}
-            if tessdata is not None:
-                kw["path"] = tessdata
-            api = PyTessBaseAPI(**kw)
-            # Match the CLI path's --dpi 150 (DEFAULT_DPI in clippyshot.ocr).
-            api.SetVariable("user_defined_dpi", "150")
-            apis[key] = api
-        return apis[key]
+    api_for = _build_api_cache(PyTessBaseAPI, tessdata)
 
     sys.stdout.write(json.dumps({"ready": True}) + "\n")
     sys.stdout.flush()
