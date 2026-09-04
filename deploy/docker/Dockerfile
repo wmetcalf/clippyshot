@@ -155,9 +155,16 @@ RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin clippy \
 WORKDIR /tmp/build
 COPY pyproject.toml /tmp/build/pyproject.toml
 COPY src /tmp/build/src
+# The blastbox version this image INSTALLS. Without it, `clippyshot[host]`
+# resolves the >= floor to whatever is newest on PyPI at build time, so the
+# provenance label names one version while the venv holds another -- the
+# label/contents disagreement `blastbox doctor` exists to catch. Caught for
+# real on toolz2: the stamp said 0.1.34 and the image contained 0.1.35.
+# Keep the default in sync with the floor in pyproject.toml.
+ARG BLASTBOX_VERSION=0.1.35
 RUN python3 -m venv /opt/clippyshot \
     && /opt/clippyshot/bin/pip install --upgrade pip \
-    && /opt/clippyshot/bin/pip install '/tmp/build[host]' 'blastbox[s3]' \
+    && /opt/clippyshot/bin/pip install '/tmp/build[host]' "blastbox[s3]==${BLASTBOX_VERSION}" \
     && rm -rf /tmp/build
 
 ENV PATH=/opt/clippyshot/bin:$PATH

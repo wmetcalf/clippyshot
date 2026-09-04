@@ -155,3 +155,40 @@ def test_the_rootfs_defaults_match_what_compose_mounts() -> None:
         assert base in mounts, (
             f"{rf.kind} rootfs defaults to {default!r}, which no compose file mounts"
         )
+
+
+def test_the_image_installs_the_blastbox_version_it_is_stamped_with() -> None:
+    """Unpinned, `pip install 'blastbox[s3]'` takes whatever is newest on PyPI
+    at build time while the stamp records the pyproject floor. The two drift the
+    moment a release lands, and the image then carries a provenance label that
+    is simply false.
+
+    Caught for real on toolz2 by the export's `verify_contents` check:
+    `clippyshot-cold-worker: label says 0.1.34, image contains 0.1.35`.
+    """
+    text = (ROOT / "deploy" / "docker" / "Dockerfile").read_text(encoding="utf-8")
+    assert 'blastbox[s3]==${BLASTBOX_VERSION}' in text, (
+        "the blastbox install is not pinned to the stamped version"
+    )
+    spec = next(i for i in PLAN.images if i.name == "clippyshot")
+    assert spec.build_args.get("BLASTBOX_VERSION") == "$BLASTBOX_VERSION", (
+        "the plan does not pass the version the Dockerfile pins on"
+    )
+
+
+def test_the_dockerfile_default_matches_the_pyproject_pin() -> None:
+    """A default that drifts produces the same lie one level down: a plain
+    `docker build` installs one version while the label names another."""
+    m = re.search(
+        r"^ARG BLASTBOX_VERSION=(\S+)",
+        (ROOT / "deploy" / "docker" / "Dockerfile").read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    assert m, "the Dockerfile no longer defaults ARG BLASTBOX_VERSION"
+    pins = set(
+        re.findall(
+            r"blastbox(?:\[[^\]]*\])?>=(\d+\.\d+\.\d+)",
+            (ROOT / "pyproject.toml").read_text(encoding="utf-8"),
+        )
+    )
+    assert pins == {m.group(1)}, f"Dockerfile defaults {m.group(1)}, pyproject pins {sorted(pins)}"

@@ -18,6 +18,9 @@ name = "clippyshot"
 name = "clippyshot"
 dockerfile = "deploy/docker/Dockerfile"
 base = "ubuntu:24.04"
+# Not a literal: a second copy of the pyproject pin would drift from it, and
+# the image would then install a version its own stamp does not name.
+build_args = { BLASTBOX_VERSION = "$BLASTBOX_VERSION" }
 
 # Built from blastbox's tree, and stamped with THAT tree's revision -- ours
 # would name a commit that does not contain the file which built them.
