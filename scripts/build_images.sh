@@ -23,6 +23,79 @@ set -euo pipefail
 # version it then rejected.
 BB_MIN=0.1.38
 
+# One check for EVERY way a version can arrive: the legacy bare argument and
+# the `--blastbox-version V` / `--blastbox-version=V` option, which is
+# forwarded verbatim in "$@". Gating only the bare form left the floor
+# bypassable on the live-rootfs build path -- and this script constructs the
+# option form itself, so it is not a hypothetical spelling.
+require_floor() {  # <version>
+  # PEP 440 semantics, not `sort -V`. They disagree exactly where it matters:
+  # `0.1.38rc1` is BELOW `0.1.38` for pip, and `sort -V` puts it above -- so a
+  # release candidate of the floor version, which predates the fixes the floor
+  # exists for, would sail straight through. `v0.1.35` is the same trap from
+  # the other side: pip normalizes away the `v`, `sort -V` does not.
+  local want="$1" bb_py rc cand plain
+  # Pick an interpreter that can actually DO the comparison, rather than
+  # trusting one. Parsing blastbox's shebang is not enough on its own: a
+  # console script written `#!/usr/bin/env python3` yields `/usr/bin/env`,
+  # which then "runs" and fails, and the fallback silently applied the weaker
+  # `sort -V` rules -- exactly the outcome this function exists to avoid.
+  bb_py=""
+  for cand in "$(head -1 "$(command -v blastbox)" | sed 's/^#!//; s/ .*//')" python3 python; do
+    if command -v "$cand" >/dev/null 2>&1 &&
+       "$cand" -c 'import packaging.version' >/dev/null 2>&1; then
+      bb_py="$cand"; break
+    fi
+  done
+  # An absent interpreter is not a verdict: keep it distinct from a real
+  # "below the floor" answer, or every version -- including ones well above
+  # the floor -- gets refused on a host without packaging installed.
+  if [ -z "$bb_py" ]; then
+    rc=127
+  elif "$bb_py" -c 'import sys
+from packaging.version import InvalidVersion, Version
+try:
+    floor, want = Version(sys.argv[1]), Version(sys.argv[2])
+except InvalidVersion:
+    sys.exit(3)
+sys.exit(0 if want >= floor else 1)' "$BB_MIN" "$want" 2>/dev/null
+  then
+    return 0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -eq 1 ]; then
+    echo "refusing to build with blastbox $want: below the floor of $BB_MIN." >&2
+    echo "That version has defects on the path that replaces a live rootfs." >&2
+    exit 2
+  fi
+  if [ "$rc" -eq 3 ]; then
+    echo "refusing to build with blastbox $want: not a PEP 440 version." >&2
+    exit 2
+  fi
+  # Any other status means the comparison could not RUN. Fall back to sort -V
+  # and say so, rather than silently applying weaker rules.
+  echo "note: comparing $want against $BB_MIN with sort -V; PEP 440 was" >&2
+  echo "unavailable, so pre-releases cannot be ranked." >&2
+  # `sort -V` only ranks plain releases the way pip does. Rather than guess at
+  # a spelling it cannot order -- `v0.1.35`, `0.1.38rc1`, `0.1.38.post1` -- the
+  # fallback refuses, so the weaker path cannot be used to slip past the floor.
+  plain="${want#[vV]}"
+  case "$plain" in
+    ""|*[!0-9.]*|*..*|.*|*.) plain="" ;;
+  esac
+  if [ -z "$plain" ]; then
+    echo "refusing to build with blastbox $want: cannot rank that spelling" >&2
+    echo "without PEP 440. Install \`packaging\` in blastbox's environment," >&2
+    echo "or pass a plain release version such as $BB_MIN." >&2
+    exit 2
+  fi
+  if [ "$(printf '%s\n%s\n' "$BB_MIN" "$plain" | sort -V | head -1)" != "$BB_MIN" ]; then
+    echo "refusing to build with blastbox $want: below the floor of $BB_MIN." >&2
+    exit 2
+  fi
+}
+
 TAG="${1:?usage: build_images.sh <tag> [blastbox-version] [--dry-run]}"
 shift
 REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -32,6 +105,13 @@ REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 # is passed straight through.
 version_arg=()
 if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+  # Checked against the SAME floor as the CLI. Only BB_HAVE was compared, so
+  # the documented `build_images.sh <tag> 0.1.35` form sailed through: it is
+  # forwarded as --blastbox-version, the cold worker installs with --no-deps
+  # (which never enforces this repo's pin), and the result is a stamped image
+  # carrying a blastbox below the floor -- or a stamp naming a version the
+  # image does not contain.
+  require_floor "$1"
   version_arg=(--blastbox-version "$1")
   shift
 fi
@@ -67,4 +147,14 @@ BB_HAVE="$(blastbox version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -1
 # array as unset under `set -u` and aborts. Bash 5 does not, so the test suite
 # here cannot tell the two apart -- that mutant survives, and the guard is kept
 # for the older shells rather than because a local test justifies it.
+# Any pass-through occurrence of the option, in either spelling.
+prev=""
+for a in "$@"; do
+  case "$a" in
+    --blastbox-version=*) require_floor "${a#--blastbox-version=}" ;;
+    *) [ "$prev" = "--blastbox-version" ] && require_floor "$a" ;;
+  esac
+  prev="$a"
+done
+
 exec blastbox build-images "$REPO" --tag "$TAG" ${version_arg[@]+"${version_arg[@]}"} "$@"
