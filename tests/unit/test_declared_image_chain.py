@@ -135,3 +135,23 @@ def test_the_floor_matches_what_pyproject_pins() -> None:
     assert set(pins) == {floor.group(1)}, (
         f"build_images.sh requires >= {floor.group(1)} but pyproject pins {sorted(set(pins))}"
     )
+
+
+def test_the_rootfs_defaults_match_what_compose_mounts() -> None:
+    """compose is what consumes these artifacts, so its defaults are the ones
+    that matter.
+
+    The first version of this spec took its defaults from blastbox's
+    redeploy-warm.sh (`/home/coz/...`), so an unset build wrote where nothing
+    reads — leaving both warm tiers on a stale rootfs while the build reported
+    success. The deployed .env sets both variables, so it only bit a default
+    build, which is exactly the one a newcomer runs.
+    """
+    compose = (ROOT / "deploy" / "docker").glob("docker-compose.*.yml")
+    mounts = "\n".join(f.read_text(encoding="utf-8") for f in compose)
+    for rf in PLAN.rootfs:
+        default = rf.resolved_dest({})  # nothing set: the default path
+        base = default.rsplit("/", 1)[0] if rf.kind == "ext4" else default[: -len("/rootfs")]
+        assert base in mounts, (
+            f"{rf.kind} rootfs defaults to {default!r}, which no compose file mounts"
+        )

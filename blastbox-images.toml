@@ -45,15 +45,19 @@ dockerfile = "deploy/firecracker/Dockerfile.clippyshot"
 base = "clippyshot"
 context = "$BLASTBOX_SRC"
 
+# The DEFAULTS match the compose files, which are what actually mount these.
+# They were taken from blastbox's redeploy-warm.sh, whose presets point at
+# /home/coz/... -- so an unset build wrote where nothing reads. The deployed
+# .env sets both variables, so in practice they agreed; a default build did not.
 [[rootfs]]
 kind = "dir"
 image = "clippyshot-warm-gvisor"
-dest = "${CLIPPYSHOT_GVISOR_DIR:-/home/coz/clippyshot-gvisor}/rootfs"
+dest = "${CLIPPYSHOT_GVISOR_DIR:-/var/lib/clippyshot-gvisor}/rootfs"
 
 [[rootfs]]
 kind = "ext4"
 image = "clippyshot-fc-worker"
-dest = "${CLIPPYSHOT_FC_DIR:-/home/coz/clippyshot-fc}/rootfs.ext4"
+dest = "${CLIPPYSHOT_FC_DIR:-/var/lib/clippyshot-fc}/rootfs.ext4"
 # 7000 MiB: this engine carries LibreOffice and a tesseract data set, so it is
 # several times the size of the other two engines' rootfs. Overridable, as the
 # script it replaces was -- a deployment that grew this deliberately must not be
