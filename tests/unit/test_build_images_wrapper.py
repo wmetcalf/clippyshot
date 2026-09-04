@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -43,10 +44,68 @@ def stub_cli(tmp_path: Path) -> Path:
 
 
 def _run(binpath: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    env = {**os.environ, "PATH": f"{binpath}:{os.environ['PATH']}"}
+    # Put the interpreter running these tests on PATH. The version floor needs a
+    # python that can `import packaging.version`; whichever `python3` happens to
+    # be first on the developer's or CI runner's PATH may not be one, and then
+    # the wrapper falls back to `sort -V` and the PEP 440 assertions below would
+    # be testing the fallback instead of the thing they name.
+    env = {
+        **os.environ,
+        "PATH": f"{binpath}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+    }
     return subprocess.run(
-        ["bash", str(SCRIPT), *args], capture_output=True, text=True, env=env, check=False
+        ["bash", str(SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
     )
+
+
+_MINIMAL_TOOLS = (
+    "bash",
+    "sh",
+    "sed",
+    "head",
+    "sort",
+    "printf",
+    "dirname",
+    "basename",
+    "realpath",
+    "mktemp",
+    "cat",
+    "rm",
+    "tr",
+    "grep",
+    "awk",
+    "uname",
+    "id",
+    "date",
+    "env",
+    "cut",
+    "mkdir",
+    "cp",
+    "mv",
+    "ln",
+    "chmod",
+    "find",
+    "tee",
+)
+
+
+def _minimal_bin(directory: Path) -> Path:
+    """A PATH with the usual shell tools but deliberately no capable python.
+
+    The version floor asks an interpreter to compare versions; these tests need
+    to control whether one is reachable without also breaking the rest of the
+    wrapper, which still needs ordinary coreutils.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    for tool in _MINIMAL_TOOLS:
+        src = shutil.which(tool)
+        if src and not (directory / tool).exists():
+            (directory / tool).symlink_to(src)
+    return directory
 
 
 def test_a_tag_alone_runs_without_an_unbound_variable(stub_cli: Path) -> None:
@@ -91,7 +150,7 @@ def test_an_old_blastbox_is_refused_with_the_reason(tmp_path: Path) -> None:
     stub = d / "blastbox"
     stub.write_text(
         '#!/usr/bin/env bash\nif [ "$1" = version ]; then echo "blastbox 0.1.33"; exit 0; fi\n'
-        'echo SHOULD-NOT-RUN\n'
+        "echo SHOULD-NOT-RUN\n"
     )
     stub.chmod(0o755)
     p = _run(d, "tagX")
@@ -125,7 +184,10 @@ def test_a_missing_cli_names_the_version_to_install(tmp_path: Path) -> None:
     bash = shutil.which("bash") or "/bin/bash"
     p = subprocess.run(
         [bash, str(SCRIPT), "tagX"],
-        capture_output=True, text=True, env={**os.environ, "PATH": str(empty)}, check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": str(empty)},
+        check=False,
     )
     assert p.returncode == 2
     assert BB_MIN in p.stderr, p.stderr
@@ -135,7 +197,9 @@ def test_a_missing_cli_names_the_version_to_install(tmp_path: Path) -> None:
 def test_the_old_export_script_refuses_and_points_at_the_new_one() -> None:
     p = subprocess.run(
         ["bash", str(REPO / "scripts" / "export_warm_rootfs.sh"), "tagX"],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert p.returncode == 2
     assert "build_images.sh" in p.stderr
@@ -147,7 +211,9 @@ def test_the_declaration_is_readable_and_covers_every_tier() -> None:
     plan = images.load_plan(REPO)
     names = {i.name for i in plan.images}
     assert {"clippyshot", "clippyshot-cold-worker"} <= names
-    assert {"clippyshot-warm-gvisor", "clippyshot-fc-worker"} <= names, "a warm tier is undeclared"
+    assert {"clippyshot-warm-gvisor", "clippyshot-fc-worker"} <= names, (
+        "a warm tier is undeclared"
+    )
     assert {r.kind for r in plan.rootfs} == {"dir", "ext4"}
     fc = next(r for r in plan.rootfs if r.kind == "ext4")
     assert "/init" in fc.requires, "nothing would notice a rootfs that cannot boot"
@@ -177,13 +243,15 @@ def test_an_explicit_version_at_the_floor_is_accepted(stub_cli: Path) -> None:
 @pytest.mark.parametrize(
     "form",
     [
-        ["0.1.35"],                          # the legacy bare argument
-        ["--blastbox-version", "0.1.35"],    # the option, space-separated
-        ["--blastbox-version=0.1.35"],       # the option, joined
+        ["0.1.35"],  # the legacy bare argument
+        ["--blastbox-version", "0.1.35"],  # the option, space-separated
+        ["--blastbox-version=0.1.35"],  # the option, joined
     ],
     ids=["bare", "option-space", "option-equals"],
 )
-def test_every_spelling_of_a_stale_version_is_refused(stub_cli: Path, form) -> None:
+def test_every_spelling_of_a_stale_version_is_refused(
+    stub_cli: Path, form: tuple[str, ...]
+) -> None:
     """Gating only the bare argument left the floor bypassable: the option form
     is forwarded verbatim in `"$@"` — and this script constructs that very
     spelling itself, so it is not a hypothetical."""
@@ -196,3 +264,66 @@ def test_the_option_form_at_the_floor_is_accepted(stub_cli: Path) -> None:
     p = _run(stub_cli, "tagX", f"--blastbox-version={BB_MIN}", "--dry-run")
     assert p.returncode == 0, p.stderr
     assert f"--blastbox-version={BB_MIN}" in p.stdout.split()
+
+
+def test_a_prerelease_of_the_floor_is_refused(stub_cli: Path) -> None:
+    """`sort -V` and PEP 440 disagree exactly where it matters: `0.1.38rc1` is
+    BELOW `0.1.38` for pip, and `sort -V` puts it above — so a release candidate
+    of the floor version, which predates the fixes the floor exists for, sailed
+    straight through."""
+    p = _run(stub_cli, "tagX", f"{BB_MIN}rc1")
+    assert p.returncode == 2, f"exit={p.returncode} out={p.stdout} err={p.stderr}"
+    assert "below the floor" in p.stderr
+
+
+def test_a_version_above_the_floor_is_accepted(stub_cli: Path) -> None:
+    p = _run(stub_cli, "tagX", "9.9.9", "--dry-run")
+    assert p.returncode == 0, p.stderr
+
+
+def test_without_a_pep440_capable_python_the_floor_still_refuses(
+    stub_cli: Path, tmp_path: Path
+) -> None:
+    """The fallback is weaker, not absent.
+
+    `sort -V` cannot rank pre-releases the way pip does, but it ranks plain
+    releases fine -- so a version plainly below the floor is still refused, and
+    the wrapper says on stderr that it downgraded the comparison.
+    """
+    empty = _minimal_bin(tmp_path / "nopython")
+    env = {**os.environ, "PATH": f"{stub_cli}:{empty}"}
+    p = subprocess.run(
+        ["bash", str(SCRIPT), "tagX", "0.0.1"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert p.returncode == 2, f"exit={p.returncode} out={p.stdout} err={p.stderr}"
+    assert "below the floor" in p.stderr
+    assert "sort -V" in p.stderr
+
+
+def test_a_python3_without_packaging_does_not_cause_a_false_refusal(
+    stub_cli: Path, tmp_path: Path
+) -> None:
+    """The floor asks an interpreter; it must check the answer is available.
+
+    A `python3` that cannot `import packaging.version` exits non-zero for the
+    same reason a below-floor comparison does. Reading that as a verdict refuses
+    every version, including ones well above the floor.
+    """
+    fake = _minimal_bin(tmp_path / "nopackaging")
+    stub = fake / "python3"
+    stub.write_text("#!/bin/sh\nexit 1\n")
+    stub.chmod(0o755)
+    env = {**os.environ, "PATH": f"{stub_cli}:{fake}"}
+    p = subprocess.run(
+        ["bash", str(SCRIPT), "tagX", "9.9.9", "--dry-run"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert p.returncode == 0, f"exit={p.returncode} out={p.stdout} err={p.stderr}"
+    assert "sort -V" in p.stderr

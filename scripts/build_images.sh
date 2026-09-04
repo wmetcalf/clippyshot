@@ -29,9 +29,52 @@ BB_MIN=0.1.38
 # bypassable on the live-rootfs build path -- and this script constructs the
 # option form itself, so it is not a hypothetical spelling.
 require_floor() {  # <version>
-  if [ "$(printf '%s\n%s\n' "$BB_MIN" "$1" | sort -V | head -1)" != "$BB_MIN" ]; then
-    echo "refusing to build with blastbox $1: below the floor of $BB_MIN." >&2
+  # PEP 440 semantics, not `sort -V`. They disagree exactly where it matters:
+  # `0.1.38rc1` is BELOW `0.1.38` for pip, and `sort -V` puts it above -- so a
+  # release candidate of the floor version, which predates the fixes the floor
+  # exists for, would sail straight through.
+  #
+  # Run with the interpreter that RUNS blastbox, not whatever `python3`
+  # resolves to: the console script's shebang points into blastbox's own
+  # environment, which is where `packaging` lives.
+  local want="$1" bb_py rc cand
+  # Pick an interpreter that can actually DO the comparison, rather than
+  # trusting one. Parsing blastbox's shebang is not enough on its own: a
+  # console script written `#!/usr/bin/env python3` yields `/usr/bin/env`,
+  # which then "runs" and fails, and the fallback silently applied the weaker
+  # `sort -V` rules -- exactly the outcome this function exists to avoid.
+  bb_py=""
+  for cand in "$(head -1 "$(command -v blastbox)" | sed 's/^#!//; s/ .*//')" python3 python; do
+    if command -v "$cand" >/dev/null 2>&1 &&
+       "$cand" -c 'import packaging.version' >/dev/null 2>&1; then
+      bb_py="$cand"; break
+    fi
+  done
+  # An absent interpreter is not a verdict: keep it distinct from a real
+  # "below the floor" answer, or every version -- including ones well above
+  # the floor -- gets refused on a host without packaging installed.
+  if [ -z "$bb_py" ]; then
+    rc=127
+  elif "$bb_py" -c 'import sys
+from packaging.version import Version
+sys.exit(0 if Version(sys.argv[2]) >= Version(sys.argv[1]) else 1)' "$BB_MIN" "$want" 2>/dev/null
+  then
+    return 0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -eq 1 ]; then
+    echo "refusing to build with blastbox $want: below the floor of $BB_MIN." >&2
     echo "That version has defects on the path that replaces a live rootfs." >&2
+    exit 2
+  fi
+  # Any other status means the comparison could not RUN (no packaging, or an
+  # unparseable version). Fall back to sort -V and say so, rather than
+  # silently applying weaker rules.
+  echo "note: comparing $want against $BB_MIN with sort -V; PEP 440 was" >&2
+  echo "unavailable, so a pre-release may compare differently." >&2
+  if [ "$(printf '%s\n%s\n' "$BB_MIN" "$want" | sort -V | head -1)" != "$BB_MIN" ]; then
+    echo "refusing to build with blastbox $want: below the floor of $BB_MIN." >&2
     exit 2
   fi
 }
