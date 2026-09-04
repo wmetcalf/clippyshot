@@ -23,6 +23,19 @@ set -euo pipefail
 # version it then rejected.
 BB_MIN=0.1.38
 
+# One check for EVERY way a version can arrive: the legacy bare argument and
+# the `--blastbox-version V` / `--blastbox-version=V` option, which is
+# forwarded verbatim in "$@". Gating only the bare form left the floor
+# bypassable on the live-rootfs build path -- and this script constructs the
+# option form itself, so it is not a hypothetical spelling.
+require_floor() {  # <version>
+  if [ "$(printf '%s\n%s\n' "$BB_MIN" "$1" | sort -V | head -1)" != "$BB_MIN" ]; then
+    echo "refusing to build with blastbox $1: below the floor of $BB_MIN." >&2
+    echo "That version has defects on the path that replaces a live rootfs." >&2
+    exit 2
+  fi
+}
+
 TAG="${1:?usage: build_images.sh <tag> [blastbox-version] [--dry-run]}"
 shift
 REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -38,11 +51,7 @@ if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
   # (which never enforces this repo's pin), and the result is a stamped image
   # carrying a blastbox below the floor -- or a stamp naming a version the
   # image does not contain.
-  if [ "$(printf '%s\n%s\n' "$BB_MIN" "$1" | sort -V | head -1)" != "$BB_MIN" ]; then
-    echo "refusing to build with blastbox $1: below the floor of $BB_MIN." >&2
-    echo "That version has defects on the path that replaces a live rootfs." >&2
-    exit 2
-  fi
+  require_floor "$1"
   version_arg=(--blastbox-version "$1")
   shift
 fi
@@ -78,4 +87,14 @@ BB_HAVE="$(blastbox version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -1
 # array as unset under `set -u` and aborts. Bash 5 does not, so the test suite
 # here cannot tell the two apart -- that mutant survives, and the guard is kept
 # for the older shells rather than because a local test justifies it.
+# Any pass-through occurrence of the option, in either spelling.
+prev=""
+for a in "$@"; do
+  case "$a" in
+    --blastbox-version=*) require_floor "${a#--blastbox-version=}" ;;
+    *) [ "$prev" = "--blastbox-version" ] && require_floor "$a" ;;
+  esac
+  prev="$a"
+done
+
 exec blastbox build-images "$REPO" --tag "$TAG" ${version_arg[@]+"${version_arg[@]}"} "$@"

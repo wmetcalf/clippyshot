@@ -172,3 +172,27 @@ def test_an_explicit_version_at_the_floor_is_accepted(stub_cli: Path) -> None:
     assert p.returncode == 0, p.stderr
     out = p.stdout.split()
     assert out[out.index("--blastbox-version") + 1] == BB_MIN
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        ["0.1.35"],                          # the legacy bare argument
+        ["--blastbox-version", "0.1.35"],    # the option, space-separated
+        ["--blastbox-version=0.1.35"],       # the option, joined
+    ],
+    ids=["bare", "option-space", "option-equals"],
+)
+def test_every_spelling_of_a_stale_version_is_refused(stub_cli: Path, form) -> None:
+    """Gating only the bare argument left the floor bypassable: the option form
+    is forwarded verbatim in `"$@"` — and this script constructs that very
+    spelling itself, so it is not a hypothetical."""
+    p = _run(stub_cli, "tagX", *form)
+    assert p.returncode == 2, p.stdout + p.stderr
+    assert "below the floor" in p.stderr
+
+
+def test_the_option_form_at_the_floor_is_accepted(stub_cli: Path) -> None:
+    p = _run(stub_cli, "tagX", f"--blastbox-version={BB_MIN}", "--dry-run")
+    assert p.returncode == 0, p.stderr
+    assert f"--blastbox-version={BB_MIN}" in p.stdout.split()
