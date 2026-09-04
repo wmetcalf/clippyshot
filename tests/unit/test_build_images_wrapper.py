@@ -404,3 +404,41 @@ def test_the_fallback_still_accepts_a_v_prefixed_release(
         check=False,
     )
     assert p.returncode == 0, f"exit={p.returncode} out={p.stdout} err={p.stderr}"
+
+
+def test_the_too_old_refusal_runs_nothing_and_keeps_its_text(tmp_path: Path) -> None:
+    """A refusal message must not EXECUTE part of itself.
+
+    Inside a double-quoted string bash reads backticks as command substitution,
+    so an explanation mentioning `docker build -t` ran it -- printing an
+    unrelated docker error, or `command not found`, and dropping the command
+    text out of the very sentence that needed it.
+
+    Executed rather than grepped: a source-level check for backticks would pass
+    on a string that still runs, and fail on one that legitimately quotes them.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "blastbox"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = version ]; then echo "blastbox 0.0.1"; exit 0; fi\n'
+        'printf "%s\\n" "$@"\n'
+    )
+    stub.chmod(0o755)
+    marker = tmp_path / "docker-was-run"
+    docker = bin_dir / "docker"
+    docker.write_text(f'#!/bin/sh\necho "$*" >> "{marker}"\nexit 9\n')
+    docker.chmod(0o755)
+
+    p = subprocess.run(
+        ["bash", str(SCRIPT), "tagX", "--dry-run"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+        check=False,
+    )
+    assert p.returncode == 2, f"exit={p.returncode} err={p.stderr}"
+    assert "is too old" in p.stderr, p.stderr
+    assert not marker.exists(), f"the refusal ran docker: {marker.read_text()}"
+    assert "`docker build -t`" in p.stderr, p.stderr
