@@ -329,7 +329,9 @@ def test_a_python3_without_packaging_does_not_cause_a_false_refusal(
     assert "sort -V" in p.stderr
 
 
-@pytest.mark.parametrize("spelling", ["v0.1.35", "V0.1.35", "0.1.38rc1", "0.1.38.dev1"])
+@pytest.mark.parametrize(
+    "spelling", ["v0.1.35", "V0.1.35", f"{BB_MIN}rc1", f"{BB_MIN}.dev1"]
+)
 def test_pep440_spellings_below_the_floor_are_refused(
     stub_cli: Path, spelling: str
 ) -> None:
@@ -345,8 +347,13 @@ def test_pep440_spellings_below_the_floor_are_refused(
 
 
 def test_a_v_prefixed_version_above_the_floor_is_accepted(stub_cli: Path) -> None:
-    """Refusing the `v` spelling outright would be wrong: pip accepts it."""
-    p = _run(stub_cli, "tagX", "v0.1.38", "--dry-run")
+    """Refusing the `v` spelling outright would be wrong: pip accepts it.
+
+    Derived from BB_MIN rather than written out: a hard-coded version silently
+    becomes a BELOW-the-floor case the next time the floor moves, and the test
+    then fails for a reason that has nothing to do with what it checks.
+    """
+    p = _run(stub_cli, "tagX", f"v{BB_MIN}", "--dry-run")
     assert p.returncode == 0, f"exit={p.returncode} err={p.stderr}"
 
 
@@ -369,7 +376,7 @@ def test_the_fallback_refuses_spellings_sort_v_cannot_rank(
     """
     env = {**os.environ, "PATH": f"{stub_cli}:{_minimal_bin(tmp_path / 'nopython')}"}
     p = subprocess.run(
-        ["bash", str(SCRIPT), "tagX", "0.1.38rc1"],
+        ["bash", str(SCRIPT), "tagX", f"{BB_MIN}rc1"],
         capture_output=True,
         text=True,
         env=env,

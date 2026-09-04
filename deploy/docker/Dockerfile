@@ -161,7 +161,7 @@ COPY src /tmp/build/src
 # label/contents disagreement `blastbox doctor` exists to catch. Caught for
 # real on toolz2: the stamp said 0.1.34 and the image contained 0.1.35.
 # Keep the default in sync with the floor in pyproject.toml.
-ARG BLASTBOX_VERSION=0.1.38
+ARG BLASTBOX_VERSION=0.1.39
 RUN python3 -m venv /opt/clippyshot \
     && /opt/clippyshot/bin/pip install --upgrade pip \
     && /opt/clippyshot/bin/pip install '/tmp/build[host]' "blastbox[s3]==${BLASTBOX_VERSION}" \
