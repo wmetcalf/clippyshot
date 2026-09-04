@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -28,23 +27,33 @@ needs_soffice = pytest.mark.skipif(not _have("soffice"), reason="LibreOffice not
 needs_pdftoppm = pytest.mark.skipif(not _have("pdftoppm"), reason="poppler-utils not installed")
 
 
-def _bwrap_can_create_userns() -> bool:
-    """Probe whether bwrap can actually create a user namespace on this host.
+def _sandbox_smoketest_passes(backend: str) -> bool:
+    """Whether THIS host can run the sandbox we actually ship.
 
-    On Ubuntu 24.04+ with kernel.apparmor_restrict_unprivileged_userns=1 and
-    no clippyshot-bwrap AppArmor profile loaded, this returns False.
+    Asks the backend itself rather than a hand-written approximation of it. The
+    approximation drifted: the nsjail probe bind-mounted only `/usr`, so on any
+    merged-usr distro -- Ubuntu 24.04, which is the fleet -- the loader at
+    /lib64 was missing inside the jail and NOTHING dynamically linked could
+    exec. That is `execve: No such file or directory`, which the probe reported
+    as "cannot create user namespaces", telling operators to load an AppArmor
+    profile that would not have helped. Four nsjail tests skipped on every such
+    host, i.e. everywhere, while the real backend -- which recreates those
+    symlinks inside the jail -- worked fine.
     """
-    if not _have("bwrap"):
+    if not _have(backend):
         return False
     try:
-        proc = subprocess.run(
-            ["bwrap", "--unshare-all", "--die-with-parent", "--ro-bind", "/", "/", "--", "/bin/true"],
-            capture_output=True,
-            timeout=5,
-        )
-        return proc.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        if backend == "bwrap":
+            from clippyshot.sandbox.bwrap import BwrapSandbox as Sandbox
+        else:
+            from clippyshot.sandbox.nsjail import NsjailSandbox as Sandbox
+        return Sandbox().smoketest().exit_code == 0
+    except Exception:  # noqa: BLE001 - any failure means "cannot run here"
         return False
+
+
+def _bwrap_can_create_userns() -> bool:
+    return _sandbox_smoketest_passes("bwrap")
 
 
 _BWRAP_USERNS_REASON = (
@@ -59,26 +68,7 @@ needs_bwrap_userns = pytest.mark.skipif(
 
 
 def _nsjail_can_create_userns() -> bool:
-    """Probe whether nsjail can actually create a user namespace on this host.
-
-    Mirror of _bwrap_can_create_userns for the nsjail backend. On Ubuntu
-    24.04+ with kernel.apparmor_restrict_unprivileged_userns=1 and no
-    clippyshot-nsjail AppArmor profile loaded, this returns False.
-    """
-    if not _have("nsjail"):
-        return False
-    try:
-        proc = subprocess.run(
-            ["nsjail", "--mode", "o", "--quiet", "--really_quiet",
-             "--disable_proc", "--iface_no_lo", "--user", "65534", "--group", "65534",
-             "--bindmount_ro", "/usr:/usr",
-             "--", "/bin/true"],
-            capture_output=True,
-            timeout=5,
-        )
-        return proc.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return False
+    return _sandbox_smoketest_passes("nsjail")
 
 
 _NSJAIL_USERNS_REASON = (

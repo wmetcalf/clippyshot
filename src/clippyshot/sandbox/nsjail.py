@@ -158,9 +158,22 @@ class NsjailSandbox:
                 stdout, stderr = proc.communicate()
             exit_code = -signal.SIGKILL
 
-        # nsjail returns 109 (signal 9 + 100 conventionally) when it kills the
-        # child due to --time_limit. Detect that and report as killed.
-        if exit_code == 109 or (exit_code != 0 and (
+        # How nsjail reports killing the child on --time_limit, which is
+        # version-dependent and NOT only 109:
+        #
+        #   * 109 -- the older "signal + 100" convention this used to assume;
+        #   * 137 / 143 -- the shell's 128+signal for SIGKILL / SIGTERM, which
+        #     is what the nsjail in the worker image actually returns (measured:
+        #     exit 137 on a 1 s --time_limit against `sleep 10`);
+        #   * a stderr marker, when the run is not --quiet.
+        #
+        # Recognising only 109 reported a timeout as an ordinary non-zero exit,
+        # so a caller distinguishing "the sandbox stopped it" from "the command
+        # failed" got the wrong answer -- and with --quiet there is no stderr to
+        # fall back on. Signal deaths other than KILL/TERM stay unkilled: a
+        # SIGSEGV (139) is the command crashing, not the sandbox stopping it.
+        _KILLED_EXITS = (109, 128 + signal.SIGKILL, 128 + signal.SIGTERM)
+        if exit_code in _KILLED_EXITS or (exit_code != 0 and (
             b"time >=" in (stderr or b"") or b"timed out" in (stderr or b"").lower()
         )):
             killed = True
