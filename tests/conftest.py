@@ -28,23 +28,33 @@ needs_soffice = pytest.mark.skipif(not _have("soffice"), reason="LibreOffice not
 needs_pdftoppm = pytest.mark.skipif(not _have("pdftoppm"), reason="poppler-utils not installed")
 
 
-def _bwrap_can_create_userns() -> bool:
-    """Probe whether bwrap can actually create a user namespace on this host.
+def _host_allows_userns(argv: list[str]) -> bool:
+    """Whether THIS HOST permits the unprivileged user namespace these need.
 
-    On Ubuntu 24.04+ with kernel.apparmor_restrict_unprivileged_userns=1 and
-    no clippyshot-bwrap AppArmor profile loaded, this returns False.
+    Deliberately NOT our backend's own smoketest: gating a backend's tests on
+    that backend working makes a regression skip the very tests meant to catch
+    it, so a broken mount or seccomp argument would read as "unsupported host".
+    This asks the external tool to do the one thing the host can forbid --
+    create a userns and exec -- with the whole root bound read-only.
+
+    The root bind matters: the previous probe mounted only `/usr`, so on a
+    merged-usr distro the loader at /lib64 was missing inside the jail and
+    NOTHING could exec. That is a probe bug, and it read as a host limitation.
     """
-    if not _have("bwrap"):
-        return False
     try:
-        proc = subprocess.run(
-            ["bwrap", "--unshare-all", "--die-with-parent", "--ro-bind", "/", "/", "--", "/bin/true"],
-            capture_output=True,
-            timeout=5,
-        )
+        proc = subprocess.run(argv, capture_output=True, timeout=10)
         return proc.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return False
+
+
+def _bwrap_can_create_userns() -> bool:
+    if not _have("bwrap"):
+        return False
+    return _host_allows_userns(
+        ["bwrap", "--unshare-user", "--die-with-parent", "--ro-bind", "/", "/",
+         "--", "/bin/true"]
+    )
 
 
 _BWRAP_USERNS_REASON = (
@@ -59,26 +69,13 @@ needs_bwrap_userns = pytest.mark.skipif(
 
 
 def _nsjail_can_create_userns() -> bool:
-    """Probe whether nsjail can actually create a user namespace on this host.
-
-    Mirror of _bwrap_can_create_userns for the nsjail backend. On Ubuntu
-    24.04+ with kernel.apparmor_restrict_unprivileged_userns=1 and no
-    clippyshot-nsjail AppArmor profile loaded, this returns False.
-    """
     if not _have("nsjail"):
         return False
-    try:
-        proc = subprocess.run(
-            ["nsjail", "--mode", "o", "--quiet", "--really_quiet",
-             "--disable_proc", "--iface_no_lo", "--user", "65534", "--group", "65534",
-             "--bindmount_ro", "/usr:/usr",
-             "--", "/bin/true"],
-            capture_output=True,
-            timeout=5,
-        )
-        return proc.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return False
+    return _host_allows_userns(
+        ["nsjail", "--mode", "o", "--quiet", "--really_quiet", "--disable_proc",
+         "--iface_no_lo", "--user", "65534", "--group", "65534",
+         "--bindmount_ro", "/:/", "--", "/bin/true"]
+    )
 
 
 _NSJAIL_USERNS_REASON = (

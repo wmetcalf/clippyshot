@@ -277,6 +277,42 @@ class ClippyShotEngine:
             return
         if os.environ.get("CLIPPYSHOT_OCR_ENGINE", "tesserocr").strip().lower() == "tesseract_cli":
             return
+        # Not where the deployment sandboxes each scanner CALL. nsjail and bwrap
+        # wrap every cold `tesseract` invocation, and the warm helper is a
+        # persistent process outside that wrapper -- so enabling warm OCR there
+        # would hand the untrusted PNG to an UNSANDBOXED image parser while the
+        # cold path beside it is careful not to. `_maybe_start_cold_ocr_helper`
+        # already declines for this reason; the warm path did not.
+        #
+        # Deliberately keyed on those two backends rather than on "is it a
+        # container", so a warm guest (FC / gVisor), where the guest itself is
+        # the boundary and no per-call sandbox is in play, keeps its warm tier.
+        # Sandboxing the helper ITSELF is the better answer and is open as #35.
+        try:
+            from clippyshot.sandbox.detect import select_sandbox
+
+            backend = select_sandbox().name
+        except Exception as exc:  # noqa: BLE001
+            # Undeterminable -- e.g. a forced backend this host cannot satisfy.
+            # Left OPEN rather than closed: the scanners fail on their own in
+            # this state, so declining here would disable the warm tier on a
+            # deployment whose selection simply is not resolvable at warmup,
+            # without making anything safer. Logged, because a silent
+            # fall-through is how the asymmetry this gate closes went unnoticed.
+            logging.getLogger("clippyshot.engine").warning(
+                "warm-OCR: could not determine the sandbox backend (%s); "
+                "starting the helper anyway -- verify this deployment does not "
+                "sandbox scanner calls per invocation",
+                exc,
+            )
+            backend = ""
+        if backend in ("nsjail", "bwrap"):
+            logging.getLogger("clippyshot.engine").info(
+                "warm-OCR declined: %s sandboxes each scanner call, and the warm "
+                "helper would run outside it; using the sandboxed tesseract CLI",
+                backend,
+            )
+            return
         try:
             from clippyshot.ocr_warm import WarmOCR
 
