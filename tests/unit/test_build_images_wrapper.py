@@ -327,3 +327,73 @@ def test_a_python3_without_packaging_does_not_cause_a_false_refusal(
     )
     assert p.returncode == 0, f"exit={p.returncode} out={p.stdout} err={p.stderr}"
     assert "sort -V" in p.stderr
+
+
+@pytest.mark.parametrize("spelling", ["v0.1.35", "V0.1.35", "0.1.38rc1", "0.1.38.dev1"])
+def test_pep440_spellings_below_the_floor_are_refused(
+    stub_cli: Path, spelling: str
+) -> None:
+    """pip normalizes these; `sort -V` does not.
+
+    `v0.1.35` normalizes to the vulnerable 0.1.35, and `0.1.38rc1`/`0.1.38.dev1`
+    both predate the released floor -- yet `sort -V` orders every one of them
+    above `0.1.38` on the raw string.
+    """
+    p = _run(stub_cli, "tagX", f"--blastbox-version={spelling}")
+    assert p.returncode == 2, f"exit={p.returncode} out={p.stdout} err={p.stderr}"
+    assert "below the floor" in p.stderr
+
+
+def test_a_v_prefixed_version_above_the_floor_is_accepted(stub_cli: Path) -> None:
+    """Refusing the `v` spelling outright would be wrong: pip accepts it."""
+    p = _run(stub_cli, "tagX", "v0.1.38", "--dry-run")
+    assert p.returncode == 0, f"exit={p.returncode} err={p.stderr}"
+
+
+def test_a_version_that_is_not_pep440_is_refused(stub_cli: Path) -> None:
+    """An unparseable version is not a pass; it is a refusal with its own reason."""
+    p = _run(stub_cli, "tagX", "not-a-version")
+    assert p.returncode == 2, f"exit={p.returncode} out={p.stdout} err={p.stderr}"
+    assert "not a PEP 440 version" in p.stderr
+
+
+def test_the_fallback_refuses_spellings_sort_v_cannot_rank(
+    stub_cli: Path, tmp_path: Path
+) -> None:
+    """The weaker path must not become the bypass.
+
+    Without `packaging` the comparison degrades to `sort -V`, which ranks
+    `0.1.38rc1` ABOVE the floor. Guessing there would hand back exactly the
+    bypass this gate exists to close, so the fallback declines to rank any
+    spelling it cannot order the way pip would.
+    """
+    env = {**os.environ, "PATH": f"{stub_cli}:{_minimal_bin(tmp_path / 'nopython')}"}
+    p = subprocess.run(
+        ["bash", str(SCRIPT), "tagX", "0.1.38rc1"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert p.returncode == 2, f"exit={p.returncode} out={p.stdout} err={p.stderr}"
+    assert "cannot rank that spelling" in p.stderr
+
+
+def test_the_fallback_still_accepts_a_v_prefixed_release(
+    stub_cli: Path, tmp_path: Path
+) -> None:
+    """Declining to rank a spelling is a refusal, so keep the set small.
+
+    A leading `v` is the one deviation `sort -V` can be taught (pip just drops
+    it). Without that, every `v`-spelled release would be refused on a host
+    lacking `packaging` -- a gate failure dressed as a security decision.
+    """
+    env = {**os.environ, "PATH": f"{stub_cli}:{_minimal_bin(tmp_path / 'nopython')}"}
+    p = subprocess.run(
+        ["bash", str(SCRIPT), "tagX", "v9.9.9", "--dry-run"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert p.returncode == 0, f"exit={p.returncode} out={p.stdout} err={p.stderr}"

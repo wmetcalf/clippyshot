@@ -32,12 +32,9 @@ require_floor() {  # <version>
   # PEP 440 semantics, not `sort -V`. They disagree exactly where it matters:
   # `0.1.38rc1` is BELOW `0.1.38` for pip, and `sort -V` puts it above -- so a
   # release candidate of the floor version, which predates the fixes the floor
-  # exists for, would sail straight through.
-  #
-  # Run with the interpreter that RUNS blastbox, not whatever `python3`
-  # resolves to: the console script's shebang points into blastbox's own
-  # environment, which is where `packaging` lives.
-  local want="$1" bb_py rc cand
+  # exists for, would sail straight through. `v0.1.35` is the same trap from
+  # the other side: pip normalizes away the `v`, `sort -V` does not.
+  local want="$1" bb_py rc cand plain
   # Pick an interpreter that can actually DO the comparison, rather than
   # trusting one. Parsing blastbox's shebang is not enough on its own: a
   # console script written `#!/usr/bin/env python3` yields `/usr/bin/env`,
@@ -56,8 +53,12 @@ require_floor() {  # <version>
   if [ -z "$bb_py" ]; then
     rc=127
   elif "$bb_py" -c 'import sys
-from packaging.version import Version
-sys.exit(0 if Version(sys.argv[2]) >= Version(sys.argv[1]) else 1)' "$BB_MIN" "$want" 2>/dev/null
+from packaging.version import InvalidVersion, Version
+try:
+    floor, want = Version(sys.argv[1]), Version(sys.argv[2])
+except InvalidVersion:
+    sys.exit(3)
+sys.exit(0 if want >= floor else 1)' "$BB_MIN" "$want" 2>/dev/null
   then
     return 0
   else
@@ -68,12 +69,28 @@ sys.exit(0 if Version(sys.argv[2]) >= Version(sys.argv[1]) else 1)' "$BB_MIN" "$
     echo "That version has defects on the path that replaces a live rootfs." >&2
     exit 2
   fi
-  # Any other status means the comparison could not RUN (no packaging, or an
-  # unparseable version). Fall back to sort -V and say so, rather than
-  # silently applying weaker rules.
+  if [ "$rc" -eq 3 ]; then
+    echo "refusing to build with blastbox $want: not a PEP 440 version." >&2
+    exit 2
+  fi
+  # Any other status means the comparison could not RUN. Fall back to sort -V
+  # and say so, rather than silently applying weaker rules.
   echo "note: comparing $want against $BB_MIN with sort -V; PEP 440 was" >&2
-  echo "unavailable, so a pre-release may compare differently." >&2
-  if [ "$(printf '%s\n%s\n' "$BB_MIN" "$want" | sort -V | head -1)" != "$BB_MIN" ]; then
+  echo "unavailable, so pre-releases cannot be ranked." >&2
+  # `sort -V` only ranks plain releases the way pip does. Rather than guess at
+  # a spelling it cannot order -- `v0.1.35`, `0.1.38rc1`, `0.1.38.post1` -- the
+  # fallback refuses, so the weaker path cannot be used to slip past the floor.
+  plain="${want#[vV]}"
+  case "$plain" in
+    ""|*[!0-9.]*|*..*|.*|*.) plain="" ;;
+  esac
+  if [ -z "$plain" ]; then
+    echo "refusing to build with blastbox $want: cannot rank that spelling" >&2
+    echo "without PEP 440. Install \`packaging\` in blastbox's environment," >&2
+    echo "or pass a plain release version such as $BB_MIN." >&2
+    exit 2
+  fi
+  if [ "$(printf '%s\n%s\n' "$BB_MIN" "$plain" | sort -V | head -1)" != "$BB_MIN" ]; then
     echo "refusing to build with blastbox $want: below the floor of $BB_MIN." >&2
     exit 2
   fi
