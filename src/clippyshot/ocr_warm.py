@@ -126,12 +126,27 @@ class WarmOCR:
         lang: str = DEFAULT_LANG,
         psm: int = DEFAULT_PSM,
         timeout_s: float = DEFAULT_TIMEOUT_S,
+        deadline: float | None = None,
     ) -> OCRResult:
         """OCR one page via the warm helper. Serialised over the single pipe and
         bounded by ``timeout_s``. Raises ``OCRError`` on any failure (caller
-        falls back to the cold CLI path)."""
+        falls back to the cold CLI path).
+
+        ``deadline`` is an absolute ``time.monotonic()`` instant for the job's
+        remaining OCR budget. Pass it rather than relying on ``timeout_s`` alone
+        whenever several pages share one budget: every caller queues here on one
+        lock, and a DURATION computed before the wait is still the full duration
+        when the lock is finally acquired -- so a 60s job budget stretches across
+        as many pages as are queued. An absolute instant does not decay while
+        waiting, which is the whole point of passing one.
+        """
         validate_lang(lang)
         with self._lock:
+            if deadline is not None:
+                # Priced HERE, after the wait, from an instant fixed before it.
+                timeout_s = min(timeout_s, deadline - time.monotonic())
+                if timeout_s <= 0:
+                    raise OCRError("warm OCR budget exhausted while queued")
             proc = self._proc
             if proc is None or proc.poll() is not None or proc.stdin is None or proc.stdout is None:
                 raise OCRError("warm OCR helper not ready")

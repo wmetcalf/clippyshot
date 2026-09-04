@@ -215,3 +215,50 @@ def test_hung_helper_times_out_and_is_killed():
         srv.ocr(Path("/x/page-001.png"), lang="eng", psm=3, timeout_s=0.2)
     assert time.monotonic() - t0 < 5  # did not hang
     assert srv.is_ready() is False  # helper was killed
+
+
+def test_a_queued_call_is_priced_after_the_lock_not_before():
+    """The REAL lock, held by another thread — a fake helper cannot show this.
+
+    Every caller serialises here. A duration computed before the wait is still
+    the full duration when the lock is acquired, so one job budget stretches
+    across every queued page. An absolute deadline does not decay.
+    """
+    srv, proc = _server([{"text": "ok", "char_count": 2, "duration_ms": 1}])
+    srv.start()
+
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_the_lock():
+        with srv._lock:
+            held.set()
+            release.wait(2.0)
+
+    holder = threading.Thread(target=hold_the_lock, daemon=True)
+    holder.start()
+    assert held.wait(2.0), "the lock holder never started"
+
+    wait_s = 0.25
+    deadline = time.monotonic() + 1.0
+    threading.Timer(wait_s, release.set).start()
+    srv.ocr(Path("/x/page-001.png"), lang="eng", psm=3, timeout_s=60, deadline=deadline)
+    holder.join(2.0)
+
+    sent = json.loads(proc.stdin.getvalue().strip().splitlines()[-1])
+    assert sent["timeout_s"] < 1.0 - wait_s + 0.1, (
+        f"the queued wait was not deducted: helper was given {sent['timeout_s']}s "
+        f"of a 1.0s budget after waiting {wait_s}s"
+    )
+    assert sent["timeout_s"] > 0
+
+
+def test_a_call_whose_budget_expired_while_queued_is_refused():
+    """Past the deadline there is nothing left to spend; the caller cold-falls-back."""
+    srv, _ = _server([{"text": "ok", "char_count": 2, "duration_ms": 1}])
+    srv.start()
+    with pytest.raises(OCRError, match="budget exhausted"):
+        srv.ocr(
+            Path("/x/page-001.png"), lang="eng", psm=3,
+            timeout_s=60, deadline=time.monotonic() - 0.01,
+        )
