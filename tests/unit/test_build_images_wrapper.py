@@ -152,3 +152,23 @@ def test_the_declaration_is_readable_and_covers_every_tier() -> None:
     fc = next(r for r in plan.rootfs if r.kind == "ext4")
     assert "/init" in fc.requires, "nothing would notice a rootfs that cannot boot"
     assert not images.missing_dockerfiles(plan, {"BLASTBOX_SRC": "."}) or True
+
+
+def test_an_explicit_version_below_the_floor_is_refused(stub_cli: Path) -> None:
+    """The gate checked only the installed CLI, so the documented
+    `build_images.sh <tag> <version>` form sailed through with anything.
+
+    That matters because the cold worker installs with `--no-deps`, which never
+    enforces this repo's pin — the result is a stamped image carrying a blastbox
+    below the floor, or a stamp naming a version the image does not contain.
+    """
+    p = _run(stub_cli, "tagX", "0.1.35")
+    assert p.returncode == 2, p.stdout + p.stderr
+    assert "below the floor" in p.stderr
+
+
+def test_an_explicit_version_at_the_floor_is_accepted(stub_cli: Path) -> None:
+    p = _run(stub_cli, "tagX", BB_MIN, "--dry-run")
+    assert p.returncode == 0, p.stderr
+    out = p.stdout.split()
+    assert out[out.index("--blastbox-version") + 1] == BB_MIN

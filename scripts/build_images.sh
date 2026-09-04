@@ -32,6 +32,17 @@ REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 # is passed straight through.
 version_arg=()
 if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+  # Checked against the SAME floor as the CLI. Only BB_HAVE was compared, so
+  # the documented `build_images.sh <tag> 0.1.35` form sailed through: it is
+  # forwarded as --blastbox-version, the cold worker installs with --no-deps
+  # (which never enforces this repo's pin), and the result is a stamped image
+  # carrying a blastbox below the floor -- or a stamp naming a version the
+  # image does not contain.
+  if [ "$(printf '%s\n%s\n' "$BB_MIN" "$1" | sort -V | head -1)" != "$BB_MIN" ]; then
+    echo "refusing to build with blastbox $1: below the floor of $BB_MIN." >&2
+    echo "That version has defects on the path that replaces a live rootfs." >&2
+    exit 2
+  fi
   version_arg=(--blastbox-version "$1")
   shift
 fi
