@@ -22,7 +22,9 @@ SCRIPT = REPO / "scripts" / "build_images.sh"
 # otherwise breaks these tests in a way that looks like the wrapper is broken:
 # the stub reports the old version, the gate correctly refuses it, and six
 # tests fail for a reason that has nothing to do with what they check.
-BB_MIN = re.search(r"^BB_MIN=(\S+)", SCRIPT.read_text(), re.MULTILINE).group(1)
+_BB_MIN_M = re.search(r"^BB_MIN=(\S+)", SCRIPT.read_text(), re.MULTILINE)
+assert _BB_MIN_M, "build_images.sh no longer states a BB_MIN"
+BB_MIN = _BB_MIN_M.group(1)
 
 
 @pytest.fixture
