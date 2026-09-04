@@ -114,7 +114,8 @@ def test_the_firecracker_rootfs_declares_what_it_must_contain() -> None:
     fc = [r for r in PLAN.rootfs if r.kind == "ext4"]
     assert len(fc) == 1
     assert {"/init", "/opt/blastbox/guest.env"} <= set(fc[0].requires)
-    assert fc[0].size_mib == 7000, "this engine carries LibreOffice and tessdata"
+    assert fc[0].resolved_size_mib({}) == 7000, "LibreOffice and tessdata"
+    assert fc[0].resolved_size_mib({"ROOTFS_MIB": "8000"}) == 8000
 
 
 def test_both_rootfs_artifacts_are_declared() -> None:

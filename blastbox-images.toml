@@ -55,7 +55,9 @@ kind = "ext4"
 image = "clippyshot-fc-worker"
 dest = "${CLIPPYSHOT_FC_DIR:-/home/coz/clippyshot-fc}/rootfs.ext4"
 # 7000 MiB: this engine carries LibreOffice and a tesseract data set, so it is
-# several times the size of the other two engines' rootfs.
-size_mib = 7000
+# several times the size of the other two engines' rootfs. Overridable, as the
+# script it replaces was -- a deployment that grew this deliberately must not be
+# shrunk back by a literal in the spec.
+size_mib = "${ROOTFS_MIB:-7000}"
 # The guest boots /init, which execs run_guest.py against a baked guest.env.
 requires = ["/init", "/opt/blastbox/guest.env"]
