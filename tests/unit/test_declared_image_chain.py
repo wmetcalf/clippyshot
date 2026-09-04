@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 if TYPE_CHECKING:  # the real type, so mypy checks the attribute access below
     from blastbox.host.images import ImageSpec
