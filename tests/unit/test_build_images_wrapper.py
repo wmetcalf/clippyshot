@@ -497,6 +497,30 @@ class TestAFailingCliIsDiagnosable:
         assert "no usable `version` output" not in r.stderr
 
 
+
+def _is_alive(pid: int) -> bool:
+    """True only if the process exists AND is not a zombie.
+
+    `os.kill(pid, 0)` succeeds for a defunct process, so on a runner whose PID 1 does not reap
+    promptly -- containers, mostly -- a child that HAS been killed still answers, and a test
+    asserting "nothing outlived the wrapper" fails at random (codex saw it locally with the
+    `sleep` in state Z). The state comes from /proc; where that is unreadable, fall back to the
+    signal probe rather than pretending to know.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    except OSError:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+    # `comm` can contain spaces and parentheses; the state is the field after the last ')'.
+    state = stat.rpartition(")")[2].split()[0]
+    return state != "Z"
+
 class TestAFailedVersionCannotSatisfyTheFloor:
     """Capturing stderr for the diagnostic must not feed it to the version parser.
 
@@ -556,6 +580,72 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         )
         assert r.returncode == 2
         assert "no usable `version` output" in r.stderr
+
+    def test_a_long_banner_does_not_hide_the_version(self, tmp_path: Path) -> None:
+        """A CLI that prints a banner before its version is still a usable CLI.
+
+        Parsing only the first 4 KiB of stdout rejected one, exit code zero and all -- the
+        wrapper would have told a working install it was unusable (codex).
+        """
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            "  for i in $(seq 1 120); do\n"
+            '    printf "%s\\n" "note: warming up 0000000000000000000000000000000000000000"\n'
+            "  done\n"
+            f'  echo "blastbox {BB_MIN}"\n'
+            "  exit 0\n"
+            "fi\n"
+            'printf "%s\\n" "$@"\n',
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert "no usable `version` output" not in r.stderr, (
+            "a banner longer than the parsed prefix hid a perfectly good version"
+        )
+        assert "--dry-run" in r.stdout
+
+    def test_a_failing_second_mktemp_leaves_nothing_behind(self, tmp_path: Path) -> None:
+        """The cleanup trap must be armed before the SECOND temp file is allocated.
+
+        With both allocations ahead of the trap, a failure of the second one -- $TMPDIR out of
+        space or inodes -- exits under `set -e` before any cleanup exists and leaks the first
+        (codex). The stub lets the first mktemp through and fails the rest.
+        """
+        d = tmp_path / "bin"
+        d.mkdir()
+        counter = tmp_path / "mktemp-calls"
+        (d / "blastbox").write_text(
+            "#!/usr/bin/env bash\n"
+            f'if [ "$1" = version ]; then echo "blastbox {BB_MIN}"; exit 0; fi\n'
+        )
+        (d / "blastbox").chmod(0o755)
+        (d / "mktemp").write_text(
+            "#!/usr/bin/env bash\n"
+            f'n=$(cat "{counter}" 2>/dev/null || echo 0)\n'
+            "n=$((n + 1))\n"
+            f'echo "$n" > "{counter}"\n'
+            'if [ "$n" -ge 2 ]; then echo "mktemp: no space left on device" >&2; exit 1; fi\n'
+            'exec /usr/bin/mktemp "$@"\n'
+        )
+        (d / "mktemp").chmod(0o755)
+
+        tmpdir = tmp_path / "tmp"
+        tmpdir.mkdir()
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "TMPDIR": str(tmpdir),
+        }
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        assert r.returncode != 0, "a failed mktemp was treated as success"
+        leftovers = list(tmpdir.iterdir())
+        assert leftovers == [], f"the first temp file leaked when the second failed: {leftovers}"
 
     def test_a_supervisor_signal_terminates_the_wrapper(self, tmp_path: Path) -> None:
         """A signal to THIS PID ONLY -- what a process supervisor sends, and what the
@@ -628,13 +718,12 @@ class TestAFailedVersionCannotSatisfyTheFloor:
             "the wrapper carried on into the build after being told to stop: " + out
         )
         time.sleep(0.5)
-        survivors = []
-        for stray, label in ((kid, "the CLI"), (grandkid, "the CLI's child")):
-            try:
-                os.kill(stray, 0)
-            except ProcessLookupError:
-                continue
-            survivors.append(f"{label} ({stray})")
+        survivors = [
+            f"{label} ({stray})"
+            for stray, label in ((kid, "the CLI"), (grandkid, "the CLI's child"))
+            if _is_alive(stray)
+        ]
+        for stray, _ in ((kid, None), (grandkid, None)):
             try:
                 os.kill(stray, signal.SIGKILL)
             except ProcessLookupError:

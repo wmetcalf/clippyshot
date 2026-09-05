@@ -141,9 +141,12 @@ command -v blastbox >/dev/null || {
 #
 # So: the version is parsed from STDOUT of a run that EXITED ZERO. stderr is
 # captured only to show the operator what happened.
+# The second mktemp happens AFTER the trap is armed. Allocating both first meant a
+# failure of the second one -- $TMPDIR out of space or inodes, under `set -e` --
+# exited before any cleanup existed and leaked the first (codex).
 BB_ERR_FILE="$(mktemp)"
-BB_OUT_FILE="$(mktemp)"
-_bb_version_cleanup() { rm -f "$BB_ERR_FILE" "$BB_OUT_FILE"; }
+BB_OUT_FILE=""
+_bb_version_cleanup() { rm -f "$BB_ERR_FILE" ${BB_OUT_FILE:+"$BB_OUT_FILE"}; }
 # `blastbox version` runs in the BACKGROUND and is waited on, which is the only
 # arrangement that survives all three problems at once:
 #
@@ -177,6 +180,7 @@ trap '_bb_version_kill; _bb_version_cleanup; trap - TERM; kill -TERM $$' TERM
 # command substitution, which buffers the whole stream in shell memory -- and
 # `ulimit -f` bounds regular-file writes, not a pipe, so the stderr cap did
 # nothing for it. A flood on either stream now dies of SIGXFSZ at 512 KiB.
+BB_OUT_FILE="$(mktemp)"
 # `set -m` gives the background job its own process group, which is what makes
 # `kill -- -$BB_PID` above able to take the CLI's descendants with it.
 set -m
@@ -184,14 +188,21 @@ set -m
 BB_PID=$!
 set +m
 wait "$BB_PID" && BB_RC=0 || BB_RC=$?
-BB_VERSION_OUT="$(head -c 4096 "$BB_OUT_FILE" 2>/dev/null || true)"
-BB_VERSION_ERR="$(tail -c 4096 "$BB_ERR_FILE" 2>/dev/null || true)"
-_bb_version_cleanup
-trap - EXIT INT TERM
+# The version is grepped from the WHOLE file, which `ulimit -f` has already capped
+# at 512 KiB. Reading a 4 KiB prefix instead meant a CLI that prints a long banner
+# before its version was rejected as unusable even though it exited zero (codex).
+# The two variables below exist only for the diagnostic, so they stay small.
+BB_VERSION_OUT="$(tail -c 2048 "$BB_OUT_FILE" 2>/dev/null || true)"
+BB_VERSION_ERR="$(tail -c 2048 "$BB_ERR_FILE" 2>/dev/null || true)"
+# Everything read out of the files happens HERE, before the cleanup below deletes
+# them -- including the version itself, which is grepped from the whole capped
+# file rather than from a truncated copy of it.
 BB_HAVE=""
 if [ "$BB_RC" -eq 0 ]; then
-  BB_HAVE="$(printf '%s\n' "$BB_VERSION_OUT" | grep -oE '[0-9]+(\.[0-9]+)+' | head -1 || true)"
+  BB_HAVE="$(grep -aoE '[0-9]+(\.[0-9]+)+' "$BB_OUT_FILE" 2>/dev/null | head -1 || true)"
 fi
+_bb_version_cleanup
+trap - EXIT INT TERM
 [ -n "$BB_HAVE" ] || {
   echo "this blastbox has no usable \`version\` output; need >= $BB_MIN" >&2
   echo "\`blastbox version\` exited $BB_RC and printed:" >&2
