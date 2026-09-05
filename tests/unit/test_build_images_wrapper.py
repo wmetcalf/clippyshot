@@ -567,10 +567,10 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         os.killpg(os.getpgid(proc.pid), signal.SIGINT)
         try:
             proc.wait(timeout=15)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             proc.kill()
             proc.wait(timeout=10)
-            raise AssertionError("the wrapper did not exit on SIGINT")
+            raise AssertionError("the wrapper did not exit on SIGINT") from exc
 
         leftovers = list(tmpdir.iterdir())
         assert leftovers == [], f"interrupted run stranded {leftovers} in TMPDIR"
