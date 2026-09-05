@@ -142,12 +142,27 @@ command -v blastbox >/dev/null || {
 # So: the version is parsed from STDOUT of a run that EXITED ZERO. stderr is
 # captured only to show the operator what happened.
 BB_ERR_FILE="$(mktemp)"
-# The trap goes on the line after mktemp, not beside the rm below: a Ctrl-C while
+# The traps go on the line after mktemp, not beside the rm below: a Ctrl-C while
 # `blastbox version` is running exits before any later cleanup and would leave the
 # file, holding whatever the CLI had written, in $TMPDIR forever (codex).
-trap 'rm -f "$BB_ERR_FILE"' EXIT INT TERM
-BB_VERSION_OUT="$(blastbox version 2>"$BB_ERR_FILE")" && BB_RC=0 || BB_RC=$?
-BB_VERSION_ERR="$(cat "$BB_ERR_FILE")"
+#
+# INT/TERM clean up and then RE-RAISE. A handler that merely returns makes bash
+# SWALLOW the termination: when a supervisor signals only this pid (not the
+# process group), bash defers the trap until `blastbox version` returns, runs it,
+# and then carries on into the build -- a wrapper that ignores SIGTERM and
+# reports success. Resetting the trap and re-signalling self also gives the
+# caller the 128+n status they expect (codex).
+trap 'rm -f "$BB_ERR_FILE"' EXIT
+trap 'rm -f "$BB_ERR_FILE"; trap - INT; kill -INT $$' INT
+trap 'rm -f "$BB_ERR_FILE"; trap - TERM; kill -TERM $$' TERM
+# `ulimit -f` bounds what a broken CLI can put on this host's temp filesystem
+# while it is being captured -- the old `2>/dev/null` could not fill anything, so
+# capturing stderr introduced the exposure and has to close it here rather than
+# after the fact. 512 KiB is ample for a diagnostic whose last few lines are all
+# that is ever shown; a writer that exceeds it dies of SIGXFSZ, which lands in
+# the failure path this block already handles (codex).
+BB_VERSION_OUT="$(ulimit -f 512; blastbox version 2>"$BB_ERR_FILE")" && BB_RC=0 || BB_RC=$?
+BB_VERSION_ERR="$(tail -c 4096 "$BB_ERR_FILE" 2>/dev/null || true)"
 rm -f "$BB_ERR_FILE"
 trap - EXIT INT TERM
 BB_HAVE=""

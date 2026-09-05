@@ -531,6 +531,68 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         assert "ModuleNotFoundError" in r.stderr
         assert "build-images" not in r.stdout
 
+    def test_a_noisy_failure_cannot_fill_the_temp_filesystem(self, tmp_path: Path) -> None:
+        """Capturing stderr introduced an exposure `2>/dev/null` did not have.
+
+        The stub floods stderr and only then touches a marker. Under the size cap the flood
+        dies of SIGXFSZ first, so the marker is never created -- an observable proof of the
+        bound rather than an assertion about the wrapper's intentions.
+        """
+        marker = tmp_path / "finished-writing"
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            "  for i in $(seq 1 200000); do\n"
+            '    printf "%s\\n" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" >&2\n'
+            "  done\n"
+            f'  touch "{marker}"\n'
+            "  exit 0\n"
+            "fi\n"
+            'printf "%s\\n" "$@"\n',
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert not marker.exists(), (
+            "the CLI wrote its whole flood to $TMPDIR; the size cap is not in effect"
+        )
+        assert r.returncode == 2
+        assert "no usable `version` output" in r.stderr
+
+    def test_a_supervisor_signal_terminates_the_wrapper(self, tmp_path: Path) -> None:
+        """A signal to THIS PID ONLY -- what a process supervisor sends, and what the
+        process-group test cannot cover, because that one also kills the child.
+
+        A cleanup handler that returns instead of re-raising makes bash swallow the request:
+        it waits out the CLI, runs the handler, and then proceeds into the build.
+        """
+        import signal
+        import time
+
+        d = self._stub(tmp_path, 'if [ "$1" = version ]; then sleep 4; echo "blastbox 99.0"; fi\n')
+        proc = subprocess.Popen(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={
+                **os.environ,
+                "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            },
+            start_new_session=True,
+        )
+        time.sleep(1.0)
+        proc.send_signal(signal.SIGTERM)          # the PID, deliberately not the group
+        try:
+            out, _err = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate(timeout=10)
+            raise AssertionError("the wrapper never terminated after SIGTERM") from None
+
+        assert proc.returncode != 0, "SIGTERM was swallowed and the wrapper reported success"
+        assert "--dry-run" not in out, (
+            "the wrapper carried on into the build after being told to stop: " + out
+        )
+
     def test_an_interrupted_run_leaves_no_temp_file(self, tmp_path: Path) -> None:
         """Ctrl-C while `blastbox version` is running must not strand the diagnostic file.
 
