@@ -519,7 +519,7 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         d = self._stub(
             tmp_path,
             'echo "Traceback (most recent call last):" >&2\n'
-            'echo "  File \"/usr/lib/python3.11/site-packages/blastbox/host/cli.py\", line 23" >&2\n'
+            'echo "  File \"/usr/lib/python3.11/site-packages/blastbox/cli.py\"" >&2\n'
             "echo \"ModuleNotFoundError: No module named 'structlog'\" >&2\n"
             "exit 1\n",
         )
