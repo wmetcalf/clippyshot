@@ -850,6 +850,92 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         missing = sorted(trapped - cleared - {"EXIT"})
         assert not missing, f"these traps are installed but never cleared: {missing}"
 
+    def test_a_stricter_inherited_file_limit_is_respected(self, tmp_path: Path) -> None:
+        """`ulimit -f 512` RAISES the limit when the caller already set something stricter, and
+        raising fails -- under `set -e` that kills the subshell before the CLI runs, so a
+        perfectly good install is reported as unusable (codex). The cap only ever lowers."""
+        d = self._stub(
+            tmp_path,
+            f'if [ "$1" = version ]; then echo "blastbox {BB_MIN}"; exit 0; fi\n'
+            'printf "%s\\n" "$@"\n',
+        )
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+        }
+        r = subprocess.run(
+            ["bash", "-c", f"ulimit -f 100; exec bash {SCRIPT} sometag --dry-run"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            env=env,
+            check=False,
+        )
+        assert "no usable `version` output" not in r.stderr, (
+            "a stricter caller-imposed file limit broke the version probe: " + r.stderr
+        )
+        assert "--dry-run" in r.stdout
+
+    def test_an_inherited_bb_pid_is_not_signalled(self, tmp_path: Path) -> None:
+        """An exported BB_PID from the caller must never become the handler's fallback.
+
+        A bystander process is started in its own process group, its pid is exported as BB_PID,
+        and the wrapper is interrupted mid-probe. The bystander must be alive afterwards --
+        with an uninitialised BB_PID the handler would TERM and then KILL that whole group
+        (codex).
+        """
+        import signal
+        import time
+
+        bystander = subprocess.Popen(
+            ["/bin/sleep", "300"], start_new_session=True, stdout=subprocess.DEVNULL
+        )
+        try:
+            childpid = tmp_path / "probe-pid"
+            d = self._stub(
+                tmp_path,
+                'if [ "$1" = version ]; then\n'
+                f'  echo $$ > "{childpid}"\n'
+                "  sleep 300\n"
+                "fi\n",
+            )
+            proc = subprocess.Popen(
+                ["bash", str(SCRIPT), "sometag", "--dry-run"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env={
+                    **os.environ,
+                    "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+                    "BB_PID": str(bystander.pid),
+                },
+                start_new_session=True,
+            )
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not childpid.exists():
+                time.sleep(0.05)
+            assert childpid.exists(), "the stub CLI never started"
+            kid = int(childpid.read_text().strip())
+
+            proc.send_signal(signal.SIGTERM)
+            try:
+                proc.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate(timeout=10)
+            for stray in (kid,):
+                try:
+                    os.kill(stray, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+            time.sleep(1.0)
+            assert _is_alive(bystander.pid), (
+                "the wrapper signalled a process group it inherited through BB_PID"
+            )
+        finally:
+            bystander.kill()
+            bystander.wait(timeout=10)
+
     def test_a_hangup_takes_the_cli_with_it(self, tmp_path: Path) -> None:
         """SIGHUP is what arrives when the terminal goes away -- precisely when nobody is left
         to notice a CLI still running. Only INT and TERM forwarded before (codex)."""

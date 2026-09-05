@@ -147,6 +147,11 @@ command -v blastbox >/dev/null || {
 BB_ERR_FILE="$(mktemp)"
 BB_OUT_FILE=""
 BB_PID_FILE=""
+# Initialised BEFORE the traps that read it. An exported BB_PID from the caller
+# would otherwise be the handler's fallback while the pidfile is still empty, and
+# a signal in that window would send TERM and then KILL to an unrelated process
+# GROUP that happened to have that number (codex).
+BB_PID=""
 _bb_version_cleanup() {
   rm -f "$BB_ERR_FILE" ${BB_OUT_FILE:+"$BB_OUT_FILE"} ${BB_PID_FILE:+"$BB_PID_FILE"}
 }
@@ -225,9 +230,20 @@ set -m
 # back to $BB_PID, i.e. to the behaviour before the race fix, rather than to a
 # broken wrapper (codex). This file already keeps pre-4.4 array handling for the
 # same reason.
-( ulimit -f 512
+# LOWER the file-size limit, never raise it. `ulimit -f 512` under a caller that
+# already imposed something stricter -- `(ulimit -f 100; scripts/build_images.sh ...)`
+# -- fails, and under `set -e` that kills the subshell before the CLI ever runs, so
+# a perfectly good install is reported as having no usable version output (codex).
+( _bb_fsize="$(ulimit -f)"
+  if [ "$_bb_fsize" = unlimited ] || { [ "$_bb_fsize" -gt 512 ] 2>/dev/null; }; then
+    ulimit -f 512
+  fi
   _bb_bashpid="${BASHPID:-}"
-  if [ -n "$_bb_bashpid" ]; then echo "$_bb_bashpid" > "$BB_PID_FILE"; fi
+  # `|| true`: this file is an OPTIMISATION that closes a race window, not a
+  # requirement. Under `set -e` a failed write here would abort the probe and
+  # report a working CLI as unusable -- trading a real failure for a hypothetical
+  # one.
+  if [ -n "$_bb_bashpid" ]; then echo "$_bb_bashpid" > "$BB_PID_FILE" || true; fi
   exec blastbox version ) >"$BB_OUT_FILE" 2>"$BB_ERR_FILE" </dev/null &
 BB_PID=$!
 set +m
