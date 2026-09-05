@@ -593,6 +593,36 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         assert r.returncode == 2
         assert "no usable `version` output" in r.stderr
 
+    def test_bashpid_is_never_referenced_unguarded(self) -> None:
+        """A lint-style check, and deliberately so: this one cannot be executed here.
+
+        `BASHPID` is Bash 4+. Under `set -u` a Bash 3.2 -- the stock /bin/bash on macOS --
+        aborts on an unguarded reference, which would abort the subshell before the CLI ran and
+        report every valid install as having no usable version output (codex). Measured:
+
+            $ bash -c 'set -u; unset BASHPID; ( echo "$BASHPID" )'
+            bash: line 1: BASHPID: unbound variable
+            $ bash -c 'set -u; unset BASHPID; ( echo "${BASHPID:-}" )'   # fine
+
+        Proving the fix by RUNNING it needs a Bash 3.2 binary, which is not present here, so
+        the guard is asserted on the source instead of pretended to be executed.
+        """
+        import re
+
+        code = [
+            line.split("#", 1)[0]          # the rule is about code; the comment above the
+            for line in SCRIPT.read_text().splitlines()  # guard names the form it forbids
+        ]
+        unguarded = [
+            line.strip()
+            for line in code
+            if re.search(r"\$BASHPID\b", line) or re.search(r"\$\{BASHPID\}", line)
+        ]
+        assert not unguarded, (
+            "reference BASHPID as ${BASHPID:-}; Bash 3.2 under `set -u` aborts on: "
+            + "; ".join(unguarded)
+        )
+
     def test_an_undecodable_byte_does_not_swallow_the_diagnostic(self, tmp_path: Path) -> None:
         """One invalid byte anywhere in the captured stderr used to cost the whole message.
 

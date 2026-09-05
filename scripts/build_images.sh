@@ -201,8 +201,17 @@ BB_PID_FILE="$(mktemp)"
 # `set -m` gives the background job its own process group, which is what makes
 # `kill -- -$BB_PID` above able to take the CLI's descendants with it.
 set -m
-( ulimit -f 512; echo "$BASHPID" > "$BB_PID_FILE"; exec blastbox version ) \
-  >"$BB_OUT_FILE" 2>"$BB_ERR_FILE" &
+# `${BASHPID:-}`, not `$BASHPID`: the variable is Bash 4+, and under `set -u` on a
+# Bash 3.2 (the stock /bin/bash on macOS) referencing it would abort this subshell
+# before the CLI ever ran -- reporting every valid install as having no usable
+# version output. Where it is absent the pidfile stays empty and the handler falls
+# back to $BB_PID, i.e. to the behaviour before the race fix, rather than to a
+# broken wrapper (codex). This file already keeps pre-4.4 array handling for the
+# same reason.
+( ulimit -f 512
+  _bb_bashpid="${BASHPID:-}"
+  if [ -n "$_bb_bashpid" ]; then echo "$_bb_bashpid" > "$BB_PID_FILE"; fi
+  exec blastbox version ) >"$BB_OUT_FILE" 2>"$BB_ERR_FILE" &
 BB_PID=$!
 set +m
 wait "$BB_PID" && BB_RC=0 || BB_RC=$?
