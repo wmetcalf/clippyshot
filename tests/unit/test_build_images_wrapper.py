@@ -53,10 +53,14 @@ def _run(binpath: Path, *args: str) -> subprocess.CompletedProcess[str]:
         **os.environ,
         "PATH": f"{binpath}:{Path(sys.executable).parent}:{os.environ['PATH']}",
     }
+    # errors="replace": the wrapper is supposed to pass a broken CLI's bytes through, and a
+    # diagnostic containing one undecodable byte would otherwise blow up the HARNESS rather
+    # than fail the assertion -- a test that cannot even read the output it is judging.
     return subprocess.run(
         ["bash", str(SCRIPT), *args],
         capture_output=True,
         text=True,
+        errors="replace",
         env=env,
         check=False,
     )
@@ -507,6 +511,14 @@ def _is_alive(pid: int) -> bool:
     `sleep` in state Z). The state comes from /proc; where that is unreadable, fall back to the
     signal probe rather than pretending to know.
     """
+    if not Path("/proc").is_dir():
+        # No procfs at all (macOS, the BSDs). FileNotFoundError here would otherwise be read
+        # as "the process is gone" and the orphan assertions would pass vacuously (codex).
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
     except (FileNotFoundError, ProcessLookupError):
@@ -580,6 +592,36 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         )
         assert r.returncode == 2
         assert "no usable `version` output" in r.stderr
+
+    def test_an_undecodable_byte_does_not_swallow_the_diagnostic(self, tmp_path: Path) -> None:
+        """One invalid byte anywhere in the captured stderr used to cost the whole message.
+
+        Measured on this host rather than assumed:
+
+            printf '\\xc3ABC\\nsecond line\\n' | grep -v '^$'
+            grep: (standard input): binary file matches
+            second line
+
+        -- the line with the byte in it is REPLACED by that notice, and it is exactly the line
+        an operator needs. A byte-wise `tail -c` can manufacture such a byte by cutting a
+        multibyte character in half, which is why the truncation is line-wise now; `grep -a`
+        covers the case where the CLI emitted one itself (codex).
+        """
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            '  printf "Traceback (most recent call last):\\n" >&2\n'
+            '  printf "  File \\"/opt/x\\xc3/cli.py\\", line 1\\n" >&2\n'
+            "  printf \"ModuleNotFoundError: No module named 'structlog'\\n\" >&2\n"
+            "  exit 1\n"
+            "fi\n",
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert r.returncode == 2
+        assert "binary file matches" not in r.stderr.lower(), (
+            "the diagnostic was replaced by grep's binary-file notice: " + r.stderr
+        )
+        assert "ModuleNotFoundError" in r.stderr
 
     def test_a_long_banner_does_not_hide_the_version(self, tmp_path: Path) -> None:
         """A CLI that prints a banner before its version is still a usable CLI.

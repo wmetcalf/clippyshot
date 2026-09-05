@@ -146,7 +146,10 @@ command -v blastbox >/dev/null || {
 # exited before any cleanup existed and leaked the first (codex).
 BB_ERR_FILE="$(mktemp)"
 BB_OUT_FILE=""
-_bb_version_cleanup() { rm -f "$BB_ERR_FILE" ${BB_OUT_FILE:+"$BB_OUT_FILE"}; }
+BB_PID_FILE=""
+_bb_version_cleanup() {
+  rm -f "$BB_ERR_FILE" ${BB_OUT_FILE:+"$BB_OUT_FILE"} ${BB_PID_FILE:+"$BB_PID_FILE"}
+}
 # `blastbox version` runs in the BACKGROUND and is waited on, which is the only
 # arrangement that survives all three problems at once:
 #
@@ -168,9 +171,22 @@ _bb_version_cleanup() { rm -f "$BB_ERR_FILE" ${BB_OUT_FILE:+"$BB_OUT_FILE"}; }
 # have done exactly that. Kill the CLI's process GROUP (`-$BB_PID`, which needs
 # the `set -m` below), because killing the CLI alone leaves whatever it spawned
 # reparented to init and still running. (codex)
+# The pid comes from the FILE the job writes as its first act, not from BB_PID.
+# A signal arriving between `&` and `BB_PID=$!` left the handler with nothing to
+# signal, so it killed the wrapper and left the CLI and its descendants running
+# (codex). Reading the file also means this path is exercised by every signal
+# test rather than only in the race it was written for.
+#
+# The window is not fully closed and cannot be in POSIX shell: a signal in the
+# instant between fork and the job's first command still finds no pid. What is
+# left is a fork's width, against the whole runtime of the CLI before.
 _bb_version_kill() {
-  if [ -n "${BB_PID:-}" ]; then
-    kill -- "-$BB_PID" 2>/dev/null || true
+  _bb_pid="$(cat "${BB_PID_FILE:-/nonexistent}" 2>/dev/null || true)"
+  if [ -z "$_bb_pid" ]; then
+    _bb_pid="${BB_PID:-}"
+  fi
+  if [ -n "$_bb_pid" ]; then
+    kill -- "-$_bb_pid" 2>/dev/null || true
   fi
 }
 trap '_bb_version_cleanup' EXIT
@@ -181,10 +197,12 @@ trap '_bb_version_kill; _bb_version_cleanup; trap - TERM; kill -TERM $$' TERM
 # `ulimit -f` bounds regular-file writes, not a pipe, so the stderr cap did
 # nothing for it. A flood on either stream now dies of SIGXFSZ at 512 KiB.
 BB_OUT_FILE="$(mktemp)"
+BB_PID_FILE="$(mktemp)"
 # `set -m` gives the background job its own process group, which is what makes
 # `kill -- -$BB_PID` above able to take the CLI's descendants with it.
 set -m
-( ulimit -f 512; exec blastbox version ) >"$BB_OUT_FILE" 2>"$BB_ERR_FILE" &
+( ulimit -f 512; echo "$BASHPID" > "$BB_PID_FILE"; exec blastbox version ) \
+  >"$BB_OUT_FILE" 2>"$BB_ERR_FILE" &
 BB_PID=$!
 set +m
 wait "$BB_PID" && BB_RC=0 || BB_RC=$?
@@ -192,8 +210,12 @@ wait "$BB_PID" && BB_RC=0 || BB_RC=$?
 # at 512 KiB. Reading a 4 KiB prefix instead meant a CLI that prints a long banner
 # before its version was rejected as unusable even though it exited zero (codex).
 # The two variables below exist only for the diagnostic, so they stay small.
-BB_VERSION_OUT="$(tail -c 2048 "$BB_OUT_FILE" 2>/dev/null || true)"
-BB_VERSION_ERR="$(tail -c 2048 "$BB_ERR_FILE" 2>/dev/null || true)"
+# `tail -n`, not `tail -c`: a byte cut can land inside a multibyte character, and the
+# `grep` below then decides the diagnostic is a binary file and prints
+# "binary file matches" instead of the error (codex). Whole lines cannot split a
+# character, and `grep -a` covers a CLI whose output is genuinely binary.
+BB_VERSION_OUT="$(tail -n 20 "$BB_OUT_FILE" 2>/dev/null || true)"
+BB_VERSION_ERR="$(tail -n 20 "$BB_ERR_FILE" 2>/dev/null || true)"
 # Everything read out of the files happens HERE, before the cleanup below deletes
 # them -- including the version itself, which is grepped from the whole capped
 # file rather than from a truncated copy of it.
@@ -207,7 +229,7 @@ trap - EXIT INT TERM
   echo "this blastbox has no usable \`version\` output; need >= $BB_MIN" >&2
   echo "\`blastbox version\` exited $BB_RC and printed:" >&2
   if [ -n "$BB_VERSION_OUT$BB_VERSION_ERR" ]; then
-    printf '%s\n' "$BB_VERSION_OUT" "$BB_VERSION_ERR" | grep -v '^$' | tail -5 | sed 's/^/  /' >&2
+    printf '%s\n' "$BB_VERSION_OUT" "$BB_VERSION_ERR" | grep -a -v '^$' | tail -5 | sed 's/^/  /' >&2
   else
     echo "  (nothing at all)" >&2
   fi
