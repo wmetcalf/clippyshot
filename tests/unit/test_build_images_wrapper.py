@@ -531,6 +531,50 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         assert "ModuleNotFoundError" in r.stderr
         assert "build-images" not in r.stdout
 
+    def test_an_interrupted_run_leaves_no_temp_file(self, tmp_path: Path) -> None:
+        """Ctrl-C while `blastbox version` is running must not strand the diagnostic file.
+
+        The wrapper is started with its own TMPDIR, interrupted mid-`version`, and that
+        directory is then required to be empty -- executed, not reasoned about.
+        """
+        import signal
+        import time
+
+        d = self._stub(tmp_path, 'if [ "$1" = version ]; then sleep 30; fi\n')
+        tmpdir = tmp_path / "tmp"
+        tmpdir.mkdir()
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "TMPDIR": str(tmpdir),
+        }
+        # Its own session, and the signal goes to the process GROUP -- which is what a
+        # terminal does on Ctrl-C. Signalling only the bash pid does not reproduce it: bash
+        # defers a trap until the foreground command returns, so the `sleep` inside the
+        # command substitution keeps running and the script sits there for its full duration.
+        proc = subprocess.Popen(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not any(tmpdir.iterdir()):
+            time.sleep(0.05)
+        assert any(tmpdir.iterdir()), "the wrapper never created its diagnostic temp file"
+
+        os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)
+            raise AssertionError("the wrapper did not exit on SIGINT")
+
+        leftovers = list(tmpdir.iterdir())
+        assert leftovers == [], f"interrupted run stranded {leftovers} in TMPDIR"
+
     def test_a_nonzero_exit_is_not_trusted_even_with_a_version_on_stdout(
         self, tmp_path: Path
     ) -> None:

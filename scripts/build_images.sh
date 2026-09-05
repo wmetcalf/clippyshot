@@ -142,9 +142,14 @@ command -v blastbox >/dev/null || {
 # So: the version is parsed from STDOUT of a run that EXITED ZERO. stderr is
 # captured only to show the operator what happened.
 BB_ERR_FILE="$(mktemp)"
+# The trap goes on the line after mktemp, not beside the rm below: a Ctrl-C while
+# `blastbox version` is running exits before any later cleanup and would leave the
+# file, holding whatever the CLI had written, in $TMPDIR forever (codex).
+trap 'rm -f "$BB_ERR_FILE"' EXIT INT TERM
 BB_VERSION_OUT="$(blastbox version 2>"$BB_ERR_FILE")" && BB_RC=0 || BB_RC=$?
 BB_VERSION_ERR="$(cat "$BB_ERR_FILE")"
 rm -f "$BB_ERR_FILE"
+trap - EXIT INT TERM
 BB_HAVE=""
 if [ "$BB_RC" -eq 0 ]; then
   BB_HAVE="$(printf '%s\n' "$BB_VERSION_OUT" | grep -oE '[0-9]+(\.[0-9]+)+' | head -1 || true)"
