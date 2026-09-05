@@ -132,13 +132,28 @@ command -v blastbox >/dev/null || {
 # had "no usable version output" -- then handed a reinstall of the same thing.
 # That specific cause is fixed in blastbox 0.1.40; this keeps the NEXT one
 # visible.
-BB_VERSION_OUT="$(blastbox version 2>&1)" || true
-BB_HAVE="$(printf '%s\n' "$BB_VERSION_OUT" | grep -oE '[0-9]+(\.[0-9]+)+' | head -1 || true)"
+# The streams are kept SEPARATE, and that is not tidiness. Merging them so the
+# diagnostic could see stderr meant the version regex saw it too: a traceback
+# mentioning `/usr/lib/python3.11/site-packages/...` yields `3.11`, which sorts
+# far above the floor, so a CLI that cannot start would clear the version gate
+# and go straight to `blastbox build-images` -- the check defeated by the very
+# change meant to explain its failures (codex).
+#
+# So: the version is parsed from STDOUT of a run that EXITED ZERO. stderr is
+# captured only to show the operator what happened.
+BB_ERR_FILE="$(mktemp)"
+BB_VERSION_OUT="$(blastbox version 2>"$BB_ERR_FILE")" && BB_RC=0 || BB_RC=$?
+BB_VERSION_ERR="$(cat "$BB_ERR_FILE")"
+rm -f "$BB_ERR_FILE"
+BB_HAVE=""
+if [ "$BB_RC" -eq 0 ]; then
+  BB_HAVE="$(printf '%s\n' "$BB_VERSION_OUT" | grep -oE '[0-9]+(\.[0-9]+)+' | head -1 || true)"
+fi
 [ -n "$BB_HAVE" ] || {
   echo "this blastbox has no usable \`version\` output; need >= $BB_MIN" >&2
-  echo "\`blastbox version\` printed:" >&2
-  if [ -n "$BB_VERSION_OUT" ]; then
-    printf '%s\n' "$BB_VERSION_OUT" | tail -5 | sed 's/^/  /' >&2
+  echo "\`blastbox version\` exited $BB_RC and printed:" >&2
+  if [ -n "$BB_VERSION_OUT$BB_VERSION_ERR" ]; then
+    printf '%s\n' "$BB_VERSION_OUT" "$BB_VERSION_ERR" | grep -v '^$' | tail -5 | sed 's/^/  /' >&2
   else
     echo "  (nothing at all)" >&2
   fi

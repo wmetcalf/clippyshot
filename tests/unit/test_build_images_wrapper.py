@@ -495,3 +495,71 @@ class TestAFailingCliIsDiagnosable:
         """The capture must not change the happy path: a good version still passes the gate."""
         r = _run(stub_cli, "sometag", "--dry-run")
         assert "no usable `version` output" not in r.stderr
+
+
+class TestAFailedVersionCannotSatisfyTheFloor:
+    """Capturing stderr for the diagnostic must not feed it to the version parser.
+
+    A Python traceback names paths like `/usr/lib/python3.11/site-packages/...`. Merged into the
+    parsed stream, `3.11` becomes the "installed version" -- and 3.11 sorts far above the 0.1.x
+    floor, so a CLI that cannot start would CLEAR the gate and the wrapper would go on to run
+    `blastbox build-images` with it. The change meant to explain failures would have disabled the
+    check that catches them (codex).
+    """
+
+    def _stub(self, tmp_path: Path, body: str) -> Path:
+        d = tmp_path / "bin"
+        d.mkdir()
+        stub = d / "blastbox"
+        stub.write_text("#!/usr/bin/env bash\n" + body)
+        stub.chmod(0o755)
+        return d
+
+    def test_a_traceback_path_is_not_a_version(self, tmp_path: Path) -> None:
+        d = self._stub(
+            tmp_path,
+            'echo "Traceback (most recent call last):" >&2\n'
+            'echo "  File \"/usr/lib/python3.11/site-packages/blastbox/host/cli.py\", line 23" >&2\n'
+            "echo \"ModuleNotFoundError: No module named 'structlog'\" >&2\n"
+            "exit 1\n",
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert r.returncode == 2, (
+            "a CLI that cannot start cleared the version floor via its own traceback: " + r.stdout
+        )
+        assert "no usable `version` output" in r.stderr
+        assert "ModuleNotFoundError" in r.stderr
+        assert "build-images" not in r.stdout
+
+    def test_a_nonzero_exit_is_not_trusted_even_with_a_version_on_stdout(
+        self, tmp_path: Path
+    ) -> None:
+        """The exit status is its own gate. A CLI that prints a plausible version and then dies
+        has not answered the question -- and without this check, parsing stdout alone would
+        accept it."""
+        d = self._stub(tmp_path, 'echo "blastbox 9.9.9"\nexit 1\n')
+        r = _run(d, "sometag", "--dry-run")
+        assert r.returncode == 2, "a failed `version` was trusted because stdout looked right"
+        assert "no usable `version` output" in r.stderr
+
+    def test_a_zero_exit_with_only_stderr_noise_does_not_pass(self, tmp_path: Path) -> None:
+        """Exit 0 but nothing on stdout: stderr must not be scavenged for a number."""
+        d = self._stub(tmp_path, 'echo "note: /opt/python3.11/lib warming up" >&2\nexit 0\n')
+        r = _run(d, "sometag", "--dry-run")
+        assert r.returncode == 2
+        assert "no usable `version` output" in r.stderr
+
+    def test_stderr_noise_beside_a_good_stdout_version_is_ignored(self, tmp_path: Path) -> None:
+        """The version comes from stdout; a warning mentioning python3.11 must not become it."""
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            '  echo "warning: /usr/lib/python3.11/site-packages deprecation" >&2\n'
+            f'  echo "blastbox {BB_MIN}"\n'
+            "  exit 0\n"
+            "fi\n"
+            'printf "%s\\n" "$@"\n',
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert "no usable `version` output" not in r.stderr
+        assert "--dry-run" in r.stdout
