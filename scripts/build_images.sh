@@ -125,9 +125,25 @@ command -v blastbox >/dev/null || {
 # Having the SUBCOMMAND is not the same as having a version that can run it:
 # 0.1.33 has `build-images` and it only validates, so an older blastbox exits 2
 # saying execution is not implemented -- which reads like a broken script.
-BB_HAVE="$(blastbox version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -1 || true)"
+# stderr is CAPTURED, not discarded. `2>/dev/null` here cost a real diagnosis:
+# blastbox installed without its `host` extra had a console script that died on
+# `ModuleNotFoundError: No module named 'structlog'`, the traceback went to the
+# stderr this line threw away, and the operator was told their current blastbox
+# had "no usable version output" -- then handed a reinstall of the same thing.
+# That specific cause is fixed in blastbox 0.1.40; this keeps the NEXT one
+# visible.
+BB_VERSION_OUT="$(blastbox version 2>&1)" || true
+BB_HAVE="$(printf '%s\n' "$BB_VERSION_OUT" | grep -oE '[0-9]+(\.[0-9]+)+' | head -1 || true)"
 [ -n "$BB_HAVE" ] || {
   echo "this blastbox has no usable \`version\` output; need >= $BB_MIN" >&2
+  echo "\`blastbox version\` printed:" >&2
+  if [ -n "$BB_VERSION_OUT" ]; then
+    printf '%s\n' "$BB_VERSION_OUT" | tail -5 | sed 's/^/  /' >&2
+  else
+    echo "  (nothing at all)" >&2
+  fi
+  echo "If that names a missing module, the CLI is installed without the extra" >&2
+  echo "it needs: pip install --upgrade 'blastbox>=$BB_MIN'" >&2
   exit 2
 }
 # sort -V puts the smaller first, so the minimum leading means it is satisfied.

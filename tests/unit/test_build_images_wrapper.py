@@ -442,3 +442,56 @@ def test_the_too_old_refusal_runs_nothing_and_keeps_its_text(tmp_path: Path) -> 
     assert "is too old" in p.stderr, p.stderr
     assert not marker.exists(), f"the refusal ran docker: {marker.read_text()}"
     assert "`docker build -t`" in p.stderr, p.stderr
+
+
+class TestAFailingCliIsDiagnosable:
+    """`blastbox version 2>/dev/null` threw away the only evidence of WHY the CLI failed.
+
+    Measured, not imagined: blastbox installed without its `host` extra shipped a console script
+    that died on `ModuleNotFoundError: No module named 'structlog'`. The traceback went to the
+    discarded stderr, so this wrapper reported "no usable `version` output" for a perfectly
+    current blastbox, and the remediation it printed reinstalled the same thing. Fixed in the
+    library (blastbox 0.1.40); this keeps the NEXT such failure visible.
+    """
+
+    @pytest.fixture
+    def broken_cli(self, tmp_path: Path) -> Path:
+        """A `blastbox` that exists, exits non-zero, and explains itself on STDERR."""
+        d = tmp_path / "bin"
+        d.mkdir()
+        stub = d / "blastbox"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            'echo "Traceback (most recent call last):" >&2\n'
+            "echo \"ModuleNotFoundError: No module named 'structlog'\" >&2\n"
+            "exit 1\n"
+        )
+        stub.chmod(0o755)
+        return d
+
+    def test_the_real_error_is_shown(self, broken_cli: Path) -> None:
+        r = _run(broken_cli, "sometag", "--dry-run")
+        assert r.returncode == 2
+        assert "no usable `version` output" in r.stderr
+        assert "ModuleNotFoundError" in r.stderr, (
+            "the wrapper hid the only line that explains the failure: " + r.stderr
+        )
+        assert "structlog" in r.stderr
+
+    def test_a_silent_cli_says_so_rather_than_printing_nothing(self, tmp_path: Path) -> None:
+        """A stub that prints NOTHING must not produce an empty 'printed:' section -- the
+        absence of output is itself the diagnosis."""
+        d = tmp_path / "bin"
+        d.mkdir()
+        stub = d / "blastbox"
+        stub.write_text("#!/usr/bin/env bash\nexit 0\n")
+        stub.chmod(0o755)
+
+        r = _run(d, "sometag", "--dry-run")
+        assert r.returncode == 2
+        assert "(nothing at all)" in r.stderr
+
+    def test_a_working_cli_is_unaffected(self, stub_cli: Path) -> None:
+        """The capture must not change the happy path: a good version still passes the gate."""
+        r = _run(stub_cli, "sometag", "--dry-run")
+        assert "no usable `version` output" not in r.stderr
