@@ -209,12 +209,26 @@ trap '_bb_version_kill; _bb_version_cleanup; trap - TERM; kill -TERM $$' TERM
 # without this the EXIT cleanup runs, the wrapper dies, and the CLI and its
 # descendants carry on orphaned (codex).
 trap '_bb_version_kill; _bb_version_cleanup; trap - HUP; kill -HUP $$' HUP
+# QUIT as well (Ctrl-\). The terminal sends it to the foreground group, which no
+# longer contains the isolated probe, so without a handler `wait` is not
+# interrupted and both the wrapper and a hung probe sit there (codex).
+trap '_bb_version_kill; _bb_version_cleanup; trap - QUIT; kill -QUIT $$' QUIT
 # BOTH streams go to files under `ulimit -f`. stdout was previously captured by a
 # command substitution, which buffers the whole stream in shell memory -- and
 # `ulimit -f` bounds regular-file writes, not a pipe, so the stderr cap did
 # nothing for it. A flood on either stream now dies of SIGXFSZ at 512 KiB.
 BB_OUT_FILE="$(mktemp)"
 BB_PID_FILE="$(mktemp)"
+# BOUND THE PROBE'S DURATION, rather than chase the ways a CLI can block. `</dev/null`
+# does not cover a CLI that opens /dev/tty itself, and `set -m` means such a read is
+# STOPPED by SIGTTIN and `wait` never returns (codex). Rather than add a mechanism per
+# blocking mode, the probe gets a deadline: whatever the reason, it ends and the
+# operator gets the diagnostic instead of a wrapper that hangs forever. `-k` matters --
+# a process stopped by SIGTTIN cannot act on TERM, and only KILL moves it.
+_bb_version_timeout=""
+if command -v timeout >/dev/null 2>&1; then
+  _bb_version_timeout="timeout -k 5 ${BLASTBOX_VERSION_TIMEOUT_S:-30}"
+fi
 # stdin comes from /dev/null. `set -m` puts this job in a process group that is NOT
 # the terminal's foreground group, so a CLI that tried to read the terminal would be
 # STOPPED by SIGTTIN and the `wait` below would block forever -- a hang introduced by
@@ -235,8 +249,12 @@ set -m
 # -- fails, and under `set -e` that kills the subshell before the CLI ever runs, so
 # a perfectly good install is reported as having no usable version output (codex).
 ( _bb_fsize="$(ulimit -f)"
-  if [ "$_bb_fsize" = unlimited ] || { [ "$_bb_fsize" -gt 512 ] 2>/dev/null; }; then
-    ulimit -f 512
+  # 8 MiB, not 512 KiB. RLIMIT_FSIZE is PROCESS-wide, not a cap on these two files:
+  # a CLI that legitimately appends to a cache or log bigger than the limit takes
+  # SIGXFSZ and is rejected as unusable (codex). 8 MiB leaves ordinary writes alone
+  # while still bounding a runaway flood, which is measured in gigabytes.
+  if [ "$_bb_fsize" = unlimited ] || { [ "$_bb_fsize" -gt 8192 ] 2>/dev/null; }; then
+    ulimit -f 8192
   fi
   _bb_bashpid="${BASHPID:-}"
   # `|| true`: this file is an OPTIMISATION that closes a race window, not a
@@ -244,7 +262,8 @@ set -m
   # report a working CLI as unusable -- trading a real failure for a hypothetical
   # one.
   if [ -n "$_bb_bashpid" ]; then echo "$_bb_bashpid" > "$BB_PID_FILE" || true; fi
-  exec blastbox version ) >"$BB_OUT_FILE" 2>"$BB_ERR_FILE" </dev/null &
+  exec $_bb_version_timeout blastbox version ) \
+  >"$BB_OUT_FILE" 2>"$BB_ERR_FILE" </dev/null &
 BB_PID=$!
 set +m
 wait "$BB_PID" && BB_RC=0 || BB_RC=$?
@@ -266,7 +285,7 @@ if [ "$BB_RC" -eq 0 ]; then
   BB_HAVE="$(grep -aoE '[0-9]+(\.[0-9]+)+' "$BB_OUT_FILE" 2>/dev/null | head -1 || true)"
 fi
 _bb_version_cleanup
-trap - EXIT INT TERM HUP
+trap - EXIT INT TERM HUP QUIT
 [ -n "$BB_HAVE" ] || {
   echo "this blastbox has no usable \`version\` output; need >= $BB_MIN" >&2
   echo "\`blastbox version\` exited $BB_RC and printed:" >&2

@@ -936,6 +936,107 @@ class TestAFailedVersionCannotSatisfyTheFloor:
             bystander.kill()
             bystander.wait(timeout=10)
 
+    def test_a_hung_probe_is_abandoned_rather_than_waited_on_forever(
+        self, tmp_path: Path
+    ) -> None:
+        """`</dev/null` does not cover a CLI that opens /dev/tty itself, and `set -m` means such
+        a read is STOPPED by SIGTTIN with `wait` never returning (codex). Rather than a
+        mechanism per blocking mode, the probe has a deadline -- whatever the reason, it ends
+        and the operator gets the diagnostic.
+        """
+        import time
+
+        d = self._stub(tmp_path, 'if [ "$1" = version ]; then sleep 300; fi\n')
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "BLASTBOX_VERSION_TIMEOUT_S": "3",
+        }
+        started = time.monotonic()
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            env=env,
+            timeout=120,
+            check=False,
+        )
+        elapsed = time.monotonic() - started
+        assert r.returncode == 2
+        assert "no usable `version` output" in r.stderr
+        assert elapsed < 60, f"the wrapper waited {elapsed:.0f}s on a hung probe"
+
+    def test_a_legitimate_large_write_is_not_punished(self, tmp_path: Path) -> None:
+        """RLIMIT_FSIZE is process-wide, not a cap on the two capture files: a CLI that appends
+        to a cache or log larger than the limit takes SIGXFSZ and is rejected as unusable
+        (codex). 1 MiB is ordinary; it must not fail."""
+        scratch = tmp_path / "cli-cache"
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            f'  dd if=/dev/zero of="{scratch}" bs=1024 count=1024 2>/dev/null\n'
+            f'  echo "blastbox {BB_MIN}"\n'
+            "  exit 0\n"
+            "fi\n"
+            'printf "%s\\n" "$@"\n',
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert "no usable `version` output" not in r.stderr, (
+            "a 1 MiB write by the CLI was treated as a broken CLI: " + r.stderr
+        )
+        assert scratch.exists() and scratch.stat().st_size == 1024 * 1024
+        assert "--dry-run" in r.stdout
+
+    def test_a_quit_takes_the_cli_with_it(self, tmp_path: Path) -> None:
+        """Ctrl-\\ sends SIGQUIT to the foreground group, which no longer contains the isolated
+        probe -- so without a handler neither the wrapper nor the probe goes away (codex)."""
+        import signal
+        import time
+
+        childpid = tmp_path / "quit-childpid"
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            f'  echo $$ > "{childpid}"\n'
+            "  sleep 300\n"
+            "fi\n",
+        )
+        proc = subprocess.Popen(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={
+                **os.environ,
+                "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+                "BLASTBOX_VERSION_TIMEOUT_S": "300",
+            },
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not childpid.exists():
+            time.sleep(0.05)
+        assert childpid.exists(), "the stub CLI never started"
+        kid = int(childpid.read_text().strip())
+
+        proc.send_signal(signal.SIGQUIT)
+        try:
+            proc.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate(timeout=10)
+            os.kill(kid, signal.SIGKILL)
+            raise AssertionError("SIGQUIT did not terminate the wrapper") from None
+
+        time.sleep(1.0)
+        alive = _is_alive(kid)
+        if alive:
+            try:
+                os.kill(kid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        assert not alive, f"the CLI ({kid}) survived the quit as an orphan"
+
     def test_a_hangup_takes_the_cli_with_it(self, tmp_path: Path) -> None:
         """SIGHUP is what arrives when the terminal goes away -- precisely when nobody is left
         to notice a CLI still running. Only INT and TERM forwarded before (codex)."""
