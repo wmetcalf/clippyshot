@@ -719,6 +719,91 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         leftovers = list(tmpdir.iterdir())
         assert leftovers == [], f"the first temp file leaked when the second failed: {leftovers}"
 
+    def test_a_cli_that_reads_stdin_does_not_hang_the_wrapper(self, tmp_path: Path) -> None:
+        """`set -m` puts the CLI in a non-foreground process group, so a read from the terminal
+        would stop it with SIGTTIN and `wait` would block forever -- a hang introduced by the
+        isolation that makes the group killable (codex).
+
+        The wrapper is given an OPEN stdin pipe that never receives data: without the
+        `</dev/null` redirect the stub's read blocks and this test times out.
+        """
+        d = self._stub(tmp_path, 'if [ "$1" = version ]; then read -r line; echo "$line"; fi\n')
+        proc = subprocess.Popen(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={
+                **os.environ,
+                "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            },
+        )
+        # `wait`, NOT `communicate`: communicate CLOSES stdin, which hands the stub an EOF and
+        # makes the test pass even without the redirect -- it was the reason the mutation that
+        # removes `</dev/null` survived. The pipe must stay open and silent, like a terminal
+        # nobody is typing at.
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)
+            raise AssertionError(
+                "the wrapper hung waiting for a CLI that was reading stdin"
+            ) from None
+        finally:
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None:
+                    stream.close()
+        assert proc.returncode == 2
+
+    def test_a_hangup_takes_the_cli_with_it(self, tmp_path: Path) -> None:
+        """SIGHUP is what arrives when the terminal goes away -- precisely when nobody is left
+        to notice a CLI still running. Only INT and TERM forwarded before (codex)."""
+        import signal
+        import time
+
+        childpid = tmp_path / "hup-childpid"
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            f'  echo $$ > "{childpid}"\n'
+            "  sleep 300\n"
+            "fi\n",
+        )
+        proc = subprocess.Popen(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={
+                **os.environ,
+                "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            },
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not childpid.exists():
+            time.sleep(0.05)
+        assert childpid.exists(), "the stub CLI never started"
+        kid = int(childpid.read_text().strip())
+
+        proc.send_signal(signal.SIGHUP)
+        try:
+            proc.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate(timeout=10)
+            raise AssertionError("SIGHUP did not terminate the wrapper") from None
+
+        time.sleep(0.5)
+        alive = _is_alive(kid)
+        if alive:
+            try:
+                os.kill(kid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        assert not alive, f"the CLI ({kid}) survived the hangup as an orphan"
+
     def test_a_supervisor_signal_terminates_the_wrapper(self, tmp_path: Path) -> None:
         """A signal to THIS PID ONLY -- what a process supervisor sends, and what the
         process-group test cannot cover, because that one also kills the child.

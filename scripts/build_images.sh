@@ -192,12 +192,22 @@ _bb_version_kill() {
 trap '_bb_version_cleanup' EXIT
 trap '_bb_version_kill; _bb_version_cleanup; trap - INT; kill -INT $$' INT
 trap '_bb_version_kill; _bb_version_cleanup; trap - TERM; kill -TERM $$' TERM
+# HUP too. A terminal that goes away is exactly when the CLI is left running with
+# nobody watching, and `set -m` has just put it in its own process group -- so
+# without this the EXIT cleanup runs, the wrapper dies, and the CLI and its
+# descendants carry on orphaned (codex).
+trap '_bb_version_kill; _bb_version_cleanup; trap - HUP; kill -HUP $$' HUP
 # BOTH streams go to files under `ulimit -f`. stdout was previously captured by a
 # command substitution, which buffers the whole stream in shell memory -- and
 # `ulimit -f` bounds regular-file writes, not a pipe, so the stderr cap did
 # nothing for it. A flood on either stream now dies of SIGXFSZ at 512 KiB.
 BB_OUT_FILE="$(mktemp)"
 BB_PID_FILE="$(mktemp)"
+# stdin comes from /dev/null. `set -m` puts this job in a process group that is NOT
+# the terminal's foreground group, so a CLI that tried to read the terminal would be
+# STOPPED by SIGTTIN and the `wait` below would block forever -- a hang introduced by
+# the very isolation that makes the group killable (codex). A version probe has no
+# business reading stdin anyway.
 # `set -m` gives the background job its own process group, which is what makes
 # `kill -- -$BB_PID` above able to take the CLI's descendants with it.
 set -m
@@ -211,7 +221,7 @@ set -m
 ( ulimit -f 512
   _bb_bashpid="${BASHPID:-}"
   if [ -n "$_bb_bashpid" ]; then echo "$_bb_bashpid" > "$BB_PID_FILE"; fi
-  exec blastbox version ) >"$BB_OUT_FILE" 2>"$BB_ERR_FILE" &
+  exec blastbox version ) >"$BB_OUT_FILE" 2>"$BB_ERR_FILE" </dev/null &
 BB_PID=$!
 set +m
 wait "$BB_PID" && BB_RC=0 || BB_RC=$?
