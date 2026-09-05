@@ -567,7 +567,18 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         import signal
         import time
 
-        d = self._stub(tmp_path, 'if [ "$1" = version ]; then sleep 4; echo "blastbox 99.0"; fi\n')
+        # The CLI HANGS. A four-second child hid the defect codex found: with a foreground
+        # command substitution bash defers the trap until the command returns, so the wrapper
+        # was unkillable for as long as the CLI ran -- and a short sleep let the test pass
+        # anyway. It also records its pid, so the child can be checked for afterwards.
+        childpid = tmp_path / "childpid"
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            f'  echo $$ > "{childpid}"\n'
+            "  sleep 300\n"
+            "fi\n",
+        )
         proc = subprocess.Popen(
             ["bash", str(SCRIPT), "sometag", "--dry-run"],
             stdout=subprocess.PIPE,
@@ -579,19 +590,56 @@ class TestAFailedVersionCannotSatisfyTheFloor:
             },
             start_new_session=True,
         )
-        time.sleep(1.0)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not childpid.exists():
+            time.sleep(0.05)
+        assert childpid.exists(), "the stub CLI never started"
+        kid = int(childpid.read_text().strip())
+
         proc.send_signal(signal.SIGTERM)          # the PID, deliberately not the group
         try:
-            out, _err = proc.communicate(timeout=30)
+            # Well under the child's 300s: the point is that the wrapper does NOT wait for it.
+            out, _err = proc.communicate(timeout=20)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate(timeout=10)
-            raise AssertionError("the wrapper never terminated after SIGTERM") from None
+            os.kill(kid, signal.SIGKILL)
+            raise AssertionError(
+                "the wrapper waited for a hung CLI instead of terminating"
+            ) from None
 
         assert proc.returncode != 0, "SIGTERM was swallowed and the wrapper reported success"
         assert "--dry-run" not in out, (
             "the wrapper carried on into the build after being told to stop: " + out
         )
+        time.sleep(0.5)
+        try:
+            os.kill(kid, 0)
+        except ProcessLookupError:
+            pass
+        else:
+            os.kill(kid, signal.SIGKILL)
+            raise AssertionError(f"the CLI ({kid}) outlived the wrapper as an orphan")
+
+    def test_a_stdout_flood_cannot_exhaust_memory(self, tmp_path: Path) -> None:
+        """stdout used to be captured by a command substitution, i.e. buffered whole in shell
+        memory, and `ulimit -f` does not bound a pipe. Both streams are files now; the marker
+        after the flood is the observable proof the writer was stopped."""
+        marker = tmp_path / "finished-stdout"
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            "  for i in $(seq 1 200000); do\n"
+            '    printf "%s\\n" "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"\n'
+            "  done\n"
+            f'  touch "{marker}"\n'
+            "  exit 0\n"
+            "fi\n"
+            'printf "%s\\n" "$@"\n',
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert not marker.exists(), "the flood ran to completion; stdout is not bounded"
+        assert r.returncode == 2
 
     def test_an_interrupted_run_leaves_no_temp_file(self, tmp_path: Path) -> None:
         """Ctrl-C while `blastbox version` is running must not strand the diagnostic file.

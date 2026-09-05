@@ -142,28 +142,36 @@ command -v blastbox >/dev/null || {
 # So: the version is parsed from STDOUT of a run that EXITED ZERO. stderr is
 # captured only to show the operator what happened.
 BB_ERR_FILE="$(mktemp)"
-# The traps go on the line after mktemp, not beside the rm below: a Ctrl-C while
-# `blastbox version` is running exits before any later cleanup and would leave the
-# file, holding whatever the CLI had written, in $TMPDIR forever (codex).
+BB_OUT_FILE="$(mktemp)"
+_bb_version_cleanup() { rm -f "$BB_ERR_FILE" "$BB_OUT_FILE"; }
+# `blastbox version` runs in the BACKGROUND and is waited on, which is the only
+# arrangement that survives all three problems at once:
 #
-# INT/TERM clean up and then RE-RAISE. A handler that merely returns makes bash
-# SWALLOW the termination: when a supervisor signals only this pid (not the
-# process group), bash defers the trap until `blastbox version` returns, runs it,
-# and then carries on into the build -- a wrapper that ignores SIGTERM and
-# reports success. Resetting the trap and re-signalling self also gives the
-# caller the 128+n status they expect (codex).
-trap 'rm -f "$BB_ERR_FILE"' EXIT
-trap 'rm -f "$BB_ERR_FILE"; trap - INT; kill -INT $$' INT
-trap 'rm -f "$BB_ERR_FILE"; trap - TERM; kill -TERM $$' TERM
-# `ulimit -f` bounds what a broken CLI can put on this host's temp filesystem
-# while it is being captured -- the old `2>/dev/null` could not fill anything, so
-# capturing stderr introduced the exposure and has to close it here rather than
-# after the fact. 512 KiB is ample for a diagnostic whose last few lines are all
-# that is ever shown; a writer that exceeds it dies of SIGXFSZ, which lands in
-# the failure path this block already handles (codex).
-BB_VERSION_OUT="$(ulimit -f 512; blastbox version 2>"$BB_ERR_FILE")" && BB_RC=0 || BB_RC=$?
+#  * a Ctrl-C or a supervisor's SIGTERM must not strand these temp files, so the
+#    handlers clean up;
+#  * bash defers a trap until the FOREGROUND command returns, so with a command
+#    substitution a hung CLI made the wrapper unkillable -- worse than having no
+#    trap at all, where the default disposition would have killed it outright.
+#    `wait` is interruptible, so the handler runs immediately;
+#  * a handler that only cleans up SWALLOWS the termination, so these reset the
+#    trap and re-signal self, giving the caller the 128+n status.
+#
+# `exec` matters: it makes the subshell BECOME blastbox, so $! is the CLI's own
+# pid and killing it kills the CLI rather than orphaning it behind a subshell.
+# (codex, three rounds on this block; each of these was measured, not reasoned.)
+trap '_bb_version_cleanup' EXIT
+trap 'kill "${BB_PID:-0}" 2>/dev/null; _bb_version_cleanup; trap - INT; kill -INT $$' INT
+trap 'kill "${BB_PID:-0}" 2>/dev/null; _bb_version_cleanup; trap - TERM; kill -TERM $$' TERM
+# BOTH streams go to files under `ulimit -f`. stdout was previously captured by a
+# command substitution, which buffers the whole stream in shell memory -- and
+# `ulimit -f` bounds regular-file writes, not a pipe, so the stderr cap did
+# nothing for it. A flood on either stream now dies of SIGXFSZ at 512 KiB.
+( ulimit -f 512; exec blastbox version ) >"$BB_OUT_FILE" 2>"$BB_ERR_FILE" &
+BB_PID=$!
+wait "$BB_PID" && BB_RC=0 || BB_RC=$?
+BB_VERSION_OUT="$(head -c 4096 "$BB_OUT_FILE" 2>/dev/null || true)"
 BB_VERSION_ERR="$(tail -c 4096 "$BB_ERR_FILE" 2>/dev/null || true)"
-rm -f "$BB_ERR_FILE"
+_bb_version_cleanup
 trap - EXIT INT TERM
 BB_HAVE=""
 if [ "$BB_RC" -eq 0 ]; then
