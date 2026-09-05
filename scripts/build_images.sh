@@ -159,15 +159,30 @@ _bb_version_cleanup() { rm -f "$BB_ERR_FILE" "$BB_OUT_FILE"; }
 # `exec` matters: it makes the subshell BECOME blastbox, so $! is the CLI's own
 # pid and killing it kills the CLI rather than orphaning it behind a subshell.
 # (codex, three rounds on this block; each of these was measured, not reasoned.)
+# GUARD the pid, never default it: `kill 0` does not mean "kill nothing", it
+# signals the wrapper's ENTIRE process group -- the caller and its siblings --
+# and a signal arriving between installing this trap and assigning BB_PID would
+# have done exactly that. Kill the CLI's process GROUP (`-$BB_PID`, which needs
+# the `set -m` below), because killing the CLI alone leaves whatever it spawned
+# reparented to init and still running. (codex)
+_bb_version_kill() {
+  if [ -n "${BB_PID:-}" ]; then
+    kill -- "-$BB_PID" 2>/dev/null || true
+  fi
+}
 trap '_bb_version_cleanup' EXIT
-trap 'kill "${BB_PID:-0}" 2>/dev/null; _bb_version_cleanup; trap - INT; kill -INT $$' INT
-trap 'kill "${BB_PID:-0}" 2>/dev/null; _bb_version_cleanup; trap - TERM; kill -TERM $$' TERM
+trap '_bb_version_kill; _bb_version_cleanup; trap - INT; kill -INT $$' INT
+trap '_bb_version_kill; _bb_version_cleanup; trap - TERM; kill -TERM $$' TERM
 # BOTH streams go to files under `ulimit -f`. stdout was previously captured by a
 # command substitution, which buffers the whole stream in shell memory -- and
 # `ulimit -f` bounds regular-file writes, not a pipe, so the stderr cap did
 # nothing for it. A flood on either stream now dies of SIGXFSZ at 512 KiB.
+# `set -m` gives the background job its own process group, which is what makes
+# `kill -- -$BB_PID` above able to take the CLI's descendants with it.
+set -m
 ( ulimit -f 512; exec blastbox version ) >"$BB_OUT_FILE" 2>"$BB_ERR_FILE" &
 BB_PID=$!
+set +m
 wait "$BB_PID" && BB_RC=0 || BB_RC=$?
 BB_VERSION_OUT="$(head -c 4096 "$BB_OUT_FILE" 2>/dev/null || true)"
 BB_VERSION_ERR="$(tail -c 4096 "$BB_ERR_FILE" 2>/dev/null || true)"

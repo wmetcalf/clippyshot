@@ -572,11 +572,17 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         # was unkillable for as long as the CLI ran -- and a short sleep let the test pass
         # anyway. It also records its pid, so the child can be checked for afterwards.
         childpid = tmp_path / "childpid"
+        grandpid = tmp_path / "grandpid"
+        # The CLI spawns a child of its own. Killing only the CLI leaves that grandchild
+        # reparented to init and running -- an orphan the earlier version of this test could
+        # not see, because it checked the stub's `$$` alone (codex).
         d = self._stub(
             tmp_path,
             'if [ "$1" = version ]; then\n'
             f'  echo $$ > "{childpid}"\n'
-            "  sleep 300\n"
+            "  /bin/sleep 300 &\n"
+            f'  echo $! > "{grandpid}"\n'
+            "  wait\n"
             "fi\n",
         )
         proc = subprocess.Popen(
@@ -594,7 +600,12 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         while time.monotonic() < deadline and not childpid.exists():
             time.sleep(0.05)
         assert childpid.exists(), "the stub CLI never started"
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not grandpid.exists():
+            time.sleep(0.05)
+        assert grandpid.exists(), "the stub CLI never spawned its child"
         kid = int(childpid.read_text().strip())
+        grandkid = int(grandpid.read_text().strip())
 
         proc.send_signal(signal.SIGTERM)          # the PID, deliberately not the group
         try:
@@ -603,7 +614,11 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate(timeout=10)
-            os.kill(kid, signal.SIGKILL)
+            for stray in (kid, grandkid):
+                try:
+                    os.kill(stray, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             raise AssertionError(
                 "the wrapper waited for a hung CLI instead of terminating"
             ) from None
@@ -613,13 +628,18 @@ class TestAFailedVersionCannotSatisfyTheFloor:
             "the wrapper carried on into the build after being told to stop: " + out
         )
         time.sleep(0.5)
-        try:
-            os.kill(kid, 0)
-        except ProcessLookupError:
-            pass
-        else:
-            os.kill(kid, signal.SIGKILL)
-            raise AssertionError(f"the CLI ({kid}) outlived the wrapper as an orphan")
+        survivors = []
+        for stray, label in ((kid, "the CLI"), (grandkid, "the CLI's child")):
+            try:
+                os.kill(stray, 0)
+            except ProcessLookupError:
+                continue
+            survivors.append(f"{label} ({stray})")
+            try:
+                os.kill(stray, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        assert not survivors, f"{', '.join(survivors)} outlived the wrapper as an orphan"
 
     def test_a_stdout_flood_cannot_exhaust_memory(self, tmp_path: Path) -> None:
         """stdout used to be captured by a command substitution, i.e. buffered whole in shell
