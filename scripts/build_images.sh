@@ -187,6 +187,13 @@ _bb_version_kill() {
   fi
   if [ -n "$_bb_pid" ]; then
     kill -- "-$_bb_pid" 2>/dev/null || true
+    # ESCALATE. A CLI that ignores TERM would otherwise survive in the isolated
+    # process group while the wrapper exits -- an orphan a supervisor signalling
+    # the wrapper can no longer reach, which is worse than the leak this whole
+    # arrangement was built to prevent (codex). Half a second, then KILL, which
+    # nothing can ignore.
+    sleep 0.5
+    kill -KILL -- "-$_bb_pid" 2>/dev/null || true
   fi
 }
 trap '_bb_version_cleanup' EXIT
@@ -243,12 +250,20 @@ if [ "$BB_RC" -eq 0 ]; then
   BB_HAVE="$(grep -aoE '[0-9]+(\.[0-9]+)+' "$BB_OUT_FILE" 2>/dev/null | head -1 || true)"
 fi
 _bb_version_cleanup
-trap - EXIT INT TERM
+trap - EXIT INT TERM HUP
 [ -n "$BB_HAVE" ] || {
   echo "this blastbox has no usable \`version\` output; need >= $BB_MIN" >&2
   echo "\`blastbox version\` exited $BB_RC and printed:" >&2
   if [ -n "$BB_VERSION_OUT$BB_VERSION_ERR" ]; then
-    printf '%s\n' "$BB_VERSION_OUT" "$BB_VERSION_ERR" | grep -a -v '^$' | tail -5 | sed 's/^/  /' >&2
+    # A slice of EACH stream. Concatenating and tailing dropped the actionable error
+    # whenever it was on stdout and stderr had five or more lines after it -- the
+    # diagnostic discarding the diagnosis (codex).
+    if [ -n "$BB_VERSION_OUT" ]; then
+      printf '%s\n' "$BB_VERSION_OUT" | grep -a -v '^$' | tail -3 | sed 's/^/  [stdout] /' >&2
+    fi
+    if [ -n "$BB_VERSION_ERR" ]; then
+      printf '%s\n' "$BB_VERSION_ERR" | grep -a -v '^$' | tail -5 | sed 's/^/  [stderr] /' >&2
+    fi
   else
     echo "  (nothing at all)" >&2
   fi

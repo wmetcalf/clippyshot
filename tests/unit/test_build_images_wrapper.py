@@ -757,6 +757,99 @@ class TestAFailedVersionCannotSatisfyTheFloor:
                     stream.close()
         assert proc.returncode == 2
 
+    def test_a_cli_that_ignores_sigterm_is_killed_anyway(self, tmp_path: Path) -> None:
+        """An isolated process group that ignores TERM would outlive the wrapper as an orphan
+        no supervisor can reach afterwards -- worse than the leak the isolation prevents
+        (codex). The handler escalates to KILL, which nothing can trap."""
+        import signal
+        import time
+
+        childpid = tmp_path / "stubborn-pid"
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            "  trap '' TERM INT HUP\n"
+            f'  echo $$ > "{childpid}"\n'
+            "  sleep 300\n"
+            "fi\n",
+        )
+        proc = subprocess.Popen(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={
+                **os.environ,
+                "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            },
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not childpid.exists():
+            time.sleep(0.05)
+        assert childpid.exists(), "the stub CLI never started"
+        kid = int(childpid.read_text().strip())
+
+        proc.send_signal(signal.SIGTERM)
+        try:
+            proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate(timeout=10)
+            os.kill(kid, signal.SIGKILL)
+            raise AssertionError("the wrapper never terminated") from None
+
+        time.sleep(1.0)
+        alive = _is_alive(kid)
+        if alive:
+            try:
+                os.kill(kid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        assert not alive, f"a TERM-ignoring CLI ({kid}) survived as an unreachable orphan"
+
+    def test_an_error_on_stdout_is_not_crowded_out_by_stderr(self, tmp_path: Path) -> None:
+        """Concatenating the streams and tailing five lines discarded the actual error whenever
+        it was on stdout and stderr had five lines after it -- the diagnostic throwing away the
+        diagnosis (codex)."""
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            '  echo "FATAL: config at /etc/blastbox.toml is unreadable"\n'
+            "  for i in $(seq 1 8); do\n"
+            '    printf "%s\\n" "noise line filling the tail" >&2\n'
+            "  done\n"
+            "  exit 1\n"
+            "fi\n",
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert r.returncode == 2
+        assert "is unreadable" in r.stderr, (
+            "the error on stdout was crowded out by stderr noise: " + r.stderr
+        )
+
+    def test_every_trapped_signal_is_cleared_afterwards(self) -> None:
+        """Source-level, and it says so: a handler left installed after the probe would later
+        read a deleted pidfile, fall back to the finished probe's pid, and signal whatever
+        process group has that number by then (codex). Observing that needs pid REUSE, which a
+        test cannot arrange, so the invariant is asserted on the script instead.
+        """
+        import re
+
+        code = [line.split("#", 1)[0] for line in SCRIPT.read_text().splitlines()]
+        trapped: set[str] = set()
+        cleared: set[str] = set()
+        for line in code:
+            m = re.match(r"\s*trap\s+(-|'[^']*'|\"[^\"]*\")\s+(.+?)\s*$", line)
+            if not m:
+                continue
+            sigs = {s for s in m.group(2).split() if s.isalpha()}
+            if m.group(1) == "-":
+                cleared |= sigs
+            else:
+                trapped |= sigs
+        missing = sorted(trapped - cleared - {"EXIT"})
+        assert not missing, f"these traps are installed but never cleared: {missing}"
+
     def test_a_hangup_takes_the_cli_with_it(self, tmp_path: Path) -> None:
         """SIGHUP is what arrives when the terminal goes away -- precisely when nobody is left
         to notice a CLI still running. Only INT and TERM forwarded before (codex)."""
