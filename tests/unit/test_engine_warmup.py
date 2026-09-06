@@ -729,3 +729,54 @@ def test_a_failed_selection_asks_the_host_not_the_exception(
         eng._warmup_ocr()
 
     assert bool(started) is expect_started
+
+
+@pytest.mark.parametrize("backend", ["nsjail", "bwrap", "container+nono"])
+def test_the_converter_drops_warm_helpers_a_per_call_sandbox_would_bypass(monkeypatch, backend):
+    """Warmup and the converter select INDEPENDENTLY, and the answer can differ.
+
+    Inside an OCI worker that also ships nsjail, a transient failure of the nsjail
+    candidate makes selection fall through to `container` at warmup -- so the helpers
+    start -- and a later selection can succeed with nsjail (codex on #41). Warmup's guard
+    saves the cost of starting a helper that must not be used; this one is what makes it
+    true, because it runs where the sandbox that will ACTUALLY be used is known.
+    """
+    import clippyshot.engine as eng_mod
+
+    class Fake:
+        name = backend
+
+        def run(self, request):  # pragma: no cover
+            raise AssertionError
+
+    monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", lambda **kw: Fake())
+    monkeypatch.setattr("clippyshot.rasterizer.build_rasterizer", lambda sb: object())
+    monkeypatch.setattr(
+        "clippyshot.selftest.detect_runtime_apparmor_profile", lambda: None
+    )
+    monkeypatch.setattr(
+        "clippyshot.selftest.detect_soffice_apparmor_profile", lambda _sandbox: None
+    )
+
+    captured = {}
+
+    class FakeConverter:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+    monkeypatch.setattr("clippyshot.converter.Converter", FakeConverter)
+
+    class FakeRunner:
+        def __init__(self, sandbox=None, uno_server=None):
+            captured["runner_uno_server"] = uno_server
+
+    monkeypatch.setattr("clippyshot.libreoffice.runner.LibreOfficeRunner", FakeRunner)
+
+    eng_mod._build_converter(uno_server=object(), ocr_helper=object())
+
+    assert captured["runner_uno_server"] is None, (
+        f"{backend} sandboxes each call; the warm soffice must not be used"
+    )
+    assert captured.get("ocr_helper") is None, (
+        f"{backend} sandboxes each call; the warm OCR helper must not be used"
+    )

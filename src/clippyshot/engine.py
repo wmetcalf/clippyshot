@@ -134,13 +134,30 @@ def _build_converter(uno_server: WarmConverter | None = None, ocr_helper=None):
     from clippyshot.detector import Detector
     from clippyshot.libreoffice.runner import LibreOfficeRunner
     from clippyshot.rasterizer import build_rasterizer
-    from clippyshot.sandbox.detect import select_sandbox
+    import logging
+
+    from clippyshot.sandbox.detect import sandboxes_each_call, select_sandbox
     from clippyshot.selftest import (
         detect_runtime_apparmor_profile,
         detect_soffice_apparmor_profile,
     )
 
     sandbox = select_sandbox()
+    # THE INVARIANT IS ENFORCED HERE, where the sandbox that will actually be used is
+    # known. Warmup asks the same question earlier, but the two selections are
+    # independent and the answer can differ between them -- inside an OCI worker that
+    # also ships nsjail, a transient failure of the nsjail candidate makes selection fall
+    # through to `container` at warmup, and a later selection can succeed with nsjail
+    # (codex). Warmup's guard saves the cost of starting a helper that must not be used;
+    # this one is what makes it true.
+    if sandboxes_each_call(sandbox) and (uno_server is not None or ocr_helper is not None):
+        logging.getLogger("clippyshot.engine").warning(
+            "dropping warm helpers: %s sandboxes each call, and a warm helper started "
+            "under a different selection would carry untrusted input outside it",
+            sandbox.name,
+        )
+        uno_server = None
+        ocr_helper = None
     return Converter(
         detector=Detector(),
         runner=LibreOfficeRunner(sandbox=sandbox, uno_server=uno_server),
