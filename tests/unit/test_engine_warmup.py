@@ -338,12 +338,14 @@ def test_detonate_maps_detection_error_to_rejected(tmp_path):
 
 
 @pytest.mark.parametrize("backend", ["nsjail", "bwrap"])
-def test_warm_ocr_declines_where_each_scanner_call_is_sandboxed(monkeypatch, backend):
-    """The cold path wraps every `tesseract` call; the warm helper is outside it.
+def test_warm_ocr_declines_when_the_backend_cannot_host_the_helper(monkeypatch, backend):
+    """The cold path wraps every `tesseract` call; a warm helper outside it would hand
+    the untrusted PNG to an UNSANDBOXED image parser.
 
-    Enabling warm OCR there would hand the untrusted PNG to an UNSANDBOXED
-    image parser while the cold path beside it is careful not to.
-    `_maybe_start_cold_ocr_helper` already declines for this reason.
+    The helper now runs INSIDE the sandbox where the backend can host a persistent
+    process (issue #35) -- this is the other half of that rule: a backend that cannot
+    still declines, rather than falling back to running the parser unconfined. The fake
+    here has no `spawn`, so it is not a `SpawningSandbox`.
     """
     from clippyshot.engine import ClippyShotEngine
 
@@ -432,4 +434,52 @@ def test_warm_ocr_survives_an_unresolvable_sandbox(monkeypatch, caplog):
     assert started == [True], "an unresolvable backend must not disable the warm tier"
     assert any("could not determine the sandbox" in r.message for r in caplog.records), (
         "the ambiguity must be logged, not silent"
+    )
+
+
+@pytest.mark.parametrize("backend", ["nsjail", "bwrap"])
+def test_warm_ocr_runs_inside_the_sandbox_when_the_backend_can_host_it(monkeypatch, backend):
+    """The point of issue #35: the warm tier is restored under nsjail/bwrap by putting
+    the helper INSIDE the boundary, rather than declining it and paying the per-page
+    model load on the CLI path.
+
+    Asserts the helper was constructed with the SANDBOX-backed spawner -- starting it
+    with the default `subprocess.Popen` is exactly the bypass this replaces.
+    """
+    from clippyshot.engine import ClippyShotEngine
+
+    monkeypatch.setenv("CLIPPYSHOT_WARM_OCR", "1")
+    monkeypatch.delenv("CLIPPYSHOT_OCR_ENGINE", raising=False)
+
+    spawned = []
+
+    class Spawning:
+        name = backend
+
+        def spawn(self, request, **kwargs):
+            spawned.append(request)
+            raise AssertionError("not reached: WarmOCR is faked below")
+
+    monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", lambda **kw: Spawning())
+
+    seen = {}
+
+    class FakeWarm:
+        def __init__(self, *a, **k):
+            seen.update(k)
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr("clippyshot.ocr_warm.WarmOCR", FakeWarm)
+
+    engine = ClippyShotEngine()
+    engine._warmup_ocr()
+
+    assert engine._ocr_server is not None, f"{backend} can host the helper; it must start"
+    assert seen.get("popen") is not None, (
+        "the helper was started with the default Popen -- outside the sandbox"
     )

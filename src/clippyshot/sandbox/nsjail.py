@@ -221,7 +221,18 @@ class NsjailSandbox:
             killed=killed,
         )
 
-    def _build_argv(self, req: SandboxRequest) -> list[str]:
+    def spawn(self, request: SandboxRequest, **popen_kwargs) -> subprocess.Popen:
+        """Start a LONG-LIVED process in the jail; the caller owns its pipes.
+
+        No `--time_limit`: a warm helper is meant to outlive any single request, and
+        `Limits.timeout_s` caps at 600s, so reusing the one-shot argv would kill the
+        helper ten minutes in. Each REQUEST is still bounded by the client, which
+        SIGKILLs a hung helper -- and killing this process kills the jailed one
+        (verified on nsjail and bwrap: zero survivors).
+        """
+        return subprocess.Popen(self._build_argv(request, persistent=True), **popen_kwargs)
+
+    def _build_argv(self, req: SandboxRequest, *, persistent: bool = False) -> list[str]:
         argv: list[str] = [
             self._nsjail,
             "--mode", "o",  # one-shot
@@ -233,7 +244,6 @@ class NsjailSandbox:
             # procfs — it only shows processes inside the sandbox, so
             # there's no host info leak.
             "--iface_no_lo",
-            "--time_limit", str(req.limits.timeout_s),
             "--rlimit_as", str(req.limits.memory_bytes // (1024 * 1024)),
             "--rlimit_fsize", str(req.limits.tmpfs_bytes // (1024 * 1024)),
             "--rlimit_nofile", "4096",
@@ -244,6 +254,10 @@ class NsjailSandbox:
             "--group", "65534",
             "--hostname", "clippy",
         ]
+        if not persistent:
+            # A one-shot run gets the request's deadline. A persistent helper does not:
+            # see spawn().
+            argv += ["--time_limit", str(req.limits.timeout_s)]
 
         # Read-only system bind mounts.  Real directories use --bindmount_ro;
         # merged-usr symlinks are recreated inside the jail with --symlink.

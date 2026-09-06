@@ -237,6 +237,38 @@ class BwrapSandbox:
             if seccomp_fd is not None:
                 os.close(seccomp_fd)
 
+    def spawn(self, request: SandboxRequest, **popen_kwargs) -> subprocess.Popen:
+        """Start a LONG-LIVED process in the sandbox; the caller owns its pipes.
+
+        The CPU rlimit is dropped for the same reason nsjail's `--time_limit` is: it is
+        `timeout_s + 30` SECONDS OF CPU, and OCR is CPU-bound, so a warm helper would
+        be killed part-way through a busy slot. Memory and file-size limits stay --
+        those bound a single moment, not a lifetime. Each request is bounded by the
+        client.
+        """
+        # The seccomp memfd, exactly as `run()` builds it. Omitting it silently dropped
+        # `--seccomp` and left the LONG-LIVED image parser without the syscall denylist --
+        # a helper that lives for a whole slot is the last place to lose it (codex).
+        seccomp_fd: int | None = None
+        try:
+            if self._seccomp_bpf is not None:
+                seccomp_fd = os.memfd_create("clippyshot_seccomp", 0)
+                os.write(seccomp_fd, self._seccomp_bpf)
+                os.lseek(seccomp_fd, 0, os.SEEK_SET)
+                os.set_inheritable(seccomp_fd, True)
+            return subprocess.Popen(
+                self._build_argv(request, seccomp_fd=seccomp_fd),
+                preexec_fn=_apply_rlimits(request.limits, cpu_deadline=False),
+                close_fds=True,
+                pass_fds=() if seccomp_fd is None else (seccomp_fd,),
+                **popen_kwargs,
+            )
+        finally:
+            # The child inherited it at fork; this closes the parent's copy. A persistent
+            # helper outlives this call, so leaving it open would leak one fd per spawn.
+            if seccomp_fd is not None:
+                os.close(seccomp_fd)
+
     def _build_argv(self, req: SandboxRequest, *, seccomp_fd: int | None = None) -> list[str]:
         argv: list[str] = [
             self._bwrap,
@@ -303,8 +335,13 @@ class BwrapSandbox:
         return argv
 
 
-def _apply_rlimits(limits) -> Callable[[], None]:
-    """Return a preexec function that applies rlimits to the child."""
+def _apply_rlimits(limits, *, cpu_deadline: bool = True) -> Callable[[], None]:
+    """Return a preexec function that applies rlimits to the child.
+
+    ``cpu_deadline=False`` is for a PERSISTENT helper (see ``spawn``): RLIMIT_CPU is a
+    lifetime budget, not a per-request one, so applying a request-shaped deadline to a
+    process meant to serve many requests kills it mid-slot.
+    """
 
     def _set() -> None:
         # Address space (memory).
@@ -313,11 +350,12 @@ def _apply_rlimits(limits) -> Callable[[], None]:
         except (ValueError, OSError):
             pass
         # CPU time as a hard upper bound (timeout_s + 30s headroom).
-        cpu = limits.timeout_s + 30
-        try:
-            resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
-        except (ValueError, OSError):
-            pass
+        if cpu_deadline:
+            cpu = limits.timeout_s + 30
+            try:
+                resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
+            except (ValueError, OSError):
+                pass
         # File size.
         try:
             resource.setrlimit(resource.RLIMIT_FSIZE, (limits.tmpfs_bytes, limits.tmpfs_bytes))

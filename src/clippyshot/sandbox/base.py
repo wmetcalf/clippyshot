@@ -1,6 +1,7 @@
 """Sandbox protocol and shared types."""
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -30,6 +31,28 @@ class SandboxRequest:
     # so it isn't denied by a profile written for soffice — it stays confined by the
     # namespace + (nsjail) seccomp.
     attach_apparmor: bool = True
+
+
+@runtime_checkable
+class SpawningSandbox(Protocol):
+    """A backend that can host a LONG-LIVED process, not just a one-shot run.
+
+    Separate from ``Sandbox`` on purpose: hosting a persistent helper is a real
+    capability, not something every backend has, and the caller must be able to ask
+    rather than guess with ``hasattr``. The differences from ``run()`` are the point:
+
+    * no wall-clock or CPU deadline is imposed by the sandbox -- a warm helper is meant
+      to outlive any single request, and the CLIENT bounds each request and SIGKILLs a
+      hung helper (which is verified to kill the sandboxed process too);
+    * the caller owns the pipes and the lifecycle, so stdin/stdout must pass through.
+
+    Everything else -- namespaces, mounts, uid, seccomp, rlimits on memory and file
+    size -- is identical to ``run()``.
+    """
+
+    name: str
+
+    def spawn(self, request: SandboxRequest, **popen_kwargs) -> "subprocess.Popen": ...
 
 
 @runtime_checkable

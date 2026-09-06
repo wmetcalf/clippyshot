@@ -23,6 +23,7 @@ the sandboxed CLI enforces.
 """
 from __future__ import annotations
 
+import base64
 import json
 from collections import OrderedDict
 import os
@@ -46,6 +47,75 @@ from clippyshot.ocr import (
 # How many (lang, psm) tesseract APIs one helper keeps loaded. Each holds a
 # language model; four covers realistic per-job variation without unbounded growth.
 MAX_CACHED_APIS = 4
+
+# Largest page image sent over the pipe. The helper may be SANDBOXED, in which case
+# it has no access to the job filesystem at all and the image travels as bytes -- so
+# this is the only bound on what one request can cost in memory. A scan PNG is the
+# downscaled copy `select_scan_image` picks, orders of magnitude below this; anything
+# larger is refused and the caller cold-falls-back to the CLI, which reads the file
+# directly.
+MAX_PNG_BYTES = 32 * 1024 * 1024
+
+
+def sandboxed_popen(sandbox, *, prefix: str | None = None) -> Callable[..., subprocess.Popen]:
+    """A ``popen`` for :class:`WarmOCR` that starts the helper INSIDE ``sandbox``.
+
+    The warm helper parses untrusted page images, which is exactly what the inner
+    boundary exists for -- but the cold path sandboxes each scanner CALL, mounting that
+    page's directory, and a persistent helper's mounts are fixed at spawn, before any
+    page exists. That is why the warm tier used to be declined outright under
+    nsjail/bwrap (issue #35).
+
+    It works because the image travels as BYTES over the pipe, so the helper needs no
+    access to the job filesystem at all -- only to its own interpreter. That is the one
+    mount here: ``sys.prefix``, and only when it is not already inside the system
+    directories the backend mounts anyway.
+
+    The soffice AppArmor profile is deliberately NOT attached: it is written for
+    soffice, and this is a different binary. Namespaces, uid, seccomp and the memory
+    and file-size rlimits all still apply.
+    """
+    from clippyshot.limits import Limits
+    from clippyshot.sandbox.base import Mount, SandboxRequest
+
+    import clippyshot
+
+    system = (Path("/usr"), Path("/etc"))
+
+    def _needs_mount(path: Path) -> bool:
+        return not any(path == d or path.is_relative_to(d) for d in system)
+
+    root = Path(prefix or sys.prefix).resolve()
+    mounts = []
+    if _needs_mount(root):
+        mounts.append(Mount(root, root, read_only=True))
+
+    # The package's own location, which is NOT always inside sys.prefix: an installed
+    # deployment puts it in the venv (covered by the mount above), but a source
+    # checkout runs it from a working tree, and a helper that cannot import
+    # `clippyshot` never reaches its ready line -- the caller would see only a timeout.
+    pkg_root = Path(clippyshot.__file__).resolve().parent.parent
+    env: dict[str, str] = {}
+    if _needs_mount(pkg_root) and not pkg_root.is_relative_to(root):
+        mounts.append(Mount(pkg_root, pkg_root, read_only=True))
+        env["PYTHONPATH"] = str(pkg_root)
+
+    def _popen(argv, **kwargs) -> subprocess.Popen:
+        # `Limits.from_env()`, not `Limits()`: a deployment that sets CLIPPYSHOT_MEM is
+        # capping what an untrusted image parser may allocate, and the cold scanner path
+        # honours it. A fresh default here would hand the LONG-LIVED parser the 8 GiB
+        # default instead -- the one process where the cap matters most (codex).
+        request = SandboxRequest(
+            argv=list(argv),
+            ro_mounts=mounts,
+            rw_mounts=[],
+            limits=Limits.from_env(),
+            env=dict(env),
+            attach_apparmor=False,
+        )
+        return sandbox.spawn(request, **kwargs)
+
+    return _popen
 
 
 class WarmOCR:
@@ -155,10 +225,32 @@ class WarmOCR:
             proc = self._proc
             if proc is None or proc.poll() is not None or proc.stdin is None or proc.stdout is None:
                 raise OCRError("warm OCR helper not ready")
+            # The image travels as BYTES, not as a path. A sandboxed helper cannot
+            # read the job's filesystem -- and must not be able to: the whole point of
+            # the inner boundary is that the image parser sees nothing but the image.
+            # It also sidesteps the fact that a persistent helper's mounts are fixed at
+            # spawn, before any page exists (issue #35).
+            # Read AT MOST the cap plus one byte. Reading the file whole and checking
+            # its length afterwards allocates the very thing the cap exists to bound --
+            # the limit would be documentation, not a limit (codex). One extra byte is
+            # what distinguishes "exactly at the cap" from "over it", without a stat
+            # whose answer could change before the read.
+            try:
+                with png.open("rb") as fh:
+                    data = fh.read(MAX_PNG_BYTES + 1)
+            except OSError as e:
+                raise OCRError(f"warm OCR cannot read {png}: {e}") from e
+            if len(data) > MAX_PNG_BYTES:
+                raise OCRError(f"warm OCR page is over the {MAX_PNG_BYTES} byte limit")
             try:
                 proc.stdin.write(
                     json.dumps(
-                        {"png": str(png), "lang": lang, "psm": psm, "timeout_s": timeout_s}
+                        {
+                            "png_b64": base64.b64encode(data).decode("ascii"),
+                            "lang": lang,
+                            "psm": psm,
+                            "timeout_s": timeout_s,
+                        }
                     )
                     + "\n"
                 )
@@ -251,6 +343,7 @@ def _serve() -> None:  # pragma: no cover - runs in the helper subprocess
     ``error`` so the caller cold-falls-back). A hang is handled by the client
     SIGKILLing this process — tesseract C calls aren't interruptible here."""
     import glob
+    import tempfile
 
     from tesserocr import PyTessBaseAPI  # PyTessBaseAPI takes psm as a plain int
 
@@ -285,8 +378,22 @@ def _serve() -> None:  # pragma: no cover - runs in the helper subprocess
                 break
             api = api_for(req.get("lang", DEFAULT_LANG), int(req.get("psm", DEFAULT_PSM)))
             t0 = time.monotonic()
-            api.SetImageFile(req["png"])
-            text = (api.GetUTF8Text() or "").rstrip("\n")
+            # The page arrives as bytes and is written to a private temp file -- inside
+            # a sandboxed helper that is the tmpfs, reachable by nothing else. Handing
+            # tesseract a FILE keeps this identical to the cold CLI path rather than
+            # introducing a second image-decoding route.
+            payload = base64.b64decode(req["png_b64"], validate=True)
+            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            try:
+                tmp.write(payload)
+                tmp.close()
+                api.SetImageFile(tmp.name)
+                text = (api.GetUTF8Text() or "").rstrip("\n")
+            finally:
+                try:
+                    os.unlink(tmp.name)
+                except OSError:
+                    pass
             resp = {
                 "text": text,
                 "char_count": len(text),
