@@ -86,6 +86,30 @@ def test_effective_dpi_clamped_for_giant_page():
     assert eff >= 36
 
 
+def test_effective_dpi_never_falls_below_the_floor():
+    """The floor has to be REACHED to be tested.
+
+    test_effective_dpi_clamped_for_giant_page asserts `eff >= 36`, but a 5080mm
+    page against the default 128 MP budget scales to 56 DPI on its own -- the
+    floor never engages, so that assertion holds with the floor deleted. Measured:
+    removing `max(_MIN_DPI, ...)` left the entire suite green.
+
+    A smaller budget is the documented regime where the floor does the work (the
+    function's own docstring: "a CLIPPYSHOT_MAX_PAGE_PX override below ~52 MP ...
+    in that regime 36 DPI is the best we can do"). Unfloored, these would be:
+
+        max_page_px= 51,000,000  ->  35
+        max_page_px= 20,000,000  ->  22
+        max_page_px=  1,000,000  ->   5
+        max_page_px=          1  ->   0     <- pdftoppm -r 0
+    """
+    giant = [(5080.0, 5080.0)]
+    for budget in (51_000_000, 20_000_000, 1_000_000, 1):
+        assert _effective_dpi(150, giant, max_page_px=budget) == 36, budget
+    # The floor is a floor, not a constant: a budget that permits more still gets more.
+    assert _effective_dpi(150, giant, max_page_px=128_000_000) > 36
+
+
 def test_effective_dpi_largest_page_in_range_drives_it():
     sizes = [(215.9, 279.4), (5080.0, 5080.0), (215.9, 279.4)]
     assert _effective_dpi(150, sizes, max_page_px=128_000_000) < 150
@@ -95,6 +119,61 @@ def test_effective_dpi_noop_when_sizes_unknown_or_budget_disabled():
     assert _effective_dpi(150, None, max_page_px=128_000_000) == 150
     assert _effective_dpi(150, [], max_page_px=128_000_000) == 150
     assert _effective_dpi(150, [(5080.0, 5080.0)], max_page_px=0) == 150
+
+
+# --- the shard planner itself (nothing referenced _shard_run before) ----------
+
+def test_shard_count_is_bounded_by_the_memory_budget_not_just_cpu(monkeypatch):
+    """Sharding must respect the memory budget the run's own pages imply.
+
+    `_shard_run` had no test at all: dropping `mem_budget` from
+    `min(cpu_budget, mem_budget, run_pages)` left the entire suite green, and the
+    result is more concurrent renders than the worker's memory can hold -- which
+    is the OOM this budget exists to prevent, on the gVisor warm tier that has no
+    per-worker cgroup to catch it.
+
+    Both bounds are asserted, so this cannot pass by always returning one shard.
+
+    The worker memory is PINNED rather than inherited: max_concurrent_page_ops
+    reads CLIPPYSHOT_WORKER_MEMORY (falling back to the cgroup limit / MemTotal),
+    and at 8g or more it returns its ceiling of 8 for this page's peak -- the
+    memory bound stops binding and the test measures nothing on a large host
+    (codex). At 4g it binds at 4, which is the case this test is about.
+    """
+    from clippyshot.limits import max_concurrent_page_ops
+    from clippyshot.rasterizer.base import ShardingRasterizer, _max_page_peak_mb
+
+    monkeypatch.setenv("CLIPPYSHOT_WORKER_MEMORY", "4g")
+
+    class _Planner(ShardingRasterizer):
+        def _build_argv(self, *a, **kw):  # pragma: no cover - never invoked
+            raise AssertionError("planning must not build a command line")
+
+    planner = _Planner.__new__(_Planner)  # planning is pure; no sandbox needed
+    giant = [(5080.0, 5080.0)] * 16
+    budget_px = 128_000_000
+    mem_budget = max_concurrent_page_ops(
+        per_page_peak_mb=_max_page_peak_mb(giant, 150, cap_px=budget_px)
+    )
+    assert mem_budget < 8, "pick pages whose memory budget actually binds"
+
+    ranges = planner._shard_run(
+        first=1, last=16, dpi=150, page_sizes_mm=giant,
+        budget_px=budget_px, cpu_budget=8,
+    )
+    assert len(ranges) <= mem_budget, (
+        f"{len(ranges)} shards for pages whose memory budget allows {mem_budget}"
+    )
+    assert ranges[0][0] == 1 and ranges[-1][1] == 16, ranges
+
+    # Small pages: the memory budget stops binding and the CPU budget takes over,
+    # so this is not passing merely by refusing to shard.
+    small = [(215.9, 279.4)] * 16
+    small_ranges = planner._shard_run(
+        first=1, last=16, dpi=150, page_sizes_mm=small,
+        budget_px=budget_px, cpu_budget=8,
+    )
+    assert len(small_ranges) > len(ranges), (small_ranges, ranges)
 
 
 # --- F4: a clamped giant page must not collapse the shard-concurrency budget ---
