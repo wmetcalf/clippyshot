@@ -270,3 +270,66 @@ def test_insecure_backend_allowed_when_warn_flag_set(monkeypatch):
     assert sb.name == "bwrap"
     assert sb.secure is False
     assert sb.insecurity_reasons == ["seccomp_missing"]
+
+
+# --- why a backend was passed over has to be reachable ----------------------
+#
+# The per-branch rejection logs carry the detail, but only in `extra=` and only at
+# DEBUG -- the default formatter drops both. Diagnosing a fleet worker therefore
+# meant re-running it under a debug harness, and the exception then named only the
+# LAST backend's reason, hiding that the other two had failed for different ones.
+
+
+def test_the_failure_names_every_backend_not_just_the_last():
+    """All three reasons, in order, in the message a caller actually sees."""
+    def nsjail():
+        raise SandboxUnavailable("nsjail binary missing")
+
+    with pytest.raises(SandboxUnavailable) as ei:
+        select_sandbox(
+            _nsjail_factory=nsjail,
+            _bwrap_factory=lambda: _FakeSandbox("bwrap", exit_code=3),
+            _container_factory=lambda: _FakeSandbox(
+                "container", secure=False, insecurity_reasons=["network_egress_not_verified"]
+            ),
+        )
+    msg = str(ei.value)
+    assert "nsjail: unavailable (nsjail binary missing)" in msg, msg
+    assert "bwrap: smoketest exit=3" in msg, msg
+    assert "container: insecure (network_egress_not_verified)" in msg, msg
+
+
+def test_a_successful_selection_says_what_it_passed_over(caplog):
+    """Selecting the third backend is not the same as the first one working, and
+    an operator has no way to tell them apart from `backend=container` alone."""
+    import logging
+
+    def nsjail():
+        raise SandboxUnavailable("nsjail binary missing")
+
+    with caplog.at_level(logging.INFO, logger="clippyshot.sandbox"):
+        sb = select_sandbox(
+            _nsjail_factory=nsjail,
+            _bwrap_factory=lambda: _FakeSandbox("bwrap", exit_code=3),
+            _container_factory=lambda: _FakeSandbox("container"),
+        )
+    assert sb.name == "container"
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "nsjail: unavailable" in text, text
+    assert "bwrap: smoketest exit=3" in text, text
+
+
+def test_the_first_backend_winning_stays_quiet(caplog):
+    """The positive control: nothing was passed over, so nothing is reported --
+    otherwise the message above could be produced unconditionally."""
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="clippyshot.sandbox"):
+        sb = select_sandbox(
+            _nsjail_factory=lambda: _FakeSandbox("nsjail"),
+            _bwrap_factory=lambda: _FakeSandbox("bwrap"),
+            _container_factory=lambda: _FakeSandbox("container"),
+        )
+    assert sb.name == "nsjail"
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "passed over" not in text, text
