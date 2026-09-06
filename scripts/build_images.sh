@@ -307,7 +307,18 @@ set +m
 # killing the `sleep` it is blocked in: killing the subshell alone leaves that
 # sleep reparented to init, ticking away until the full deadline (codex).
 set -m
-( sleep "$_bb_version_deadline"
+( _bb_left="$_bb_version_deadline"
+  # POLL rather than sleep the whole deadline. A signal arriving between this fork
+  # and `_bb_watchdog_pid=$!` would leave a watchdog nobody has the pid of, alive
+  # for up to a day and then signalling a process group number that by then belongs
+  # to someone else. Checking the target each second makes an orphaned watchdog
+  # self-limiting -- it exits within a second of the probe it was watching -- which
+  # closes the race by design instead of by another guard (codex).
+  while [ "$_bb_left" -gt 0 ]; do
+    sleep 1
+    kill -0 "$BB_PID" 2>/dev/null || exit 0
+    _bb_left=$((_bb_left - 1))
+  done
   kill -TERM -- "-$BB_PID" 2>/dev/null || true
   sleep 5
   kill -KILL -- "-$BB_PID" 2>/dev/null || true ) >/dev/null 2>&1 &
@@ -331,8 +342,11 @@ kill -KILL -- "-$BB_PID" 2>/dev/null || true
 # `grep` below then decides the diagnostic is a binary file and prints
 # "binary file matches" instead of the error (codex). Whole lines cannot split a
 # character, and `grep -a` covers a CLI whose output is genuinely binary.
-BB_VERSION_OUT="$(tail -n 20 "$BB_OUT_FILE" 2>/dev/null || true)"
-BB_VERSION_ERR="$(tail -n 20 "$BB_ERR_FILE" 2>/dev/null || true)"
+# Bounded three ways: the last 64 KiB, of that the last 20 lines, and each line cut
+# to 500 characters. Line COUNT alone is not a bound -- a multi-megabyte stream with
+# no newlines is one line, and the diagnostic would print all of it (codex).
+BB_VERSION_OUT="$(tail -c 65536 "$BB_OUT_FILE" 2>/dev/null | tail -n 20 | cut -c1-500 || true)"
+BB_VERSION_ERR="$(tail -c 65536 "$BB_ERR_FILE" 2>/dev/null | tail -n 20 | cut -c1-500 || true)"
 # Everything read out of the files happens HERE, before the cleanup below deletes
 # them -- including the version itself, which is grepped from the whole capped
 # file rather than from a truncated copy of it.

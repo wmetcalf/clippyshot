@@ -1094,7 +1094,9 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         after a perfectly successful build (codex)."""
         import time
 
-        deadline = "4321"                      # distinctive, so the scan cannot mistake it
+        if not Path("/proc").is_dir():
+            pytest.skip("the stray-process scan needs procfs (Linux)")
+        deadline = "4321"
         d = self._stub(
             tmp_path,
             f'if [ "$1" = version ]; then echo "blastbox {BB_MIN}"; exit 0; fi\n'
@@ -1105,11 +1107,20 @@ class TestAFailedVersionCannotSatisfyTheFloor:
             "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
             "BLASTBOX_VERSION_TIMEOUT_S": deadline,
         }
-        r = subprocess.run(
+        # Its own SESSION, so ownership is provable. A reparented process keeps its
+        # session id, and matching on `sleep <duration>` alone would blame -- and then
+        # KILL -- an unrelated job that happened to use the same number (codex).
+        proc = subprocess.Popen(
             ["bash", str(SCRIPT), "sometag", "--dry-run"],
-            capture_output=True, text=True, errors="replace", env=env, timeout=60, check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            start_new_session=True,
         )
-        assert "--dry-run" in r.stdout
+        out, _err = proc.communicate(timeout=60)
+        assert "--dry-run" in out
+        session = proc.pid                    # session leader == the pid we started
         time.sleep(1.0)
 
         strays = []
@@ -1117,10 +1128,14 @@ class TestAFailedVersionCannotSatisfyTheFloor:
             if not proc_dir.name.isdigit():
                 continue
             try:
+                stat = (proc_dir / "stat").read_text()
                 cmdline = (proc_dir / "cmdline").read_bytes().split(b"\0")
             except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
                 continue
-            if cmdline[:1] == [b"sleep"] and deadline.encode() in cmdline[1:2]:
+            fields = stat.rpartition(")")[2].split()
+            if len(fields) < 5 or fields[4] != str(session):     # session id
+                continue
+            if cmdline[:1] == [b"sleep"]:
                 strays.append(int(proc_dir.name))
         for stray in strays:
             import signal
@@ -1191,6 +1206,27 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         )
         assert r.returncode == 2
         assert "sleep" in r.stderr and "deadline" in r.stderr
+
+    def test_one_enormous_line_does_not_flood_the_terminal(self, tmp_path: Path) -> None:
+        """A line COUNT is not a bound. A multi-megabyte stream with no newlines is one line,
+        and `tail -n 20` keeps all of it -- the diagnostic then prints megabytes at an operator
+        who wanted to know why the CLI failed (codex)."""
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            "  for i in $(seq 1 40000); do\n"
+            '    printf "%s" "0123456789012345678901234567890123456789" >&2\n'
+            "  done\n"
+            '  printf "\\n" >&2\n'
+            "  exit 1\n"
+            "fi\n",
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert r.returncode == 2
+        assert "no usable `version` output" in r.stderr
+        assert len(r.stderr) < 50_000, (
+            f"the diagnostic printed {len(r.stderr)} bytes; one line is not a bound"
+        )
 
     def test_a_legitimate_large_write_is_not_punished(self, tmp_path: Path) -> None:
         """RLIMIT_FSIZE is process-wide, not a cap on the two capture files: a CLI that appends
