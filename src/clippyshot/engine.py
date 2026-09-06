@@ -150,14 +150,26 @@ def _build_converter(uno_server: WarmConverter | None = None, ocr_helper=None):
     # through to `container` at warmup, and a later selection can succeed with nsjail
     # (codex). Warmup's guard saves the cost of starting a helper that must not be used;
     # this one is what makes it true.
-    if sandboxes_each_call(sandbox) and (uno_server is not None or ocr_helper is not None):
-        logging.getLogger("clippyshot.engine").warning(
-            "dropping warm helpers: %s sandboxes each call, and a warm helper started "
-            "under a different selection would carry untrusted input outside it",
-            sandbox.name,
-        )
-        uno_server = None
-        ocr_helper = None
+    if sandboxes_each_call(sandbox):
+        # Drop only what is NOT already confined. `_warmup_ocr` starts its helper INSIDE
+        # this sandbox where the backend can host one (#40), and discarding that would
+        # throw away the warm tier restored there while protecting nothing (codex).
+        # There is no in-sandbox warm soffice yet -- that is #42 -- so the UNO server is
+        # unconditionally outside and always dropped.
+        dropped = []
+        if uno_server is not None:
+            dropped.append("soffice")
+            uno_server = None
+        if ocr_helper is not None and not getattr(ocr_helper, "sandboxed", False):
+            dropped.append("ocr")
+            ocr_helper = None
+        if dropped:
+            logging.getLogger("clippyshot.engine").warning(
+                "dropping warm helpers (%s): %s sandboxes each call, and a helper "
+                "started outside it would carry untrusted input past that boundary",
+                ", ".join(dropped),
+                sandbox.name,
+            )
     return Converter(
         detector=Detector(),
         runner=LibreOfficeRunner(sandbox=sandbox, uno_server=uno_server),
@@ -364,7 +376,9 @@ class ClippyShotEngine:
         try:
             from clippyshot.ocr_warm import WarmOCR
 
-            ocr_server = WarmOCR(popen=popen) if popen is not None else WarmOCR()
+            ocr_server = (
+                WarmOCR(popen=popen, sandboxed=True) if popen is not None else WarmOCR()
+            )
             ocr_server.start()
         except Exception as exc:  # noqa: BLE001 - non-fatal: cold CLI path
             logging.getLogger("clippyshot.engine").warning(
