@@ -69,11 +69,27 @@ def test_validate_formats_normalizes():
 
 @pytest.mark.parametrize(
     "formats",
-    ["../x", "qr_code;rm", "QR CODE", "", "-fast", "a" * 41],
+    [
+        "../x", "qr_code;rm", "QR CODE", "", "-fast",
+        "a" * 41,                        # one over the per-token length cap
+        ",".join(["qr_code"] * 33),      # one over the token COUNT cap
+    ],
 )
 def test_validate_formats_rejects_bad(formats):
     with pytest.raises(ValueError):
         validate_formats(formats)
+
+
+def test_validate_formats_accepts_the_boundary_counts():
+    """The caps are caps, not a refusal to accept several formats.
+
+    33 and 41 are written out rather than derived from the constants: a case
+    sized from the limit grows with it, so raising the cap leaves the input
+    "over the limit" and the mutant survives -- which is exactly what happened
+    with the token COUNT cap, whose only coverage was the length case above.
+    """
+    assert validate_formats(",".join(["qr_code"] * 32)).count("qr_code") == 32
+    assert validate_formats("a" * 40) == "a" * 40
 
 
 # --- Option-injection guard (#11) ------------------------------------------
