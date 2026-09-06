@@ -51,3 +51,10 @@ jobs:
         run: python -m pip install -e ".[dev]"
       - name: Pytest (unit + cli + http)
         run: pytest -q tests/unit tests/cli tests/http
+      # COLLECT the integration tree as well. Running it needs soffice and a sandbox
+      # backend this runner does not have, but collecting it is free and catches the
+      # failure mode that hid a whole directory: `tests/integration/conftest.py` imported
+      # an undeclared dependency, so the tree ERRORED rather than skipped -- in every
+      # environment built from pyproject, and invisibly here, because CI never named it.
+      - name: Collect the integration tests (imports + fixtures must resolve)
+        run: pytest --collect-only -q tests/integration
