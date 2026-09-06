@@ -109,3 +109,84 @@ def test_solid_green_image_is_not_blank():
     Image.new("RGB", (100, 100), (0, 255, 0)).save(buf, "PNG")
     h = hash_png_bytes(buf.getvalue())
     assert h.is_blank is False
+
+
+
+def _blank_page(size: tuple[int, int]) -> bytes:
+    import io
+    buf = io.BytesIO()
+    Image.new("RGB", size, (255, 255, 255)).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_extreme_aspect_page_with_content_is_not_blank():
+    """A very tall, very narrow page full of text is content, not a blank page.
+
+    The fixture is the real thing: LibreOffice renders a wide CSV as a single
+    enormous page, and the repo's own 20k-row sleeper.csv comes out 13 x 29632 px
+    at the converter's 150 DPI, carrying every row of the file. That page was
+    reported blank and dropped, so the conversion produced an empty document and
+    still reported success.
+
+    The cause was the hashing thumbnail, not the detector: an aspect-preserving
+    downscale of that page is 1 pixel wide, and a 1-pixel-wide strip has no DCT
+    structure left to find.
+
+    (Rebuild with: pdftoppm -r 150 -png -f 1 -l 1 <document.pdf> on the PDF the
+    converter produces for tests/fixtures/malicious/sleeper.csv.)
+    """
+    h = hash_png_bytes(_read("csv_20k_rows_13x29632.png"))
+    assert h.is_blank is False
+    assert bin(int(h.phash, 16)).count("1") > 1
+
+
+def test_extreme_aspect_page_that_is_blank_is_still_blank():
+    """The companion: not collapsing the thumbnail must not cost us the real
+    blank pages, which are the whole point of the detector."""
+    assert hash_png_bytes(_blank_page((13, 29632))).is_blank is True
+
+
+def test_hash_thumbnail_never_collapses_a_dimension():
+    """The invariant behind both tests above, asserted directly.
+
+    phash computes a 32x32 DCT, so a thumbnail thinner than 32 px in either
+    direction is upsampled back to 32 from nothing. No page shape may produce
+    one -- a dimension may only shrink to 32, or to its own original size if
+    it was already smaller.
+
+    The 32 below is written out rather than imported from the module: the DCT
+    size is the requirement, and a test that reads the implementation's own
+    floor passes for any floor. (Measured -- with `_HASH_MIN_DIM` imported, a
+    mutant that lowered the floor to 16 survived this test.)
+    """
+    from clippyshot.hasher import _downscale_for_hash
+
+    dct_size = 32
+    shapes = [
+        (13, 29632),        # the real CSV render: below the floor to begin with
+        (29632, 13),        # the same page, landscape
+        (1, 5000),
+        (5000, 1),
+        (40, 100000),       # scales to 1px wide from a width that is above 32
+        (100, 100000),
+        (2000, 200000),
+    ]
+    for size in shapes:
+        with Image.new("RGB", size, (255, 255, 255)) as img:
+            thumb = _downscale_for_hash(img)
+        assert thumb.size[0] >= min(size[0], dct_size), (size, thumb.size)
+        assert thumb.size[1] >= min(size[1], dct_size), (size, thumb.size)
+
+
+def test_ordinary_page_thumbnails_are_unchanged():
+    """The floor must not perturb ordinary pages: their recorded hashes are
+    stable across this change, because their thumbnails are identical."""
+    from clippyshot.hasher import _HASH_MAX_DIM, _downscale_for_hash
+
+    for size, expected in [
+        ((1275, 1650), (791, _HASH_MAX_DIM)),      # US Letter at 150 DPI
+        ((2480, 3508), (723, _HASH_MAX_DIM)),      # A4 at 300 DPI
+        ((800, 600), (800, 600)),                  # already small: returned as-is
+    ]:
+        with Image.new("RGB", size, (255, 255, 255)) as img:
+            assert _downscale_for_hash(img).size == expected, size
