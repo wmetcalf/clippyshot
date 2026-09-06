@@ -69,6 +69,11 @@ def _run(binpath: Path, *args: str) -> subprocess.CompletedProcess[str]:
 _MINIMAL_TOOLS = (
     "bash",
     "sh",
+    # `sleep` is not decoration here: the wrapper gives its version probe a deadline
+    # implemented by a shell watchdog, and refuses to run without it rather than
+    # proceed with no deadline at all. A fixture missing it is not a realistic
+    # minimal host, it is a host where the wrapper legitimately declines.
+    "sleep",
     "sed",
     "head",
     "sort",
@@ -1082,6 +1087,110 @@ class TestAFailedVersionCannotSatisfyTheFloor:
             except ProcessLookupError:
                 pass
         assert not alive, f"a TERM-ignoring descendant ({kid}) survived the deadline"
+
+    def test_the_watchdog_leaves_no_sleeping_orphan(self, tmp_path: Path) -> None:
+        """Cancelling the watchdog means killing the `sleep` it is blocked in. Killing the
+        subshell alone left that sleep reparented to init, ticking away for the full deadline
+        after a perfectly successful build (codex)."""
+        import time
+
+        deadline = "4321"                      # distinctive, so the scan cannot mistake it
+        d = self._stub(
+            tmp_path,
+            f'if [ "$1" = version ]; then echo "blastbox {BB_MIN}"; exit 0; fi\n'
+            'printf "%s\\n" "$@"\n',
+        )
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "BLASTBOX_VERSION_TIMEOUT_S": deadline,
+        }
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True, text=True, errors="replace", env=env, timeout=60, check=False,
+        )
+        assert "--dry-run" in r.stdout
+        time.sleep(1.0)
+
+        strays = []
+        for proc_dir in Path("/proc").iterdir():
+            if not proc_dir.name.isdigit():
+                continue
+            try:
+                cmdline = (proc_dir / "cmdline").read_bytes().split(b"\0")
+            except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+                continue
+            if cmdline[:1] == [b"sleep"] and deadline.encode() in cmdline[1:2]:
+                strays.append(int(proc_dir.name))
+        for stray in strays:
+            import signal
+
+            try:
+                os.kill(stray, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        assert not strays, f"the watchdog's sleep outlived the build: {strays}"
+
+    def test_an_out_of_range_deadline_is_rejected(self, tmp_path: Path) -> None:
+        """All digits, but past the shell's integer range: the comparison reports "integer
+        expression expected" WITHOUT taking the rejection branch, and then `sleep` fails and the
+        watchdog dies silently (codex)."""
+        d = self._stub(
+            tmp_path,
+            f'if [ "$1" = version ]; then echo "blastbox {BB_MIN}"; exit 0; fi\n'
+            'printf "%s\\n" "$@"\n',
+        )
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "BLASTBOX_VERSION_TIMEOUT_S": "99999999999999999999",
+        }
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True, text=True, errors="replace", env=env, timeout=60, check=False,
+        )
+        assert r.returncode == 2
+        assert "BLASTBOX_VERSION_TIMEOUT_S" in r.stderr
+        assert "build-images" not in r.stdout
+
+    def test_a_missing_sleep_is_refused_rather_than_silently_undeadlined(
+        self, tmp_path: Path
+    ) -> None:
+        """The deadline is only a guarantee if what implements it exists. Without `sleep` the
+        watchdog dies on command-not-found, its stderr discarded, and the wrapper waits forever
+        on a hung CLI (codex)."""
+        import shutil
+
+        d = self._stub(
+            tmp_path,
+            f'if [ "$1" = version ]; then echo "blastbox {BB_MIN}"; exit 0; fi\n'
+            'printf "%s\\n" "$@"\n',
+        )
+        bare = tmp_path / "nosleep"
+        bare.mkdir()
+        for entry in os.environ.get("PATH", "").split(os.pathsep):
+            if not entry or not os.path.isdir(entry):
+                continue
+            for name in os.listdir(entry):
+                if name == "sleep" or (bare / name).exists():
+                    continue
+                try:
+                    (bare / name).symlink_to(os.path.join(entry, name))
+                except OSError:
+                    pass
+        assert shutil.which("sleep", path=str(bare)) is None, "the PATH still has sleep"
+
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            env={"PATH": f"{d}:{bare}", "HOME": os.environ.get("HOME", "/tmp")},
+            timeout=60,
+            check=False,
+        )
+        assert r.returncode == 2
+        assert "sleep" in r.stderr and "deadline" in r.stderr
 
     def test_a_legitimate_large_write_is_not_punished(self, tmp_path: Path) -> None:
         """RLIMIT_FSIZE is process-wide, not a cap on the two capture files: a CLI that appends

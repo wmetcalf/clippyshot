@@ -203,7 +203,7 @@ _bb_version_kill() {
   # The watchdog dies with the probe it was watching; left running it would signal a
   # process group number that by then belongs to somebody else.
   if [ -n "${_bb_watchdog_pid:-}" ]; then
-    kill "$_bb_watchdog_pid" 2>/dev/null || true
+    kill -- "-$_bb_watchdog_pid" 2>/dev/null || true
   fi
 }
 trap '_bb_version_cleanup' EXIT
@@ -246,8 +246,21 @@ case "$_bb_version_deadline" in
     exit 2
     ;;
 esac
-if [ "$_bb_version_deadline" -lt 1 ]; then
-  echo "BLASTBOX_VERSION_TIMEOUT_S must be at least 1 second; got: $_bb_version_deadline" >&2
+# Length first: all-digits but astronomically large overflows the shell's integer
+# comparison, which reports "integer expression expected" and does NOT take the
+# rejection branch -- after which `sleep` fails and the watchdog dies silently
+# (codex). A day is already far past any sane probe.
+if [ "${#_bb_version_deadline}" -gt 5 ] || [ "$_bb_version_deadline" -lt 1 ] \
+   || [ "$_bb_version_deadline" -gt 86400 ]; then
+  echo "BLASTBOX_VERSION_TIMEOUT_S must be between 1 and 86400 seconds;" >&2
+  echo "  got: $_bb_version_deadline" >&2
+  exit 2
+fi
+# The deadline is only a guarantee if the thing that implements it exists. Without
+# `sleep` the watchdog subshell dies on command-not-found -- with its stderr
+# discarded -- and the wrapper waits forever on a hung CLI (codex).
+if ! command -v sleep >/dev/null 2>&1; then
+  echo "no \`sleep\` on PATH, so the version probe cannot be given a deadline" >&2
   exit 2
 fi
 _bb_watchdog_pid=""
@@ -290,18 +303,23 @@ BB_PID=$!
 set +m
 # TERM, then KILL: a process stopped by SIGTTIN cannot act on TERM, and only KILL
 # moves it. The group, so the CLI's own children go too.
+# The watchdog gets its OWN process group as well, because cancelling it means
+# killing the `sleep` it is blocked in: killing the subshell alone leaves that
+# sleep reparented to init, ticking away until the full deadline (codex).
+set -m
 ( sleep "$_bb_version_deadline"
   kill -TERM -- "-$BB_PID" 2>/dev/null || true
   sleep 5
   kill -KILL -- "-$BB_PID" 2>/dev/null || true ) >/dev/null 2>&1 &
 _bb_watchdog_pid=$!
+set +m
 wait "$BB_PID" && BB_RC=0 || BB_RC=$?
 # The escalation happens HERE, not in the watchdog's grace period. `wait` returns as
 # soon as the direct process dies, so cancelling the watchdog at that moment cut
 # short the five seconds in which it would have KILLed a descendant that ignored
 # TERM (codex). Doing it inline is also faster and safer than a detached process
 # signalling a group number five seconds later.
-kill "$_bb_watchdog_pid" 2>/dev/null || true
+kill -- "-$_bb_watchdog_pid" 2>/dev/null || true
 wait "$_bb_watchdog_pid" 2>/dev/null || true
 _bb_watchdog_pid=""
 kill -KILL -- "-$BB_PID" 2>/dev/null || true
