@@ -21,21 +21,38 @@ Image.MAX_IMAGE_PIXELS = 500_000_000
 
 
 _HASH_MAX_DIM = 1024
+# phash computes a 32x32 DCT, so a thumbnail thinner than 32px in either
+# direction is upsampled back to 32 from a strip that no longer holds the
+# structure being measured. No page shape may produce one: see the floor in
+# _downscale_for_hash.
+_HASH_MIN_DIM = 32
 
 
 def _downscale_for_hash(img: Image.Image) -> Image.Image:
-    """Return a ≤1024px-wide copy for perceptual hashing.
+    """Return a ≤1024px copy for perceptual hashing, never thinner than 32px.
 
     Both phash (32x32 DCT) and colorhash (binned histograms) are designed
     to work on small representations, so feeding them a 30000×5000 spread-
     sheet render just wastes time on the resize/iteration steps. Downscaling
     to 1024px wide first makes phash ~900× cheaper with no quality loss.
+
+    Preserving the aspect ratio is not free at the extremes, though. A 20k-row
+    CSV comes out of LibreOffice as a single 13×29632px page carrying every row
+    of the file; scaled to fit 1024px that is **1 pixel wide**, whose DCT is
+    flat, so the page was reported blank and dropped and the conversion
+    returned an empty document while reporting success. Each dimension is
+    therefore floored at the DCT size the hash actually works in — or at the
+    page's own size, when it was smaller than that to begin with. Only pages
+    beyond 32:1 are affected, so ordinary pages hash exactly as before.
     """
     w, h = img.size
     if w <= _HASH_MAX_DIM and h <= _HASH_MAX_DIM:
         return img
     ratio = min(_HASH_MAX_DIM / w, _HASH_MAX_DIM / h)
-    new_size = (max(1, int(w * ratio)), max(1, int(h * ratio)))
+    new_size = (
+        max(min(w, _HASH_MIN_DIM), int(w * ratio)),
+        max(min(h, _HASH_MIN_DIM), int(h * ratio)),
+    )
     return img.resize(new_size, Image.Resampling.LANCZOS)
 
 
