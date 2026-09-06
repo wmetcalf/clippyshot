@@ -967,6 +967,50 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         assert "no usable `version` output" in r.stderr
         assert elapsed < 60, f"the wrapper waited {elapsed:.0f}s on a hung probe"
 
+    def test_the_deadline_does_not_depend_on_the_timeout_binary(self, tmp_path: Path) -> None:
+        """The deadline used to be `timeout(1)`, which is absent on stock macOS and on minimal
+        build hosts -- exactly where an odd CLI is likeliest -- and its absence failed OPEN,
+        leaving no deadline at all (codex). This runs with a PATH that has no `timeout`."""
+        import shutil
+        import time
+
+        d = self._stub(tmp_path, 'if [ "$1" = version ]; then sleep 300; fi\n')
+        # A mirror of the real PATH with exactly one thing missing. A hand-picked list of
+        # tools is not the same environment -- the first version of this test failed on
+        # `dirname: command not found`, which says nothing about deadlines.
+        bare = tmp_path / "bare"
+        bare.mkdir()
+        for entry in os.environ.get("PATH", "").split(os.pathsep):
+            if not entry or not os.path.isdir(entry):
+                continue
+            for name in os.listdir(entry):
+                if name == "timeout" or (bare / name).exists():
+                    continue
+                try:
+                    (bare / name).symlink_to(os.path.join(entry, name))
+                except OSError:
+                    pass
+        assert shutil.which("timeout", path=str(bare)) is None, "the bare PATH still has timeout"
+
+        started = time.monotonic()
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            env={
+                "PATH": f"{d}:{bare}",
+                "HOME": os.environ.get("HOME", "/tmp"),
+                "BLASTBOX_VERSION_TIMEOUT_S": "3",
+            },
+            timeout=120,
+            check=False,
+        )
+        elapsed = time.monotonic() - started
+        assert r.returncode == 2, r.stderr[-400:]
+        assert "no usable `version` output" in r.stderr
+        assert elapsed < 60, f"no deadline without timeout(1): waited {elapsed:.0f}s"
+
     def test_a_legitimate_large_write_is_not_punished(self, tmp_path: Path) -> None:
         """RLIMIT_FSIZE is process-wide, not a cap on the two capture files: a CLI that appends
         to a cache or log larger than the limit takes SIGXFSZ and is rejected as unusable

@@ -200,6 +200,11 @@ _bb_version_kill() {
     sleep 0.5
     kill -KILL -- "-$_bb_pid" 2>/dev/null || true
   fi
+  # The watchdog dies with the probe it was watching; left running it would signal a
+  # process group number that by then belongs to somebody else.
+  if [ -n "${_bb_watchdog_pid:-}" ]; then
+    kill "$_bb_watchdog_pid" 2>/dev/null || true
+  fi
 }
 trap '_bb_version_cleanup' EXIT
 trap '_bb_version_kill; _bb_version_cleanup; trap - INT; kill -INT $$' INT
@@ -223,12 +228,14 @@ BB_PID_FILE="$(mktemp)"
 # does not cover a CLI that opens /dev/tty itself, and `set -m` means such a read is
 # STOPPED by SIGTTIN and `wait` never returns (codex). Rather than add a mechanism per
 # blocking mode, the probe gets a deadline: whatever the reason, it ends and the
-# operator gets the diagnostic instead of a wrapper that hangs forever. `-k` matters --
-# a process stopped by SIGTTIN cannot act on TERM, and only KILL moves it.
-_bb_version_timeout=""
-if command -v timeout >/dev/null 2>&1; then
-  _bb_version_timeout="timeout -k 5 ${BLASTBOX_VERSION_TIMEOUT_S:-30}"
-fi
+# operator gets the diagnostic instead of a wrapper that hangs forever.
+#
+# The deadline is a shell WATCHDOG, not `timeout(1)`. Depending on the binary made the
+# guarantee conditional on it being installed -- absent on stock macOS and on minimal
+# build hosts, exactly where an odd CLI is likeliest -- and it failed OPEN, silently
+# leaving no deadline at all (codex). One mechanism, always present, no branch.
+_bb_version_deadline="${BLASTBOX_VERSION_TIMEOUT_S:-30}"
+_bb_watchdog_pid=""
 # stdin comes from /dev/null. `set -m` puts this job in a process group that is NOT
 # the terminal's foreground group, so a CLI that tried to read the terminal would be
 # STOPPED by SIGTTIN and the `wait` below would block forever -- a hang introduced by
@@ -262,11 +269,21 @@ set -m
   # report a working CLI as unusable -- trading a real failure for a hypothetical
   # one.
   if [ -n "$_bb_bashpid" ]; then echo "$_bb_bashpid" > "$BB_PID_FILE" || true; fi
-  exec $_bb_version_timeout blastbox version ) \
+  exec blastbox version ) \
   >"$BB_OUT_FILE" 2>"$BB_ERR_FILE" </dev/null &
 BB_PID=$!
 set +m
+# TERM, then KILL: a process stopped by SIGTTIN cannot act on TERM, and only KILL
+# moves it. The group, so the CLI's own children go too.
+( sleep "$_bb_version_deadline"
+  kill -TERM -- "-$BB_PID" 2>/dev/null || true
+  sleep 5
+  kill -KILL -- "-$BB_PID" 2>/dev/null || true ) >/dev/null 2>&1 &
+_bb_watchdog_pid=$!
 wait "$BB_PID" && BB_RC=0 || BB_RC=$?
+kill "$_bb_watchdog_pid" 2>/dev/null || true
+wait "$_bb_watchdog_pid" 2>/dev/null || true
+_bb_watchdog_pid=""
 # The version is grepped from the WHOLE file, which `ulimit -f` has already capped
 # at 512 KiB. Reading a 4 KiB prefix instead meant a CLI that prints a long banner
 # before its version was rejected as unusable even though it exited zero (codex).
