@@ -162,14 +162,17 @@ def test_hash_thumbnail_never_collapses_a_dimension():
     from clippyshot.hasher import _downscale_for_hash
 
     dct_size = 32
+    # Beyond 32:1 is all it takes to scale a dimension under the floor, so
+    # these stay small: the largest is 1 Mpx. (An earlier draft reached for
+    # 2000x200000 to look thorough -- 400 Mpx, ~1.2 GB before Pillow's resize
+    # buffers, on a CI runner, to test the same branch as 100x10000.)
     shapes = [
         (13, 29632),        # the real CSV render: below the floor to begin with
         (29632, 13),        # the same page, landscape
         (1, 5000),
         (5000, 1),
-        (40, 100000),       # scales to 1px wide from a width that is above 32
-        (100, 100000),
-        (2000, 200000),
+        (100, 10000),       # scales to 10px wide from a width that is above 32
+        (10000, 100),
     ]
     for size in shapes:
         with Image.new("RGB", size, (255, 255, 255)) as img:
