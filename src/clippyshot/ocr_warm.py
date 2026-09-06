@@ -230,14 +230,18 @@ class WarmOCR:
             # the inner boundary is that the image parser sees nothing but the image.
             # It also sidesteps the fact that a persistent helper's mounts are fixed at
             # spawn, before any page exists (issue #35).
+            # Read AT MOST the cap plus one byte. Reading the file whole and checking
+            # its length afterwards allocates the very thing the cap exists to bound --
+            # the limit would be documentation, not a limit (codex). One extra byte is
+            # what distinguishes "exactly at the cap" from "over it", without a stat
+            # whose answer could change before the read.
             try:
-                data = png.read_bytes()
+                with png.open("rb") as fh:
+                    data = fh.read(MAX_PNG_BYTES + 1)
             except OSError as e:
                 raise OCRError(f"warm OCR cannot read {png}: {e}") from e
             if len(data) > MAX_PNG_BYTES:
-                raise OCRError(
-                    f"warm OCR page is {len(data)} bytes, over the {MAX_PNG_BYTES} limit"
-                )
+                raise OCRError(f"warm OCR page is over the {MAX_PNG_BYTES} byte limit")
             try:
                 proc.stdin.write(
                     json.dumps(

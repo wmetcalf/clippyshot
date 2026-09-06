@@ -438,3 +438,32 @@ class TestTheHelperHonoursConfiguredLimits:
         from clippyshot.limits import Limits
 
         assert self._limits(monkeypatch, tmp_path).memory_bytes == Limits().memory_bytes
+
+
+class TestTheCapBoundsTheAllocation:
+    """A cap checked AFTER reading the file whole allocates the thing it exists to
+    bound -- it would be documentation, not a limit (codex)."""
+
+    def test_the_whole_file_is_never_read(self, tmp_path, monkeypatch):
+        def _forbidden(self, *a, **k):
+            raise AssertionError("read_bytes() reads without a bound; use a bounded read")
+
+        monkeypatch.setattr(Path, "read_bytes", _forbidden)
+        srv, proc = _server([{"text": "ok", "char_count": 2, "duration_ms": 1}])
+        srv.start()
+        png = tmp_path / "p.png"
+        png.write_bytes(b"small")
+        srv.ocr(png, lang="eng", psm=3, timeout_s=30)
+        assert "png_b64" in proc.stdin.getvalue()
+
+    def test_a_page_far_over_the_cap_is_still_refused(self, tmp_path, monkeypatch):
+        import clippyshot.ocr_warm as mod
+
+        monkeypatch.setattr(mod, "MAX_PNG_BYTES", 1024)
+        srv, proc = _server([{"text": "ok", "char_count": 2, "duration_ms": 1}])
+        srv.start()
+        big = tmp_path / "big.png"
+        big.write_bytes(b"x" * (1024 * 40))
+        with pytest.raises(OCRError, match="over the"):
+            srv.ocr(big, lang="eng", psm=3, timeout_s=30)
+        assert "png_b64" not in proc.stdin.getvalue()
