@@ -1,5 +1,6 @@
 """Unit tests for the WarmOCR persistent helper — lifecycle + pipe protocol,
 exercised with an injected fake Popen (no real tesseract/tesserocr needed)."""
+import base64
 import io
 import json
 import threading
@@ -36,25 +37,35 @@ class FakeProc:
         self._rc = -9
 
 
+def _page(tmp_path: Path, n: int = 1) -> Path:
+    """A real file on disk. The client reads the image and sends its BYTES, so a
+    path that does not exist is no longer a usable stand-in -- and its CONTENT is
+    what a fake helper can correlate on, which is a stronger pairing than a
+    filename."""
+    png = tmp_path / f"page-{n:03d}.png"
+    png.write_bytes(b"PAGE-%d-" % n + b"\x89PNG\r\n\x1a\n" + bytes([n]) * 32)
+    return png
+
+
 def _server(responses):
     proc = FakeProc(responses)
     return WarmOCR(popen=lambda *a, **k: proc), proc
 
 
-def test_start_ready_then_ocr():
+def test_start_ready_then_ocr(tmp_path):
     srv, _ = _server([{"text": "hello world", "char_count": 11, "duration_ms": 5}])
     srv.start()
     assert srv.is_ready() is True
-    r = srv.ocr(Path("/x/page-001.png"), lang="eng+Latin", psm=3, timeout_s=30)
+    r = srv.ocr(_page(tmp_path), lang="eng+Latin", psm=3, timeout_s=30)
     assert isinstance(r, OCRResult)
     assert r.text == "hello world" and r.char_count == 11 and r.duration_ms == 5
 
 
-def test_error_response_raises_ocrerror():
+def test_error_response_raises_ocrerror(tmp_path):
     srv, _ = _server([{"error": "Leptonica: bad png"}])
     srv.start()
     with pytest.raises(OCRError):
-        srv.ocr(Path("/x/p.png"), lang="eng", psm=3, timeout_s=30)
+        srv.ocr(_page(tmp_path), lang="eng", psm=3, timeout_s=30)
 
 
 def test_dead_helper_not_ready():
@@ -98,7 +109,9 @@ class EchoProc:
         if self._first:
             self._first = False
             return json.dumps({"ready": True}) + "\n"
-        n = int(self._last["png"].rsplit("-", 1)[1].split(".")[0])
+        # Correlate on the PAYLOAD, not a filename: the request carries the image
+        # itself now, so this pairs response to request on the bytes that were sent.
+        n = int(base64.b64decode(self._last["png_b64"]).split(b"-")[1])
         return json.dumps({"text": f"page{n}", "char_count": n, "duration_ms": 1}) + "\n"
 
     def poll(self):
@@ -115,7 +128,7 @@ class EchoProc:
         self._rc = -9
 
 
-def test_concurrent_ocr_pairs_request_to_response():
+def test_concurrent_ocr_pairs_request_to_response(tmp_path):
     # Finding 1: the converter OCRs pages from a thread pool sharing one WarmOCR.
     # The lock must serialise the single pipe so each page gets ITS OWN response.
     proc = EchoProc()
@@ -126,7 +139,7 @@ def test_concurrent_ocr_pairs_request_to_response():
 
     def worker(n: int) -> None:
         try:
-            r = srv.ocr(Path(f"/x/page-{n:03d}.png"), lang="eng", psm=3, timeout_s=5)
+            r = srv.ocr(_page(tmp_path, n), lang="eng", psm=3, timeout_s=5)
             results[n] = r.char_count
         except Exception as e:  # noqa: BLE001
             errors.append(e)
@@ -204,7 +217,7 @@ def test_stop_is_robust_when_terminate_raises():
     assert srv._proc is None
 
 
-def test_hung_helper_times_out_and_is_killed():
+def test_hung_helper_times_out_and_is_killed(tmp_path):
     # Finding 2: a hung page must NOT block forever; ocr() times out, kills the
     # helper, and raises OCRError so the converter cold-falls-back.
     proc = HangProc()
@@ -212,12 +225,12 @@ def test_hung_helper_times_out_and_is_killed():
     srv.start()
     t0 = time.monotonic()
     with pytest.raises(OCRError):
-        srv.ocr(Path("/x/page-001.png"), lang="eng", psm=3, timeout_s=0.2)
+        srv.ocr(_page(tmp_path), lang="eng", psm=3, timeout_s=0.2)
     assert time.monotonic() - t0 < 5  # did not hang
     assert srv.is_ready() is False  # helper was killed
 
 
-def test_a_queued_call_is_priced_after_the_lock_not_before():
+def test_a_queued_call_is_priced_after_the_lock_not_before(tmp_path):
     """The REAL lock, held by another thread — a fake helper cannot show this.
 
     Every caller serialises here. A duration computed before the wait is still
@@ -242,7 +255,7 @@ def test_a_queued_call_is_priced_after_the_lock_not_before():
     wait_s = 0.25
     deadline = time.monotonic() + 1.0
     threading.Timer(wait_s, release.set).start()
-    srv.ocr(Path("/x/page-001.png"), lang="eng", psm=3, timeout_s=60, deadline=deadline)
+    srv.ocr(_page(tmp_path), lang="eng", psm=3, timeout_s=60, deadline=deadline)
     holder.join(2.0)
 
     sent = json.loads(proc.stdin.getvalue().strip().splitlines()[-1])
@@ -253,13 +266,13 @@ def test_a_queued_call_is_priced_after_the_lock_not_before():
     assert sent["timeout_s"] > 0
 
 
-def test_a_call_whose_budget_expired_while_queued_is_refused():
+def test_a_call_whose_budget_expired_while_queued_is_refused(tmp_path):
     """Past the deadline there is nothing left to spend; the caller cold-falls-back."""
     srv, _ = _server([{"text": "ok", "char_count": 2, "duration_ms": 1}])
     srv.start()
     with pytest.raises(OCRError, match="budget exhausted"):
         srv.ocr(
-            Path("/x/page-001.png"), lang="eng", psm=3,
+            _page(tmp_path), lang="eng", psm=3,
             timeout_s=60, deadline=time.monotonic() - 0.01,
         )
 
@@ -296,3 +309,97 @@ def test_the_helper_caches_a_bounded_number_of_language_apis():
     assert api_for("fra", 3) is before, "a cached pair must be reused, not rebuilt"
     api_for("nld", 3)
     assert "fra" not in ended, "the recently used entry must survive eviction"
+
+
+class TestThePageTravelsAsBytes:
+    """The helper may be SANDBOXED, and then it has no access to the job filesystem at
+    all -- so the image cannot be passed as a path (issue #35). Sending bytes is also
+    what makes a persistent sandboxed helper possible: its mounts are fixed at spawn,
+    before any page exists.
+    """
+
+    def test_the_request_carries_the_image_not_its_path(self, tmp_path):
+        srv, proc = _server([{"text": "ok", "char_count": 2, "duration_ms": 1}])
+        srv.start()
+        png = _page(tmp_path, 7)
+        srv.ocr(png, lang="eng", psm=3, timeout_s=30)
+
+        sent = json.loads(proc.stdin.getvalue().strip().splitlines()[-1])
+        assert "png" not in sent, "the helper was handed a path it may not be able to read"
+        assert base64.b64decode(sent["png_b64"]) == png.read_bytes()
+        assert str(png) not in proc.stdin.getvalue(), (
+            "the page's host path reached the helper anyway"
+        )
+
+    def test_an_unreadable_page_fails_before_anything_is_sent(self, tmp_path):
+        srv, proc = _server([{"text": "ok", "char_count": 2, "duration_ms": 1}])
+        srv.start()
+        with pytest.raises(OCRError, match="cannot read"):
+            srv.ocr(tmp_path / "does-not-exist.png", lang="eng", psm=3, timeout_s=30)
+        assert "png_b64" not in proc.stdin.getvalue()
+
+    def test_an_oversized_page_is_refused_rather_than_streamed(self, tmp_path, monkeypatch):
+        """The bound on one request's memory: the caller cold-falls-back to the CLI,
+        which reads the file directly and needs no such budget."""
+        import clippyshot.ocr_warm as mod
+
+        monkeypatch.setattr(mod, "MAX_PNG_BYTES", 64)
+        srv, proc = _server([{"text": "ok", "char_count": 2, "duration_ms": 1}])
+        srv.start()
+        big = tmp_path / "big.png"
+        big.write_bytes(b"x" * 65)
+        with pytest.raises(OCRError, match="over the"):
+            srv.ocr(big, lang="eng", psm=3, timeout_s=30)
+        assert "png_b64" not in proc.stdin.getvalue(), "an oversized page was sent anyway"
+
+
+class TestSandboxedSpawn:
+    """`sandboxed_popen` is what lets the warm tier run under nsjail/bwrap at all --
+    before it, the engine declined and fell back to the per-page CLI (issue #35)."""
+
+    class _FakeSandbox:
+        name = "fake"
+
+        def __init__(self):
+            self.request = None
+            self.kwargs = None
+
+        def spawn(self, request, **kwargs):
+            self.request = request
+            self.kwargs = kwargs
+            return "POPEN"
+
+    def _spawn(self, **kw):
+        from clippyshot.ocr_warm import sandboxed_popen
+
+        sb = self._FakeSandbox()
+        popen = sandboxed_popen(sb, **kw)
+        handle = popen(["/x/python", "-m", "clippyshot.ocr_warm", "serve"], stdin=-1, text=True)
+        return sb, handle
+
+    def test_no_job_data_is_mounted(self, tmp_path):
+        """The point of the whole change: the helper sees its interpreter and nothing
+        else. A mount of the job's output would put the pages back inside."""
+        sb, _ = self._spawn(prefix=str(tmp_path))
+        assert sb.request.rw_mounts == []
+        mounted = {str(m.host_path) for m in sb.request.ro_mounts}
+        assert str(tmp_path) in mounted
+        assert all(not str(m.host_path).startswith("/job") for m in sb.request.ro_mounts)
+
+    def test_the_soffice_apparmor_profile_is_not_attached(self, tmp_path):
+        """It is written for soffice; this is a different binary. Namespaces, uid,
+        seccomp and the rlimits still apply."""
+        sb, _ = self._spawn(prefix=str(tmp_path))
+        assert sb.request.attach_apparmor is False
+
+    def test_popen_kwargs_reach_the_backend(self, tmp_path):
+        """WarmOCR owns the pipes; if these were swallowed there would be no transport."""
+        sb, handle = self._spawn(prefix=str(tmp_path))
+        assert handle == "POPEN"
+        assert sb.kwargs["stdin"] == -1 and sb.kwargs["text"] is True
+
+    def test_a_system_prefix_is_not_remounted(self):
+        """/usr is already mounted by both backends; mounting it again is at best noise
+        and at worst a duplicate-mount error."""
+        sb, _ = self._spawn(prefix="/usr")
+        assert all(str(m.host_path) != "/usr" for m in sb.request.ro_mounts)

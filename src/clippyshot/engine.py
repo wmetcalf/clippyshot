@@ -291,7 +291,8 @@ class ClippyShotEngine:
         try:
             from clippyshot.sandbox.detect import select_sandbox
 
-            backend = select_sandbox().name
+            sandbox = select_sandbox()
+            backend = sandbox.name
         except Exception as exc:  # noqa: BLE001
             # Undeterminable -- e.g. a forced backend this host cannot satisfy.
             # Left OPEN rather than closed: the scanners fail on their own in
@@ -306,17 +307,32 @@ class ClippyShotEngine:
                 exc,
             )
             backend = ""
+            sandbox = None
+        # Under nsjail/bwrap the helper runs INSIDE the sandbox rather than being
+        # declined. The cold path sandboxes each scanner call; a persistent helper
+        # cannot mount a page directory that does not exist yet at spawn -- which is
+        # why this used to give up and use the CLI. It now spawns in the sandbox and
+        # the page travels as bytes, so the helper needs no job-filesystem access at
+        # all (issue #35).
+        popen = None
         if backend in ("nsjail", "bwrap"):
-            logging.getLogger("clippyshot.engine").info(
-                "warm-OCR declined: %s sandboxes each scanner call, and the warm "
-                "helper would run outside it; using the sandboxed tesseract CLI",
-                backend,
-            )
-            return
+            from clippyshot.sandbox.base import SpawningSandbox
+
+            if not isinstance(sandbox, SpawningSandbox):
+                logging.getLogger("clippyshot.engine").info(
+                    "warm-OCR declined: %s cannot host a persistent helper, and the "
+                    "helper would otherwise run outside the sandbox it enforces per "
+                    "call; using the sandboxed tesseract CLI",
+                    backend,
+                )
+                return
+            from clippyshot.ocr_warm import sandboxed_popen
+
+            popen = sandboxed_popen(sandbox)
         try:
             from clippyshot.ocr_warm import WarmOCR
 
-            ocr_server = WarmOCR()
+            ocr_server = WarmOCR(popen=popen) if popen is not None else WarmOCR()
             ocr_server.start()
         except Exception as exc:  # noqa: BLE001 - non-fatal: cold CLI path
             logging.getLogger("clippyshot.engine").warning(
