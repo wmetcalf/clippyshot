@@ -7,6 +7,8 @@ import pytest
 
 from clippyshot.converter import ConvertOptions
 from clippyshot.limits import Limits
+from clippyshot.sandbox.base import SandboxRequest
+from clippyshot.sandbox.detect import select_sandbox
 from tests.conftest import (
     FIXTURES_DIR,
     needs_bwrap_userns,
@@ -185,61 +187,71 @@ def test_timeout_kills_long_running_conversion(converter, tmp_path: Path):
         )
 
 
+@needs_bwrap_userns
+def test_a_write_to_tmp_inside_the_sandbox_never_reaches_the_host():
+    """A file written to /tmp INSIDE the sandbox must not appear on the host.
+
+    With a positive control, because that is the entire difficulty here. The
+    macro-document test below asserts the same kind of host path is absent after
+    a conversion that never attempts the write at all, so it holds whether or not
+    the isolation exists. This one makes the guest actually perform the write and
+    proves it succeeded (WROTE in stdout) before asking whether the host saw it.
+    """
+    sentinel = Path("/tmp/clippyshot-sandbox-tmp-probe")
+    sentinel.unlink(missing_ok=True)
+    sb = select_sandbox()
+    result = sb.run(
+        SandboxRequest(
+            argv=["/bin/sh", "-c",
+                  f"echo pwned > {sentinel} && test -s {sentinel} && echo WROTE"],
+            limits=Limits(timeout_s=10, memory_bytes=128 * 1024 * 1024),
+        )
+    )
+    try:
+        out = result.stdout.decode(errors="replace")
+        assert "WROTE" in out, (
+            f"the probe never wrote inside the guest, so this proves nothing: {out!r}"
+        )
+        assert not sentinel.exists(), (
+            f"{sentinel} appeared on the HOST — the sandbox is sharing /tmp"
+        )
+    finally:
+        sentinel.unlink(missing_ok=True)
+
+
 @needs_soffice
 @needs_pdftoppm
 @needs_bwrap_userns
-def test_macro_document_writes_nothing_to_the_host(converter, tmp_path: Path):
-    """Converting a document whose Basic macro writes /tmp/clippyshot-macro-pwned
-    must leave nothing on the HOST filesystem.
+def test_a_macro_bearing_document_still_converts(converter, tmp_path: Path):
+    """A document carrying a Document_Open Basic macro converts and renders.
 
-    Named for what it can actually prove. It used to be called
-    test_autoopen_macro_does_not_execute and its failure message blamed
-    MacroSecurityLevel / DisableMacrosExecution, neither of which it can
-    detect a regression in. Two measurements, both on this LibreOffice
-    (24.2.7.2):
+    This was test_autoopen_macro_does_not_execute, which asserted the macro's
+    sentinel was absent from the host and blamed MacroSecurityLevel /
+    DisableMacrosExecution if it was not. It could not detect a regression in
+    either, and measurement is the reason to say so rather than an opinion.
+    Both on this LibreOffice (24.2.7.2):
 
       * Removing MacroSecurityLevel, DisableMacrosExecution and OfficeBasic from
-        the hardened profile entirely -> this test still passed.
-      * Running soffice --headless --convert-to on the same fixture with a
-        DEFAULT profile and NO sandbox -> the sentinel is still never written.
-        LibreOffice does not fire Document_Open during a headless conversion,
-        so macro execution is not reachable on this path at all.
+        the hardened profile entirely -> the test still passed.
+      * soffice --headless --convert-to on this fixture with a DEFAULT profile
+        and NO sandbox -> the sentinel is still never written. LibreOffice does
+        not fire Document_Open during a headless conversion, so the macro never
+        runs on this path and the assertion had nothing to observe.
 
-    On top of that the sandbox mounts /tmp as a tmpfs (bwrap --tmpfs /tmp), so a
-    sentinel written inside it could not reach the host anyway.
-
-    What remains, and is worth keeping, is the host-isolation claim: whatever
-    LibreOffice does with this document, nothing appears at that path outside
-    the sandbox. The profile settings themselves are asserted directly, and
-    falsifiably, in tests/unit/test_libreoffice_profile.py."""
+    Its two possible claims are covered by tests that can fail: the profile
+    settings in tests/unit/test_libreoffice_profile.py, and host isolation by
+    the probe above, which writes for real. What is left here, and is worth
+    keeping, is that a macro-bearing document does not break the pipeline.
+    """
     src = MALICIOUS / "macro_autoopen.odt"
     if not src.exists():
         pytest.skip("malicious fixture macro_autoopen.odt not built")
 
-    # Sentinel path the macro would create.
-    sentinel = Path("/tmp/clippyshot-macro-pwned")
-    # Pre-clean any leftover from a prior run.
-    if sentinel.exists():
-        sentinel.unlink()
-
     out = tmp_path / "out"
-    try:
-        converter.convert(
-            src,
-            out,
-            ConvertOptions(limits=Limits(timeout_s=60, max_pages=2)),
-        )
-    finally:
-        # The sandbox gives the guest its own /tmp, so this is the
-        # escape check: the sentinel must not exist on the host.
-        wrote_to_host = sentinel.exists()
-        if wrote_to_host:
-            sentinel.unlink()  # cleanup before asserting so the next run is clean
+    converter.convert(src, out, ConvertOptions(limits=Limits(timeout_s=60, max_pages=2)))
 
-    assert not wrote_to_host, (
-        "the conversion wrote /tmp/clippyshot-macro-pwned on the HOST — "
-        "something escaped the sandbox, whose /tmp is a tmpfs"
-    )
+    render = json.loads((out / "metadata.json").read_text())["render"]
+    assert render["page_count_rendered"] >= 1
 
 
 @needs_soffice
