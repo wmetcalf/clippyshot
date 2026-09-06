@@ -217,9 +217,20 @@ def test_a_write_to_tmp_inside_the_sandbox_never_reaches_the_host():
     the isolation exists. This one makes the guest actually perform the write and
     proves it succeeded (WROTE in stdout) before asking whether the host saw it.
     """
+    sb = select_sandbox()
+    # Only the backends that give the CALL its own /tmp can be probed this way:
+    # nsjail --tmpfsmount and bwrap --tmpfs. ContainerSandbox runs commands directly
+    # inside the enclosing container and shares this process's /tmp by design -- its
+    # boundary surrounds the whole worker -- and the nono decorator adds Landlock
+    # rules, not a private tmpfs. Probing either would report a supported backend,
+    # operating correctly, as an escape.
+    #
+    # Deliberately narrower than sandboxes_each_call(): that answers "is every call
+    # wrapped", which container+nono satisfies while still sharing /tmp.
+    if not {"nsjail", "bwrap"} & set(str(sb.name).split("+")):
+        pytest.skip(f"{sb.name} does not give each call its own /tmp; nothing to probe")
     sentinel = Path("/tmp/clippyshot-sandbox-tmp-probe")
     sentinel.unlink(missing_ok=True)
-    sb = select_sandbox()
     result = sb.run(
         SandboxRequest(
             argv=["/bin/sh", "-c",
@@ -253,10 +264,17 @@ def test_a_macro_bearing_document_still_converts(converter, tmp_path: Path):
 
       * Removing MacroSecurityLevel, DisableMacrosExecution and OfficeBasic from
         the hardened profile entirely -> the test still passed.
-      * soffice --headless --convert-to on this fixture with a DEFAULT profile
-        and NO sandbox -> the sentinel is still never written. LibreOffice does
-        not fire Document_Open during a headless conversion, so the macro never
-        runs on this path and the assertion had nothing to observe.
+      * soffice --headless --convert-to on this fixture with NO sandbox and macro
+        security wide open -- MacroSecurityLevel=0, DisableMacrosExecution=false,
+        OfficeBasic=2 -- and with the macro BOUND to document-open by a dom:load
+        event listener: the sentinel is still never written. LibreOffice does not
+        fire document events during a headless conversion, so the macro cannot
+        run on this path at any setting, and the assertion had nothing to observe.
+
+        (The binding matters: the fixture carried a bare Sub in Module1 that
+        nothing called, so an inert result would have proved nothing about the
+        hardening. build_malicious_fixtures.py wires the listener now, and the
+        result above is from the rebuilt fixture.)
 
     Its two possible claims are covered by tests that can fail: the profile
     settings in tests/unit/test_libreoffice_profile.py, and host isolation by
