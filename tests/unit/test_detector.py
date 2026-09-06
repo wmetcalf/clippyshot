@@ -128,11 +128,15 @@ def test_an_entry_bomb_is_rejected_even_though_it_barely_compresses(tmp_path: Pa
     """
     from clippyshot.detector import _looks_like_ooxml
 
-    # 5501 is written out, not derived from _MAX_OOXML_ENTRIES: a bomb sized from
+    # 5001 is written out, not derived from _MAX_OOXML_ENTRIES: a bomb sized from
     # the constant grows with it, so raising the cap to 5,000,000 would still be
-    # "over the limit" and the mutant survives. (Measured -- it did.) The cap this
-    # pins is the documented 5000.
-    bomb = _stored_zip(tmp_path / "entries.docx", 5501)
+    # "over the limit" and the mutant survives. (Measured -- it did.)
+    #
+    # And it is 5001 rather than a comfortable 5501, so the boundary is exact: at
+    # 5501 a cap that regressed to anything from 5001 to 5500 still rejected this
+    # archive and the suite stayed green (codex). Paired with acceptance at
+    # exactly 5000 below, only the documented cap passes both.
+    bomb = _stored_zip(tmp_path / "entries.docx", 5001)
     assert _looks_like_ooxml(bomb) is False
 
     # And prove the ratio guard is not what rejected it.
@@ -151,6 +155,10 @@ def test_an_ordinary_entry_count_still_passes(tmp_path: Path):
 
     ok = _stored_zip(tmp_path / "normal.docx", 50)
     assert _looks_like_ooxml(ok) is True
+    # Exactly at the cap: the other half of the boundary, so a cap LOWERED to
+    # anything below 5000 is caught too.
+    at_cap = _stored_zip(tmp_path / "at-cap.docx", 5000)
+    assert _looks_like_ooxml(at_cap) is True
 
 
 def test_zip_bomb_with_docx_extension_is_rejected(tmp_path: Path):
