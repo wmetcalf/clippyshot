@@ -600,6 +600,25 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         assert r.returncode == 2
         assert "no usable `version` output" in r.stderr
 
+    def test_temp_paths_are_never_derived_from_another_temp_path(self) -> None:
+        """Source-level, because the defect needs a hostile local process to race us.
+
+        A name derived from another temp file's name is PREDICTABLE: in a shared $TMPDIR
+        another user can plant a symlink at it between the two creations and have our write
+        follow it into a file of their choosing (codex). Every temp path must come from
+        `mktemp`, which creates the file atomically with a name nobody can guess.
+        """
+        import re
+
+        offenders = [
+            line.strip()
+            for line in (ln.split("#", 1)[0] for ln in SCRIPT.read_text().splitlines())
+            if re.search(r'^\s*BB_\w*FILE="\$[A-Za-z_]', line)
+        ]
+        assert not offenders, (
+            "temp paths must come from mktemp, not from another temp path: " + "; ".join(offenders)
+        )
+
     def test_bashpid_is_never_referenced_unguarded(self) -> None:
         """A lint-style check, and deliberately so: this one cannot be executed here.
 

@@ -230,12 +230,13 @@ trap '_bb_version_kill; _bb_version_cleanup; trap - QUIT; kill -QUIT $$' QUIT
 # nothing for it. A flood on either stream now dies of SIGXFSZ at 512 KiB.
 BB_OUT_FILE="$(mktemp)"
 BB_PID_FILE="$(mktemp)"
-# Derived rather than mktemp'd, but PREALLOCATED here: creating it inside the
-# watchdog meant a $TMPDIR that filled up after startup killed the watchdog on
-# `set -e` before it signalled anything -- losing the deadline to a disk problem
-# (codex). Emptiness is the signal, so it can exist from the start.
-BB_EXPIRY_FILE="$BB_PID_FILE.expired"
-: > "$BB_EXPIRY_FILE"
+# mktemp, not a path derived from another temp file's name. A derived name is
+# PREDICTABLE, so in a shared $TMPDIR another local process can plant a symlink
+# there between the two creations and have this write follow it into a file of
+# their choosing (codex). Emptiness is the signal, so an existing empty file is
+# exactly right -- and preallocating also means a $TMPDIR that fills up later
+# cannot kill the watchdog on `set -e` before it signals.
+BB_EXPIRY_FILE="$(mktemp)"
 # BOUND THE PROBE'S DURATION, rather than chase the ways a CLI can block. `</dev/null`
 # does not cover a CLI that opens /dev/tty itself, and `set -m` means such a read is
 # STOPPED by SIGTTIN and `wait` never returns (codex). Rather than add a mechanism per
@@ -363,7 +364,10 @@ _bb_watchdog_pid=""
 # stubborn descendant is still holding that pgid, so it cannot have been recycled
 # (codex).
 _bb_deadline_expired=""
-if [ -s "$BB_EXPIRY_FILE" ]; then
+# The marker is the reliable signal; the status is a FALLBACK for the case where the
+# watchdog could not write it (a full $TMPDIR). Fail closed: an expiry we cannot
+# record is still an expiry (codex).
+if [ -s "$BB_EXPIRY_FILE" ] || [ "$BB_RC" = 143 ] || [ "$BB_RC" = 137 ]; then
   _bb_deadline_expired=1
 fi
 # Sweep whenever the group STILL HAS MEMBERS, which is the honest test. A probe that
@@ -379,8 +383,11 @@ if kill -0 -- "-$BB_PID" 2>/dev/null; then
   kill -KILL -- "-$BB_PID" 2>/dev/null || true
 fi
 # The pid is spent: `wait` has reaped it, so from here it names nothing of ours and a
-# late signal handler must not act on it (codex).
+# late signal handler must not act on it (codex). BOTH sources, since the handler
+# reads the pidfile FIRST -- clearing only the variable left the stale value in the
+# file, which is the one it would have used.
 BB_PID=""
+: > "$BB_PID_FILE" 2>/dev/null || true
 # The version is grepped from the WHOLE file, which `ulimit -f` has already capped
 # at 512 KiB. Reading a 4 KiB prefix instead meant a CLI that prints a long banner
 # before its version was rejected as unusable even though it exited zero (codex).
