@@ -364,6 +364,46 @@ class ClippyShotEngine:
 
         from clippyshot.libreoffice.profile import HardenedProfile
 
+        # Not where the deployment sandboxes each CONVERSION. nsjail and bwrap wrap every
+        # cold soffice invocation -- that is what the `clippyshot-soffice` AppArmor profile
+        # and the KAFEL seccomp policy are FOR -- and a warm server is a persistent process
+        # outside that wrapper. `LibreOfficeRunner` prefers it whenever it is ready, so
+        # enabling the warm tier there silently moved document parsing, the largest attack
+        # surface in this program, OUT of the sandbox the cold path beside it insists on.
+        #
+        # The same asymmetry was closed for warm OCR (#35). It matters more here: a page
+        # image reaches tesseract, a document reaches LibreOffice.
+        #
+        # The warm tiers are unaffected -- they run with CLIPPYSHOT_SANDBOX=container (see
+        # deploy/docker/docker-compose.gvisor.yml), where the guest itself is the boundary
+        # and no per-call sandbox is in play. Declining is the interim, not the end state:
+        # running the warm server INSIDE the sandbox is the better answer and needs a
+        # staging-mount design, because unoconvert takes file PATHS and a persistent
+        # helper's mounts are fixed before any job directory exists.
+        try:
+            from clippyshot.sandbox.detect import select_sandbox
+
+            backend = select_sandbox().name
+        except Exception as exc:  # noqa: BLE001
+            # Undeterminable: left OPEN, matching _warmup_ocr. Conversion fails on its own
+            # in this state, so declining here would disable the warm tier on a deployment
+            # whose selection simply is not resolvable at warmup without making anything
+            # safer -- but it is logged, because a silent fall-through is how this class of
+            # asymmetry goes unnoticed.
+            logging.getLogger("clippyshot.engine").warning(
+                "warm-UNO: could not determine the sandbox backend (%s); starting the "
+                "server anyway -- verify this deployment does not sandbox each conversion",
+                exc,
+            )
+            backend = ""
+        if backend in ("nsjail", "bwrap"):
+            logging.getLogger("clippyshot.engine").info(
+                "warm-UNO declined: %s sandboxes each conversion, and the warm server "
+                "would run outside it; using the sandboxed cold soffice path",
+                backend,
+            )
+            return
+
         # SECURITY: the warm soffice/unoserver MUST boot with the same hardened LibreOffice
         # profile the cold path writes (MacroSecurityLevel=3, DisableMacrosExecution=true, no
         # Basic, no Java, no remote) — otherwise the warm tier parses untrusted documents with

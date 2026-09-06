@@ -15,6 +15,25 @@ def _hermetic_warm_profile(tmp_path, monkeypatch):
     monkeypatch.setenv("CLIPPYSHOT_WARM_PROFILE_DIR", str(tmp_path / "warm-profile"))
 
 
+@pytest.fixture
+def warm_tier(monkeypatch):
+    """Pin the sandbox backend to the WARM tier's own value.
+
+    Warm UNO is declined where each conversion is sandboxed (nsjail/bwrap), so a test
+    that leaves selection to whatever the DEVELOPER's machine has installed measures the
+    host rather than the behaviour under test -- these five failed on a box with nsjail
+    present. The warm guests really do run `CLIPPYSHOT_SANDBOX=container`
+    (deploy/docker/docker-compose.gvisor.yml), so this is the tier being described.
+    """
+
+    class _ContainerTier:
+        name = "container"
+
+    monkeypatch.setattr(
+        "clippyshot.sandbox.detect.select_sandbox", lambda **kw: _ContainerTier()
+    )
+    return _ContainerTier
+
 def test_warmup_noop_when_env_unset(monkeypatch):
     monkeypatch.delenv("CLIPPYSHOT_WARM_UNO", raising=False)
     eng = ClippyShotEngine()
@@ -29,7 +48,7 @@ def test_warmup_noop_when_env_falsey(monkeypatch):
     assert eng._uno_server is None
 
 
-def test_warmup_starts_server_when_enabled(monkeypatch):
+def test_warmup_starts_server_when_enabled(warm_tier, monkeypatch):
     monkeypatch.setenv("CLIPPYSHOT_WARM_UNO", "1")
     started = []
 
@@ -64,7 +83,7 @@ def test_warmup_is_nonfatal_on_start_failure(monkeypatch):
     assert eng._uno_server is None
 
 
-def test_warmup_writes_and_passes_hardened_profile(monkeypatch, tmp_path):
+def test_warmup_writes_and_passes_hardened_profile(warm_tier, monkeypatch, tmp_path):
     # SECURITY (H1): the warm server must boot with the hardened LO profile (macro/Basic/Java
     # lockdown), captured warm in the snapshot — not LibreOffice defaults.
     monkeypatch.setenv("CLIPPYSHOT_WARM_UNO", "1")
@@ -140,7 +159,7 @@ class _PrimingServer:
         dst.write_bytes(b"%PDF-1.4 primed\n")
 
 
-def test_warmup_primes_filters_by_default(monkeypatch):
+def test_warmup_primes_filters_by_default(warm_tier, monkeypatch):
     # The snapshot must capture a server with its conversion filters warmed, else the
     # first post-restore convert pays a multi-second cold-filter load. warmup() runs a
     # throwaway conversion per prime doc.
@@ -156,7 +175,7 @@ def test_warmup_primes_filters_by_default(monkeypatch):
     assert any(label == "txt" for _name, label in srv.primed)
 
 
-def test_warmup_priming_can_be_disabled(monkeypatch):
+def test_warmup_priming_can_be_disabled(warm_tier, monkeypatch):
     monkeypatch.setenv("CLIPPYSHOT_WARM_UNO", "1")
     monkeypatch.setenv("CLIPPYSHOT_WARM_PRIME", "0")
     srv = _PrimingServer()
@@ -167,7 +186,7 @@ def test_warmup_priming_can_be_disabled(monkeypatch):
     assert srv.primed == []  # priming opt-out honored
 
 
-def test_warmup_priming_failure_is_nonfatal(monkeypatch):
+def test_warmup_priming_failure_is_nonfatal(warm_tier, monkeypatch):
     # A priming-convert failure must leave the warm server in place (the first real
     # convert just pays the warmup once) — it must NOT disable the warm tier or raise.
     monkeypatch.setenv("CLIPPYSHOT_WARM_UNO", "1")
@@ -483,3 +502,87 @@ def test_warm_ocr_runs_inside_the_sandbox_when_the_backend_can_host_it(monkeypat
     assert seen.get("popen") is not None, (
         "the helper was started with the default Popen -- outside the sandbox"
     )
+
+
+@pytest.mark.parametrize("backend", ["nsjail", "bwrap"])
+def test_warm_uno_declines_where_each_conversion_is_sandboxed(monkeypatch, backend):
+    """The warm soffice is a persistent process OUTSIDE the per-conversion sandbox.
+
+    nsjail and bwrap wrap every cold soffice invocation -- that is what the
+    `clippyshot-soffice` AppArmor profile and the KAFEL policy are for -- and
+    `LibreOfficeRunner` prefers the warm server whenever it is ready. Enabling the warm
+    tier there silently moved document parsing, the largest attack surface in this
+    program, out of the sandbox the cold path insists on. Same asymmetry warm OCR had
+    (#35); it matters more here, because a document reaches LibreOffice rather than a
+    page image reaching tesseract.
+    """
+    monkeypatch.setenv("CLIPPYSHOT_WARM_UNO", "1")
+
+    class Fake:
+        name = backend
+
+    monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", lambda **kw: Fake())
+    started = []
+    monkeypatch.setattr(
+        "clippyshot.libreoffice.uno.UnoServer",
+        lambda *a, **k: started.append(True),
+    )
+    monkeypatch.setattr(
+        "clippyshot.libreoffice.uno_pipe.SofficePipeServer",
+        lambda *a, **k: started.append(True),
+    )
+
+    eng = ClippyShotEngine()
+    eng._warmup_uno()
+
+    assert started == [], f"{backend} sandboxes each conversion; the warm server must not start"
+    assert eng._uno_server is None, "a warm server here bypasses the sandbox on every job"
+
+
+@pytest.mark.parametrize("transport", ["socket", "pipe"])
+def test_warm_uno_declines_for_both_transports(monkeypatch, transport):
+    """Both transports spawn the same unsandboxed soffice; guarding one would leave the
+    bypass reachable by flipping an env var."""
+    monkeypatch.setenv("CLIPPYSHOT_WARM_UNO", "1")
+    monkeypatch.setenv("CLIPPYSHOT_WARM_UNO_TRANSPORT", transport)
+
+    class Fake:
+        name = "nsjail"
+
+    monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", lambda **kw: Fake())
+    started = []
+    monkeypatch.setattr(
+        "clippyshot.libreoffice.uno.UnoServer", lambda *a, **k: started.append(True)
+    )
+    monkeypatch.setattr(
+        "clippyshot.libreoffice.uno_pipe.SofficePipeServer",
+        lambda *a, **k: started.append(True),
+    )
+
+    eng = ClippyShotEngine()
+    eng._warmup_uno()
+    assert started == [], f"transport={transport} started an unsandboxed soffice"
+
+
+def test_warm_uno_still_starts_where_the_guest_is_the_boundary(monkeypatch, warm_tier):
+    """The FC/gVisor warm tiers must keep their warm server: they run with
+    CLIPPYSHOT_SANDBOX=container (deploy/docker/docker-compose.gvisor.yml), where the
+    guest is the boundary and no per-call sandbox is in play. A guard that also disabled
+    those would be a performance regression dressed as a security fix."""
+    monkeypatch.setenv("CLIPPYSHOT_WARM_UNO", "1")
+    started = []
+
+    class FakeServer:
+        def start(self):
+            started.append(True)
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(
+        "clippyshot.libreoffice.uno.UnoServer", lambda *a, **k: FakeServer()
+    )
+    eng = ClippyShotEngine()
+    eng._warmup_uno()
+    assert started == [True], "the warm tier lost its warm server"
+    assert eng._uno_server is not None
