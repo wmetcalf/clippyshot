@@ -95,7 +95,7 @@ def build_macro_autoopen_odt() -> None:
 
     When loaded by LibreOffice, the macro would write a sentinel file to
     /tmp/clippyshot-macro-pwned.  Under our hardened profile
-    (MacroSecurityLevel=4, DisableMacrosExecution=true) the macro must NOT
+    (MacroSecurityLevel=3, DisableMacrosExecution=true) the macro must NOT
     execute — the integration test asserts the sentinel file is absent after
     conversion.
     """
@@ -120,7 +120,21 @@ def build_macro_autoopen_odt() -> None:
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             '<office:document-content'
             ' xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"'
-            ' xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">\n'
+            ' xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"'
+            ' xmlns:script="urn:oasis:names:tc:opendocument:xmlns:script:1.0"'
+            ' xmlns:xlink="http://www.w3.org/1999/xlink"'
+            # dom: is the XML Events namespace. Without this declaration the
+            # dom:load QName below resolves to nothing and the listener is inert
+            # -- which would make an "it did not fire" result meaningless (codex).
+            ' xmlns:dom="http://www.w3.org/2001/xml-events">\n'
+            # The macro must be BOUND to document-open, or the fixture is inert for a
+            # reason that has nothing to do with the hardening it is meant to exercise:
+            # a bare Sub in Module1 is never called by anything.
+            '  <office:scripts><office:event-listeners>'
+            '<script:event-listener script:language="ooo:script" script:event-name="dom:load"'
+            ' xlink:href="vnd.sun.star.script:Standard.Module1.Document_Open'
+            '?language=Basic&amp;location=document"/>'
+            '</office:event-listeners></office:scripts>\n'
             '  <office:body><office:text>'
             '<text:p>Macro fixture body — if you see this rendered, macros did not execute (good).</text:p>'
             '</office:text></office:body>\n'
