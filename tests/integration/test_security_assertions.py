@@ -8,7 +8,6 @@ import pytest
 from clippyshot.converter import ConvertOptions
 from clippyshot.limits import Limits
 from clippyshot.sandbox.base import SandboxRequest
-from clippyshot.sandbox.detect import select_sandbox
 from tests.conftest import (
     FIXTURES_DIR,
     needs_bwrap_userns,
@@ -207,29 +206,48 @@ def test_timeout_kills_long_running_conversion(converter, tmp_path: Path):
         )
 
 
-@needs_bwrap_userns
-def test_a_write_to_tmp_inside_the_sandbox_never_reaches_the_host():
+def _explicit_backend(name: str):
+    """Construct THIS backend, or skip the case.
+
+    select_sandbox() returns only the FIRST usable implementation -- nsjail before
+    bwrap -- so probing whatever it hands back leaves the other advertised isolation
+    path untested. Measured on this host: removing bwrap's `--tmpfs /tmp` left the
+    probe green, because nsjail was what ran. Each backend is therefore constructed
+    by name, and skipped individually where it is not usable.
+    """
+    from clippyshot.errors import SandboxUnavailable
+    from clippyshot.sandbox.bwrap import BwrapSandbox
+    from clippyshot.sandbox.nsjail import NsjailSandbox
+
+    cls = {"nsjail": NsjailSandbox, "bwrap": BwrapSandbox}[name]
+    try:
+        sb = cls()
+        smoke = sb.smoketest()
+    except SandboxUnavailable as exc:
+        pytest.skip(f"{name} is not usable here: {exc}")
+    except Exception as exc:  # noqa: BLE001 - any construction failure means "not usable"
+        pytest.skip(f"{name} could not be constructed here: {exc!r}")
+    if smoke.exit_code != 0 or smoke.killed:
+        pytest.skip(f"{name} failed its own smoketest (exit={smoke.exit_code})")
+    return sb
+
+
+@pytest.mark.parametrize("backend", ["nsjail", "bwrap"])
+def test_a_write_to_tmp_inside_the_sandbox_never_reaches_the_host(backend: str):
     """A file written to /tmp INSIDE the sandbox must not appear on the host.
 
     With a positive control, because that is the entire difficulty here. The
-    macro-document test below asserts the same kind of host path is absent after
-    a conversion that never attempts the write at all, so it holds whether or not
-    the isolation exists. This one makes the guest actually perform the write and
-    proves it succeeded (WROTE in stdout) before asking whether the host saw it.
+    macro-document test below asserts the same kind of host path is absent after a
+    conversion that never attempts the write at all, so it holds whether or not the
+    isolation exists. This one makes the guest actually perform the write and proves
+    it succeeded (WROTE in stdout) before asking whether the host saw it.
+
+    Both backends that mount a private tmpfs are probed. ContainerSandbox is not:
+    it runs commands directly inside the enclosing container and shares this
+    process's /tmp by design -- its boundary surrounds the whole worker.
     """
-    sb = select_sandbox()
-    # Only the backends that give the CALL its own /tmp can be probed this way:
-    # nsjail --tmpfsmount and bwrap --tmpfs. ContainerSandbox runs commands directly
-    # inside the enclosing container and shares this process's /tmp by design -- its
-    # boundary surrounds the whole worker -- and the nono decorator adds Landlock
-    # rules, not a private tmpfs. Probing either would report a supported backend,
-    # operating correctly, as an escape.
-    #
-    # Deliberately narrower than sandboxes_each_call(): that answers "is every call
-    # wrapped", which container+nono satisfies while still sharing /tmp.
-    if not {"nsjail", "bwrap"} & set(str(sb.name).split("+")):
-        pytest.skip(f"{sb.name} does not give each call its own /tmp; nothing to probe")
-    sentinel = Path("/tmp/clippyshot-sandbox-tmp-probe")
+    sb = _explicit_backend(backend)
+    sentinel = Path(f"/tmp/clippyshot-sandbox-tmp-probe-{backend}")
     sentinel.unlink(missing_ok=True)
     result = sb.run(
         SandboxRequest(
@@ -241,10 +259,11 @@ def test_a_write_to_tmp_inside_the_sandbox_never_reaches_the_host():
     try:
         out = result.stdout.decode(errors="replace")
         assert "WROTE" in out, (
-            f"the probe never wrote inside the guest, so this proves nothing: {out!r}"
+            f"the {backend} probe never wrote inside the guest, so this proves "
+            f"nothing: {out!r}"
         )
         assert not sentinel.exists(), (
-            f"{sentinel} appeared on the HOST — the sandbox is sharing /tmp"
+            f"{sentinel} appeared on the HOST — {backend} is sharing /tmp"
         )
     finally:
         sentinel.unlink(missing_ok=True)
