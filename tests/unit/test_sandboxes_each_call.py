@@ -89,3 +89,46 @@ class TestItCannotHangWarmup:
     def test_something_without_a_name_is_not_per_call(self):
         assert sandboxes_each_call(object()) is False
         assert sandboxes_each_call(None) is False
+
+
+class TestPerCallPossibleAsksTheHost:
+    """When `select_sandbox()` RAISES, the exception type cannot say whether nothing is
+    installed or the smoketest merely flaked -- `select_sandbox` reports both as
+    `SandboxUnavailable` (codex on #41). The host is the stable question."""
+
+    def _probe(self, monkeypatch, *, nsjail=None, bwrap=None, forced=None, nono=False):
+        import clippyshot.sandbox.detect as det
+
+        monkeypatch.setattr(
+            det.shutil, "which",
+            lambda n: {"nsjail": nsjail, "bwrap": bwrap}.get(n),
+        )
+        monkeypatch.delenv("CLIPPYSHOT_SANDBOX", raising=False)
+        monkeypatch.delenv("CLIPPYSHOT_INNER_NONO", raising=False)
+        if forced:
+            monkeypatch.setenv("CLIPPYSHOT_SANDBOX", forced)
+        if nono:
+            monkeypatch.setenv("CLIPPYSHOT_INNER_NONO", "1")
+        return det.per_call_sandbox_possible()
+
+    def test_a_warm_guest_has_neither_binary(self, monkeypatch):
+        """No nsjail, no bwrap: the guest is the boundary and the warm tier must live."""
+        assert self._probe(monkeypatch) is False
+
+    def test_a_host_with_nsjail_installed(self, monkeypatch):
+        """Even if selection just failed, a retry can succeed with it."""
+        assert self._probe(monkeypatch, nsjail="/usr/local/bin/nsjail") is True
+
+    def test_a_host_with_only_bwrap(self, monkeypatch):
+        assert self._probe(monkeypatch, bwrap="/usr/bin/bwrap") is True
+
+    def test_a_forced_container_backend_is_not_per_call(self, monkeypatch):
+        """The warm tiers force container; a stray nsjail binary must not disable them."""
+        assert self._probe(monkeypatch, nsjail="/usr/local/bin/nsjail", forced="container") is False
+
+    def test_a_forced_nsjail_counts_even_without_the_binary(self, monkeypatch):
+        assert self._probe(monkeypatch, forced="nsjail") is True
+
+    def test_inner_nono_makes_any_selection_per_call(self, monkeypatch):
+        """nono decorates whatever is selected, including container."""
+        assert self._probe(monkeypatch, forced="container", nono=True) is True

@@ -273,7 +273,6 @@ class ClippyShotEngine:
         import atexit
         import logging
 
-        from clippyshot.errors import SandboxUnavailable
 
         if os.environ.get("CLIPPYSHOT_WARM_OCR", "").lower() not in ("1", "true", "yes"):
             return
@@ -291,40 +290,39 @@ class ClippyShotEngine:
         # the boundary and no per-call sandbox is in play, keeps its warm tier.
         # Sandboxing the helper ITSELF is the better answer and is open as #35.
         try:
-            from clippyshot.sandbox.detect import sandboxes_each_call, select_sandbox
+            from clippyshot.sandbox.detect import (
+                per_call_sandbox_possible,
+                sandboxes_each_call,
+                select_sandbox,
+            )
 
             sandbox = select_sandbox()
             backend = sandbox.name
             per_call = sandboxes_each_call(sandbox)
-        except SandboxUnavailable as exc:
-            # NO backend exists here -- the shape a warm FC/gVisor guest takes, where the
-            # guest is the boundary and there is nothing per-call to bypass. Declining on
-            # this would disable the warm tier the feature exists for.
+        except Exception as exc:  # noqa: BLE001
+            # Selection failed. The exception TYPE cannot say whether that means "nothing
+            # is installed" or "the smoketest flaked" -- `select_sandbox` reports both as
+            # SandboxUnavailable (codex) -- so ask the HOST, which is stable across a
+            # flake: could a per-call backend be selected here at all?
+            if per_call_sandbox_possible():
+                logging.getLogger("clippyshot.engine").warning(
+                    "warm-OCR declined: selection failed (%s) but this host can select a "
+                    "per-call sandbox, and a later retry may; using the tesseract CLI",
+                    exc,
+                )
+                return
             # WARNING, not info: this is the branch that STARTS a warm parser on the
-            # belief that nothing confines each call. It is legitimate in a warm guest
-            # and unremarkable there, but it is exactly the decision someone will want
-            # to find in a log when asking why a parser ran outside a sandbox.
+            # belief that nothing confines each call. Legitimate in a warm guest, and
+            # exactly the line someone will look for when asking why a parser ran
+            # outside a sandbox.
             logging.getLogger("clippyshot.engine").warning(
-                "warm-OCR: no sandbox backend on this host (%s); the guest is the "
-                "boundary, starting the helper",
+                "warm-OCR: selection failed (%s) and no per-call sandbox is possible on "
+                "this host; the guest is the boundary, starting the helper",
                 exc,
             )
             backend = ""
             sandbox = None
             per_call = False
-        except Exception as exc:  # noqa: BLE001
-            # Any OTHER failure is INDETERMINATE, and indeterminate is not "no sandbox":
-            # `_build_converter()` retries selection later, and a retry that succeeds with
-            # nsjail would leave a warm helper already running outside it (codex). The
-            # exception TYPE carries the distinction -- SandboxUnavailable is an answer,
-            # anything else is the question failing.
-            logging.getLogger("clippyshot.engine").warning(
-                "warm-OCR declined: the sandbox backend could not be determined (%s), "
-                "and selection may resolve to a per-call sandbox later; using the "
-                "tesseract CLI",
-                exc,
-            )
-            return
         # Under nsjail/bwrap the helper runs INSIDE the sandbox rather than being
         # declined. The cold path sandboxes each scanner call; a persistent helper
         # cannot mount a page directory that does not exist yet at spawn -- which is
@@ -379,7 +377,6 @@ class ClippyShotEngine:
         import atexit
         import logging
 
-        from clippyshot.errors import SandboxUnavailable
 
         from clippyshot.libreoffice.profile import HardenedProfile
 
@@ -400,30 +397,32 @@ class ClippyShotEngine:
         # staging-mount design, because unoconvert takes file PATHS and a persistent
         # helper's mounts are fixed before any job directory exists.
         try:
-            from clippyshot.sandbox.detect import sandboxes_each_call, select_sandbox
+            from clippyshot.sandbox.detect import (
+                per_call_sandbox_possible,
+                sandboxes_each_call,
+                select_sandbox,
+            )
 
             _selected = select_sandbox()
             backend = _selected.name
             per_call = sandboxes_each_call(_selected)
-        except SandboxUnavailable as exc:
-            # No backend at all: the warm-guest shape, nothing per-call to bypass.
+        except Exception as exc:  # noqa: BLE001
+            # Ask the host, not the exception type -- see _warmup_ocr above.
+            if per_call_sandbox_possible():
+                logging.getLogger("clippyshot.engine").warning(
+                    "warm-UNO declined: selection failed (%s) but this host can select a "
+                    "per-call sandbox, and a later retry may; using the sandboxed cold "
+                    "soffice path",
+                    exc,
+                )
+                return
             logging.getLogger("clippyshot.engine").warning(
-                "warm-UNO: no sandbox backend on this host (%s); the guest is the "
-                "boundary, starting the server",
+                "warm-UNO: selection failed (%s) and no per-call sandbox is possible on "
+                "this host; the guest is the boundary, starting the server",
                 exc,
             )
             backend = ""
             per_call = False
-        except Exception as exc:  # noqa: BLE001
-            # Indeterminate, exactly as in _warmup_ocr above: fail closed, because
-            # selection may resolve to a per-call sandbox later.
-            logging.getLogger("clippyshot.engine").warning(
-                "warm-UNO declined: the sandbox backend could not be determined (%s), "
-                "and selection may resolve to a per-call sandbox later; using the "
-                "sandboxed cold soffice path",
-                exc,
-            )
-            return
         if per_call:
             logging.getLogger("clippyshot.engine").info(
                 "warm-UNO declined: %s sandboxes each conversion, and the warm server "

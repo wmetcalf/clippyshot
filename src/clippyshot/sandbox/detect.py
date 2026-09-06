@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Callable
 
@@ -199,3 +200,30 @@ def sandboxes_each_call(sandbox: object) -> bool:
         sandbox = getattr(sandbox, "inner", None)
         seen += 1
     return False
+
+
+def per_call_sandbox_possible() -> bool:
+    """Could a per-call sandbox be selected on this host, even though selection just failed?
+
+    Asked when `select_sandbox()` RAISES during warmup. The exception type cannot answer
+    it: `select_sandbox` turns a flaky smoketest into `SandboxUnavailable` too, so that
+    error means "none usable right now", not "none installed" (codex). Starting a warm
+    parser on it would be starting one on a transient failure, and `_build_converter()`
+    retries later -- possibly succeeding with nsjail, by which time the parser is already
+    outside it.
+
+    So this asks the host instead, which is stable across a flake: is a per-call backend
+    even POSSIBLE here? A warm FC/gVisor guest has no nsjail and no bwrap, so the answer
+    is no and the warm tier keeps working; a host that has them declines until selection
+    is answerable again.
+    """
+    # nono FIRST: it decorates whatever is selected, so it makes even a forced
+    # `container` per-call. Checking the forced backend first returned False for
+    # `CLIPPYSHOT_SANDBOX=container` + `CLIPPYSHOT_INNER_NONO=1`, which is precisely the
+    # combination the previous round was about.
+    if _env_truthy("CLIPPYSHOT_INNER_NONO"):
+        return True
+    forced = os.environ.get("CLIPPYSHOT_SANDBOX", "").strip().lower()
+    if forced:
+        return any(part in _PER_CALL_BACKENDS for part in forced.split("+"))
+    return bool(shutil.which("nsjail") or shutil.which("bwrap"))

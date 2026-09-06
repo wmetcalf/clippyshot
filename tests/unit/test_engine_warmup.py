@@ -445,13 +445,20 @@ def test_warm_ocr_survives_an_unresolvable_sandbox(monkeypatch, caplog):
             pass
 
     monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", _refuse)
+    # Pin the HOST answer too. This test describes a warm guest -- no nsjail, no bwrap --
+    # but it ran on developer boxes that have them, where selection failing means "flaked"
+    # rather than "none installed" and the helper is correctly declined. Leaving this to
+    # the machine made the test measure the box rather than the tier it names.
+    monkeypatch.setattr(
+        "clippyshot.sandbox.detect.per_call_sandbox_possible", lambda: False
+    )
     monkeypatch.setattr("clippyshot.ocr_warm.WarmOCR", lambda *a, **k: FakeWarm())
 
     engine = ClippyShotEngine()
     with caplog.at_level(logging.WARNING, logger="clippyshot.engine"):
         engine._warmup_ocr()
     assert started == [True], "an unresolvable backend must not disable the warm tier"
-    assert any("no sandbox backend on this host" in r.message for r in caplog.records), (
+    assert any("no per-call sandbox is possible" in r.message for r in caplog.records), (
         "the ambiguity must be logged, not silent"
     )
 
@@ -670,3 +677,55 @@ def test_an_indeterminate_backend_declines_rather_than_starting(monkeypatch, war
         eng._warmup_ocr()
         assert eng._ocr_server is None
     assert started == [], "an unresolvable backend started a warm helper anyway"
+
+
+@pytest.mark.parametrize("warm", ["uno", "ocr"])
+@pytest.mark.parametrize(
+    "possible,expect_started",
+    [(True, False), (False, True)],
+    ids=["host-can-select-per-call", "warm-guest-cannot"],
+)
+def test_a_failed_selection_asks_the_host_not_the_exception(
+    monkeypatch, warm, possible, expect_started
+):
+    """`select_sandbox` reports a flaky smoketest as SandboxUnavailable too, so the
+    exception type cannot distinguish "nothing installed" from "failed just now"
+    (codex on #41). The host can: a warm guest has no nsjail/bwrap and keeps its warm
+    tier; a host that has them declines until selection is answerable again."""
+    from clippyshot.errors import SandboxUnavailable
+    from clippyshot.engine import ClippyShotEngine
+
+    def _refuse(**kw):
+        raise SandboxUnavailable("no usable backend right now")
+
+    monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", _refuse)
+    monkeypatch.setattr(
+        "clippyshot.sandbox.detect.per_call_sandbox_possible", lambda: possible
+    )
+
+    started = []
+
+    class FakeServer:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            started.append(True)
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr("clippyshot.libreoffice.uno.UnoServer", FakeServer)
+    monkeypatch.setattr("clippyshot.libreoffice.uno_pipe.SofficePipeServer", FakeServer)
+    monkeypatch.setattr("clippyshot.ocr_warm.WarmOCR", FakeServer)
+
+    eng = ClippyShotEngine()
+    if warm == "uno":
+        monkeypatch.setenv("CLIPPYSHOT_WARM_UNO", "1")
+        eng._warmup_uno()
+    else:
+        monkeypatch.setenv("CLIPPYSHOT_WARM_OCR", "1")
+        monkeypatch.delenv("CLIPPYSHOT_OCR_ENGINE", raising=False)
+        eng._warmup_ocr()
+
+    assert bool(started) is expect_started
