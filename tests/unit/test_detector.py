@@ -101,6 +101,58 @@ def test_macro_enabled_extensions_constant_includes_expected():
 # -----------------------------------------------------------------------------
 
 
+def _stored_zip(path, entry_count: int):
+    """A VALID OOXML-shaped zip with `entry_count` stored entries.
+
+    ZIP_STORED on purpose: the compression ratio is 1.0, so the ratio guard
+    cannot be what rejects it. Only the entry cap can, which is what makes this
+    input discriminating.
+    """
+    import zipfile
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("[Content_Types].xml", b"<Types/>")
+        for i in range(entry_count - 1):
+            zf.writestr(f"word/{i}.xml", b"x")
+    return path
+
+
+def test_an_entry_bomb_is_rejected_even_though_it_barely_compresses(tmp_path: Path):
+    """A zip with a huge NUMBER of entries is a resource bomb the ratio check
+    cannot see: every entry is stored, so the ratio is 1.0.
+
+    LibreOffice would walk all of them. Nothing tested this cap -- raising
+    _MAX_OOXML_ENTRIES from 5000 to 5,000,000 left the whole suite green, while
+    the ratio and XML-entity caps both had tests that caught the equivalent
+    change.
+    """
+    from clippyshot.detector import _looks_like_ooxml
+
+    # 5501 is written out, not derived from _MAX_OOXML_ENTRIES: a bomb sized from
+    # the constant grows with it, so raising the cap to 5,000,000 would still be
+    # "over the limit" and the mutant survives. (Measured -- it did.) The cap this
+    # pins is the documented 5000.
+    bomb = _stored_zip(tmp_path / "entries.docx", 5501)
+    assert _looks_like_ooxml(bomb) is False
+
+    # And prove the ratio guard is not what rejected it.
+    import zipfile
+
+    with zipfile.ZipFile(bomb) as zf:
+        infos = zf.infolist()
+        ratio = sum(i.file_size for i in infos) / max(1, sum(i.compress_size for i in infos))
+    assert ratio <= 2.0, f"this bomb compresses at {ratio}x; the ratio guard could reject it"
+
+
+def test_an_ordinary_entry_count_still_passes(tmp_path: Path):
+    """The positive control: the same shape under the cap is accepted, so the
+    test above cannot pass by rejecting every zip."""
+    from clippyshot.detector import _looks_like_ooxml
+
+    ok = _stored_zip(tmp_path / "normal.docx", 50)
+    assert _looks_like_ooxml(ok) is True
+
+
 def test_zip_bomb_with_docx_extension_is_rejected(tmp_path: Path):
     """A highly compressible zip with a .docx extension should fail the
     structural check and be rejected (H-3)."""
