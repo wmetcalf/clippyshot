@@ -1,4 +1,5 @@
 import json
+import re
 import socket
 import threading
 from pathlib import Path
@@ -11,6 +12,7 @@ from clippyshot.sandbox.base import SandboxRequest
 from tests.conftest import (
     FIXTURES_DIR,
     needs_bwrap_userns,
+    needs_nsjail_userns,
     needs_pdftoppm,
     needs_soffice,
 )
@@ -206,33 +208,13 @@ def test_timeout_kills_long_running_conversion(converter, tmp_path: Path):
         )
 
 
-def _explicit_backend(name: str):
-    """Construct THIS backend, or skip the case.
-
-    select_sandbox() returns only the FIRST usable implementation -- nsjail before
-    bwrap -- so probing whatever it hands back leaves the other advertised isolation
-    path untested. Measured on this host: removing bwrap's `--tmpfs /tmp` left the
-    probe green, because nsjail was what ran. Each backend is therefore constructed
-    by name, and skipped individually where it is not usable.
-    """
-    from clippyshot.errors import SandboxUnavailable
-    from clippyshot.sandbox.bwrap import BwrapSandbox
-    from clippyshot.sandbox.nsjail import NsjailSandbox
-
-    cls = {"nsjail": NsjailSandbox, "bwrap": BwrapSandbox}[name]
-    try:
-        sb = cls()
-        smoke = sb.smoketest()
-    except SandboxUnavailable as exc:
-        pytest.skip(f"{name} is not usable here: {exc}")
-    except Exception as exc:  # noqa: BLE001 - any construction failure means "not usable"
-        pytest.skip(f"{name} could not be constructed here: {exc!r}")
-    if smoke.exit_code != 0 or smoke.killed:
-        pytest.skip(f"{name} failed its own smoketest (exit={smoke.exit_code})")
-    return sb
-
-
-@pytest.mark.parametrize("backend", ["nsjail", "bwrap"])
+@pytest.mark.parametrize(
+    "backend",
+    [
+        pytest.param("nsjail", marks=needs_nsjail_userns),
+        pytest.param("bwrap", marks=needs_bwrap_userns),
+    ],
+)
 def test_a_write_to_tmp_inside_the_sandbox_never_reaches_the_host(backend: str):
     """A file written to /tmp INSIDE the sandbox must not appear on the host.
 
@@ -242,11 +224,24 @@ def test_a_write_to_tmp_inside_the_sandbox_never_reaches_the_host(backend: str):
     isolation exists. This one makes the guest actually perform the write and proves
     it succeeded (WROTE in stdout) before asking whether the host saw it.
 
-    Both backends that mount a private tmpfs are probed. ContainerSandbox is not:
-    it runs commands directly inside the enclosing container and shares this
-    process's /tmp by design -- its boundary surrounds the whole worker.
+    Each backend is constructed BY NAME rather than through select_sandbox(), which
+    returns only the first usable implementation -- nsjail before bwrap -- so probing
+    whatever it hands back leaves the other advertised isolation path untested.
+    Measured: removing bwrap's `--tmpfs /tmp` left this green, because nsjail ran.
+
+    The cases are gated on the HOST capability marks, not on the backend's own
+    smoketest. conftest says why, and it is the reason this test exists at all: a
+    regression such as a malformed mount or seccomp argument makes the smoketest
+    nonzero, and gating on it would skip the very assertion meant to catch that.
+    Construction and execution failures are left to fail.
+
+    ContainerSandbox is not probed: it runs commands directly inside the enclosing
+    container and shares this process's /tmp by design.
     """
-    sb = _explicit_backend(backend)
+    from clippyshot.sandbox.bwrap import BwrapSandbox
+    from clippyshot.sandbox.nsjail import NsjailSandbox
+
+    sb = {"nsjail": NsjailSandbox, "bwrap": BwrapSandbox}[backend]()
     sentinel = Path(f"/tmp/clippyshot-sandbox-tmp-probe-{backend}")
     sentinel.unlink(missing_ok=True)
     result = sb.run(
@@ -269,6 +264,60 @@ def test_a_write_to_tmp_inside_the_sandbox_never_reaches_the_host(backend: str):
         sentinel.unlink(missing_ok=True)
 
 
+def test_the_macro_fixture_is_actually_wired_to_document_open():
+    """The fixture must be ARMED, or the test below measures nothing.
+
+    Twice the interesting question has been whether "the sentinel was not written"
+    means the hardening worked or the fixture was inert -- first because the Basic
+    module was bound to no event at all, then because the `dom:` prefix was
+    undeclared so the QName resolved to nothing (codex, both times). A measurement
+    that cannot tell those apart is not evidence.
+
+    This resolves the chain the way LibreOffice must: the listener's event name is
+    the XML Events `load` event, and its href names a Basic routine that the
+    document actually defines. Structural rather than executed, deliberately --
+    invoking the macro for real DOES write the sentinel, but only against an
+    already-resident soffice, and a positive control that depends on whether another
+    process happens to be running is worse than none. The execution result is
+    recorded in test_a_macro_bearing_document_still_converts instead.
+    """
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    src = MALICIOUS / "macro_autoopen.odt"
+    if not src.exists():
+        pytest.skip("malicious fixture macro_autoopen.odt not built")
+
+    with zipfile.ZipFile(src) as z:
+        content = z.read("content.xml").decode()
+        module = z.read("Basic/Standard/Module1.xml").decode()
+
+    root = ET.fromstring(content)
+    ns_script = "urn:oasis:names:tc:opendocument:xmlns:script:1.0"
+    listeners = root.findall(f".//{{{ns_script}}}event-listener")
+    assert listeners, "no script:event-listener: nothing invokes the macro"
+
+    # The prefix must RESOLVE. ElementTree expands QNames in element and attribute
+    # NAMES but not in attribute VALUES, which is where the event name lives, so the
+    # declaration is checked directly -- that is the exact defect being guarded.
+    assert 'xmlns:dom="http://www.w3.org/2001/xml-events"' in content, (
+        "the dom: prefix is undeclared, so dom:load names nothing"
+    )
+    ns_xlink = "http://www.w3.org/1999/xlink"
+    hrefs = [el.get(f"{{{ns_xlink}}}href", "") for el in listeners]
+    events = [el.get(f"{{{ns_script}}}event-name", "") for el in listeners]
+    assert any(e == "dom:load" for e in events), events
+    target = next((h for h in hrefs if "Standard.Module1." in h), "")
+    assert target, hrefs
+    routine = target.split("Standard.Module1.")[1].split("?")[0]
+    # \b, not `in`: "Sub Document_Open" is a substring of "Sub Document_Opened", so a
+    # plain containment check passes for a routine the listener does NOT call.
+    # (Measured -- renaming the Sub to Document_Opened survived that version.)
+    assert re.search(rf"^\s*Sub\s+{re.escape(routine)}\b", module, re.MULTILINE), (
+        f"the listener calls {routine}, which Module1 does not define: {module!r}"
+    )
+
+
 @needs_soffice
 @needs_pdftoppm
 @needs_bwrap_userns
@@ -285,10 +334,25 @@ def test_a_macro_bearing_document_still_converts(converter, tmp_path: Path):
         the hardened profile entirely -> the test still passed.
       * soffice --headless --convert-to on this fixture with NO sandbox and macro
         security wide open -- MacroSecurityLevel=0, DisableMacrosExecution=false,
-        OfficeBasic=2 -- and with the macro BOUND to document-open by a dom:load
-        event listener: the sentinel is still never written. LibreOffice does not
-        fire document events during a headless conversion, so the macro cannot
-        run on this path at any setting, and the assertion had nothing to observe.
+        OfficeBasic=2 -- and with the macro BOUND to document-open by a properly
+        namespaced dom:load listener: the sentinel is still never written.
+        LibreOffice does not fire document events during a headless conversion, so
+        the macro cannot run on this path at any setting.
+
+      * The same macro, INVOKED directly against the same document and profile,
+        DOES write it:
+
+            soffice --headless -env:UserInstallation=file://<loose-profile> \\
+              "vnd.sun.star.script:Standard.Module1.Document_Open\
+?language=Basic&location=document" macro_autoopen.odt
+            -> /tmp/clippyshot-macro-pwned WRITTEN
+
+        which is the positive control: the routine is live and would write the
+        sentinel if anything called it. Only the EVENT is never delivered. (That
+        invocation is not a test -- it writes the sentinel only against an
+        already-resident soffice, and a control that depends on another process
+        happening to run is worse than none. The structural check above is what
+        keeps the fixture armed.)
 
         (The binding matters: the fixture carried a bare Sub in Module1 that
         nothing called, so an inert result would have proved nothing about the
