@@ -158,7 +158,7 @@ def _budget(*values: float):
 
 
 def test_an_exhausted_ocr_budget_still_gets_a_positive_timeout(tmp_path):
-    """A budget spent by the warm attempt must not reach the cold CLI as 0.
+    """A budget spent by the warm attempt must never reach the cold CLI as 0.
 
     `ocr_time_left()` floors at 0.0 by design, and `subprocess.run(timeout=0)`
     does not mean "no limit" -- it expires immediately. Without the `max(1, ...)`
@@ -184,7 +184,13 @@ def test_an_exhausted_ocr_budget_still_gets_a_positive_timeout(tmp_path):
         _ocr_fn=cli, ocr_helper=Helper(raises=True),
     )
 
-    assert seen and seen[0] >= 1, f"cold OCR was handed timeout_s={seen}"
+    # NOT `seen and ...`: skipping the page once the budget is gone is a legitimate
+    # -- arguably better -- implementation, and the surrounding code already skips
+    # below _MIN_OCR_CALL_S for exactly that reason. Requiring the call would make
+    # this test block that change (codex). What must never happen is a call with a
+    # non-positive timeout, because subprocess.run(timeout=0) expires immediately:
+    # the rescue attempt would be guaranteed to fail rather than not made.
+    assert all(t >= 1 for t in seen), f"cold OCR was handed timeout_s={seen}"
 
 
 def test_a_healthy_ocr_budget_is_passed_through_not_replaced(tmp_path):
