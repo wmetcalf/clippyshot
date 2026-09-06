@@ -24,6 +24,7 @@ the sandboxed CLI enforces.
 from __future__ import annotations
 
 import base64
+import glob
 import json
 from collections import OrderedDict
 import os
@@ -46,6 +47,40 @@ from clippyshot.ocr import (
 
 # How many (lang, psm) tesseract APIs one helper keeps loaded. Each holds a
 # language model; four covers realistic per-job variation without unbounded growth.
+# Where tesseract models live when TESSDATA_PREFIX does not say. Module-level
+# so the helper and anything that needs to reproduce its OCR (its own tests
+# included) resolve tessdata through ONE implementation.
+SYSTEM_TESSDATA_DIRS = (
+    "/usr/share/tesseract-ocr/*/tessdata",
+    "/usr/share/tessdata",
+    "/usr/local/share/tessdata",
+)
+
+
+def tessdata_dir() -> str | None:
+    """The directory to hand tesserocr as ``path``, or None to use its default.
+
+    `docker export` (FC/gVisor warm-guest rootfs) DROPS the image's
+    TESSDATA_PREFIX ENV, so tesserocr cannot find the models and init fails with
+    ``invalid tessdata path: ./``. Honor a valid env; otherwise discover the
+    system tessdata dir and pass it explicitly — which keeps the warm helper
+    working in export-built guest rootfs, and on any host that simply never set
+    the variable.
+
+    A TESSDATA_PREFIX holding no models is ignored rather than trusted: it is
+    the same dead end as an unset one, and falling through to discovery is what
+    makes the helper start.
+    """
+    env = os.environ.get("TESSDATA_PREFIX")
+    if env and glob.glob(os.path.join(env, "*.traineddata")):
+        return env
+    for pattern in SYSTEM_TESSDATA_DIRS:
+        for cand in sorted(glob.glob(pattern)):
+            if glob.glob(os.path.join(cand, "*.traineddata")):
+                return cand
+    return None  # let tesserocr use its default (errors if no models)
+
+
 MAX_CACHED_APIS = 4
 
 # Largest page image sent over the pipe. The helper may be SANDBOXED, in which case
@@ -348,28 +383,11 @@ def _serve() -> None:  # pragma: no cover - runs in the helper subprocess
     one page per stdin request. A per-request failure is non-fatal (returns an
     ``error`` so the caller cold-falls-back). A hang is handled by the client
     SIGKILLing this process — tesseract C calls aren't interruptible here."""
-    import glob
     import tempfile
 
     from tesserocr import PyTessBaseAPI  # PyTessBaseAPI takes psm as a plain int
 
-    def _tessdata_dir() -> str | None:
-        # `docker export` (FC/gVisor warm-guest rootfs) DROPS the image's
-        # TESSDATA_PREFIX ENV, so tesserocr can't find the models and init fails.
-        # Honor a valid env; otherwise discover the system tessdata dir and pass it
-        # explicitly — keeps the warm helper working in export-built guest rootfs.
-        env = os.environ.get("TESSDATA_PREFIX")
-        if env and glob.glob(os.path.join(env, "*.traineddata")):
-            return env
-        for cand in sorted(glob.glob("/usr/share/tesseract-ocr/*/tessdata")) + [
-            "/usr/share/tessdata",
-            "/usr/local/share/tessdata",
-        ]:
-            if glob.glob(os.path.join(cand, "*.traineddata")):
-                return cand
-        return None  # let tesserocr use its default (errors if no models)
-
-    tessdata = _tessdata_dir()
+    tessdata = tessdata_dir()
     api_for = _build_api_cache(PyTessBaseAPI, tessdata)
 
     sys.stdout.write(json.dumps({"ready": True}) + "\n")
