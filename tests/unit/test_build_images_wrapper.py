@@ -74,6 +74,8 @@ _MINIMAL_TOOLS = (
     # proceed with no deadline at all. A fixture missing it is not a realistic
     # minimal host, it is a host where the wrapper legitimately declines.
     "sleep",
+    "tail",
+    "cut",
     "sed",
     "head",
     "sort",
@@ -1133,7 +1135,11 @@ class TestAFailedVersionCannotSatisfyTheFloor:
             except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
                 continue
             fields = stat.rpartition(")")[2].split()
-            if len(fields) < 5 or fields[4] != str(session):     # session id
+            # fields[3] is the SESSION id: after dropping the pid and the parenthesised
+            # comm, the order is state, ppid, pgrp, session, tty_nr. I had used [4] --
+            # tty_nr, which is 0 for a session with no terminal -- so the scan matched
+            # nothing and the test passed while checking nothing at all (codex).
+            if len(fields) < 4 or fields[3] != str(session):
                 continue
             if cmdline[:1] == [b"sleep"]:
                 strays.append(int(proc_dir.name))
@@ -1227,6 +1233,28 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         assert len(r.stderr) < 50_000, (
             f"the diagnostic printed {len(r.stderr)} bytes; one line is not a bound"
         )
+
+    def test_a_zero_padded_deadline_is_read_as_decimal(self, tmp_path: Path) -> None:
+        """`08` passes the all-digits and range checks and is then read as OCTAL by the
+        watchdog's arithmetic, which aborts it -- the deadline gone, from a value that looks
+        perfectly ordinary (codex)."""
+        import time
+
+        d = self._stub(tmp_path, 'if [ "$1" = version ]; then sleep 300; fi\n')
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "BLASTBOX_VERSION_TIMEOUT_S": "08",
+        }
+        started = time.monotonic()
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True, text=True, errors="replace", env=env, timeout=120, check=False,
+        )
+        elapsed = time.monotonic() - started
+        assert r.returncode == 2
+        assert "no usable `version` output" in r.stderr
+        assert elapsed < 60, f"a zero-padded deadline lost the deadline: waited {elapsed:.0f}s"
 
     def test_a_legitimate_large_write_is_not_punished(self, tmp_path: Path) -> None:
         """RLIMIT_FSIZE is process-wide, not a cap on the two capture files: a CLI that appends

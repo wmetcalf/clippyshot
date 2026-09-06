@@ -152,6 +152,10 @@ BB_PID_FILE=""
 # a signal in that window would send TERM and then KILL to an unrelated process
 # GROUP that happened to have that number (codex).
 BB_PID=""
+# Same reason as BB_PID: an exported _bb_watchdog_pid would be the handler's target
+# while the real one is still unassigned, so a signal in that window would TERM a
+# process group the caller happens to name (codex).
+_bb_watchdog_pid=""
 _bb_version_cleanup() {
   rm -f "$BB_ERR_FILE" ${BB_OUT_FILE:+"$BB_OUT_FILE"} ${BB_PID_FILE:+"$BB_PID_FILE"}
 }
@@ -307,7 +311,10 @@ set +m
 # killing the `sleep` it is blocked in: killing the subshell alone leaves that
 # sleep reparented to init, ticking away until the full deadline (codex).
 set -m
-( _bb_left="$_bb_version_deadline"
+( # `10#`: a zero-padded value like `08` passes the all-digits and range checks and
+  # is then read as OCTAL by the arithmetic below, which aborts the watchdog -- the
+  # deadline gone, from a value that looks perfectly ordinary (codex).
+  _bb_left=$((10#$_bb_version_deadline))
   # POLL rather than sleep the whole deadline. A signal arriving between this fork
   # and `_bb_watchdog_pid=$!` would leave a watchdog nobody has the pid of, alive
   # for up to a day and then signalling a process group number that by then belongs
