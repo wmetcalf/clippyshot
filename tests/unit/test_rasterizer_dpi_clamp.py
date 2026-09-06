@@ -123,7 +123,7 @@ def test_effective_dpi_noop_when_sizes_unknown_or_budget_disabled():
 
 # --- the shard planner itself (nothing referenced _shard_run before) ----------
 
-def test_shard_count_is_bounded_by_the_memory_budget_not_just_cpu():
+def test_shard_count_is_bounded_by_the_memory_budget_not_just_cpu(monkeypatch):
     """Sharding must respect the memory budget the run's own pages imply.
 
     `_shard_run` had no test at all: dropping `mem_budget` from
@@ -133,9 +133,17 @@ def test_shard_count_is_bounded_by_the_memory_budget_not_just_cpu():
     per-worker cgroup to catch it.
 
     Both bounds are asserted, so this cannot pass by always returning one shard.
+
+    The worker memory is PINNED rather than inherited: max_concurrent_page_ops
+    reads CLIPPYSHOT_WORKER_MEMORY (falling back to the cgroup limit / MemTotal),
+    and at 8g or more it returns its ceiling of 8 for this page's peak -- the
+    memory bound stops binding and the test measures nothing on a large host
+    (codex). At 4g it binds at 4, which is the case this test is about.
     """
     from clippyshot.limits import max_concurrent_page_ops
     from clippyshot.rasterizer.base import ShardingRasterizer, _max_page_peak_mb
+
+    monkeypatch.setenv("CLIPPYSHOT_WORKER_MEMORY", "4g")
 
     class _Planner(ShardingRasterizer):
         def _build_argv(self, *a, **kw):  # pragma: no cover - never invoked
