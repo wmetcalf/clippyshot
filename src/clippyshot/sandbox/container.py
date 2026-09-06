@@ -69,6 +69,36 @@ def _runtime_apparmor_confined() -> bool:
     return bool(profile and profile != "unconfined")
 
 
+def _egress_provably_blocked() -> bool:
+    """True only when this task has NO non-loopback interface at all.
+
+    The general claim -- that a task cannot prove its own egress is blocked --
+    holds for a container on a bridge, where a firewall it cannot see decides.
+    It does not hold for the one case that matters here: with no interface but
+    `lo`, there is nowhere for a packet to leave, whatever the routing table
+    says later. Measured on toolz2 against the deployed image:
+
+        docker run --network=none  ->  /proc/net/dev: lo         routes: 0
+        docker run (bridge)        ->  /proc/net/dev: lo eth0    routes: 2
+
+    Deliberately the strongest and simplest signal rather than route parsing: a
+    down or unrouted eth0 also has no egress, but this returns False for it and
+    the caller keeps reporting the reason. Unreadable or unparseable /proc means
+    False too -- every uncertainty stays insecure.
+    """
+    dev = Path("/proc/net/dev")
+    try:
+        text = dev.read_text(errors="replace")
+    except OSError:
+        return False
+    names: set[str] = set()
+    for line in text.splitlines()[2:]:          # two header lines
+        name = line.partition(":")[0].strip()
+        if name:
+            names.add(name)
+    return names == {"lo"}
+
+
 def _runtime_hardening_reasons() -> list[str]:
     status = _proc_status_map()
     reasons: list[str] = []
@@ -82,10 +112,17 @@ def _runtime_hardening_reasons() -> list[str]:
         reasons.append("rootfs_not_read_only")
     if not _runtime_apparmor_confined():
         reasons.append("apparmor_unconfined")
-    # The container backend cannot prove network egress is blocked from inside
-    # the task. Treat that as insecure by default so callers must opt in via
-    # CLIPPYSHOT_WARN_ON_INSECURE if they really want this backend.
-    reasons.append("network_egress_not_verified")
+    # Egress is only provable in one direction: no non-loopback interface means
+    # no egress, full stop. Anything else -- a bridge with a firewall this task
+    # cannot see -- stays unverified, and unverified stays insecure, so the
+    # caller must opt in via CLIPPYSHOT_WARN_ON_INSECURE.
+    #
+    # This used to be appended unconditionally, which made the container backend
+    # unselectable however locked down the container was: a worker launched with
+    # --cap-drop=ALL --read-only --network=none (blastbox's own worker flags) was
+    # refused by every backend and could not run at all. See #56.
+    if not _egress_provably_blocked():
+        reasons.append("network_egress_not_verified")
 
     if reasons:
         _log.warning(
