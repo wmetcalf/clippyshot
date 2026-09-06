@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -50,12 +51,22 @@ def test_escape_probe_is_blocked(escape_probe: Path):
     out = result.stdout.decode(errors="replace")
     print(out)  # captured by pytest, useful when debugging
 
-    missing = [
-        names[0]
-        for names in EXPECTED_ATTEMPTS
-        if not any(f"BLOCKED {n}" in out for n in names)
-    ]
-    assert not missing, f"these escapes were never attempted or were not blocked: {missing}\n{out}"
+    # Parse the names the probe reported, rather than substring-matching each
+    # expected one. `"BLOCKED mount" in out` is also satisfied by
+    # "BLOCKED mount_setattr", so renaming an attempt would keep this green while
+    # the escape it names goes untried (codex). The probe always prints
+    # "BLOCKED <name>: <strerror>", so the name ends at the first colon.
+    reported = set(re.findall(r"^BLOCKED (.+?): ", out, re.MULTILINE))
+    missing = [names[0] for names in EXPECTED_ATTEMPTS if not (set(names) & reported)]
+    assert not missing, (
+        f"these escapes were never attempted or were not blocked: {missing}\n"
+        f"probe reported: {sorted(reported)}\n{out}"
+    )
+    unexpected = reported - {n for names in EXPECTED_ATTEMPTS for n in names}
+    assert not unexpected, (
+        f"escape_probe.c attempts things this test does not know about: {sorted(unexpected)} "
+        f"— add them to EXPECTED_ATTEMPTS so the list stays the coverage record\n{out}"
+    )
     assert f"blocked={len(EXPECTED_ATTEMPTS)} " in out + " ", (
         f"the probe reported a different number of blocks than the {len(EXPECTED_ATTEMPTS)} "
         f"attempts this test knows about — has escape_probe.c grown one?\n{out}"
