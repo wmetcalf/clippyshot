@@ -9,7 +9,8 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from collections.abc import Sequence
+from typing import Any, Protocol
 
 from pypdf import PdfReader
 
@@ -259,6 +260,33 @@ def _make_sandbox_argv_runner(sandbox: Sandbox, limits: Limits | None, scan_png_
             (result.stderr or b"").decode("utf-8", errors="replace"),
         )
     return run
+
+
+def _page_scan_workers(pages: "Sequence[Any]", cpu_count: int | None = None) -> int:
+    """How many pages may be scanned concurrently.
+
+    Bounded by the page count, the CPU count, and the memory budget implied by
+    the LARGEST page in the run: a giant page (~30000px -> ~2 GB RGBA) must
+    collapse this fan-out to 1 rather than run N concurrent multi-GB decodes.
+    The gVisor warm tier has no per-worker memory cgroup, so an unbounded
+    fan-out is a host-memory DoS there.
+
+    Module level so the budget can be tested. Inline in convert() it was only
+    reachable through a full conversion, and nothing reached it: dropping
+    max_concurrent_page_ops from the min() left the whole suite green.
+    """
+    import os as _os
+
+    from clippyshot.limits import max_concurrent_page_ops
+
+    if not pages:
+        return 1
+    peak_mb = max(rp.width_px * rp.height_px * 4 for rp in pages) / (1024 * 1024)
+    return min(
+        len(pages),
+        (cpu_count if cpu_count is not None else (_os.cpu_count() or 2)),
+        max_concurrent_page_ops(per_page_peak_mb=peak_mb),
+    )
 
 
 def _process_page_scanners(
@@ -697,7 +725,6 @@ class Converter:
                 t_postprocess = time.monotonic()
                 from clippyshot.trimmer import focus_content_solid_bg, trim_bottom_solid
                 from concurrent.futures import ThreadPoolExecutor
-                import os as _os
 
                 _want_focused = detected.label in _FOCUSED_DERIVATIVE_LABELS
 
@@ -810,20 +837,11 @@ class Converter:
                 # budget (same helper the rasterizer uses) — each worker in
                 # this pool loads a full-page RGB buffer for hash/trim/focus,
                 # so N-way parallelism costs ~N × page_size RAM.
-                from clippyshot.limits import max_concurrent_page_ops
                 # Size-aware, like the rasterizer's shard budget: a giant clamped page
                 # (~30000px → ~2 GB RGBA) must collapse this fan-out to 1, not run N
                 # concurrent multi-GB decodes — the gVisor warm tier has no per-worker
                 # memory cgroup, so an unbounded fan-out is a host-memory DoS there.
-                _peak_mb = (
-                    max(rp.width_px * rp.height_px * 4 for rp in pages) / (1024 * 1024)
-                    if pages else 0.0
-                )
-                max_workers = (
-                    min(len(pages), (_os.cpu_count() or 2),
-                        max_concurrent_page_ops(per_page_peak_mb=_peak_mb))
-                    if pages else 1
-                )
+                max_workers = _page_scan_workers(pages)
                 # page_sheet_names is indexed 0-based same as the other
                 # lists; length matches pages_to_render. Zip it in so the
                 # per-page worker gets everything as one tuple.
