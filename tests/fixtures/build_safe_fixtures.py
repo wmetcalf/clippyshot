@@ -69,13 +69,25 @@ def build_office_fixtures() -> None:
         soffice_make(csv, ext)
 
     # For pptx/odp/ppt, use a tiny ODF Presentation seed.
+    #
+    # The slide must carry visible text. An empty <draw:page/> renders to a
+    # genuinely blank page, which the converter correctly drops as blank -- so
+    # every presentation fixture built from it converted to a document with zero
+    # rendered pages, and test_round_trip's `page_count_rendered >= 1` could not
+    # pass for pptx, ppt or odp in any environment.
     seed = ROOT / "_seed.fodp"
     seed.write_text(
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+        'xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" '
+        'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" '
+        'xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" '
         'office:mimetype="application/vnd.oasis.opendocument.presentation">'
-        '<office:body><office:presentation><draw:page xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" '
-        'draw:name="Slide1"/></office:presentation></office:body></office:document>'
+        '<office:body><office:presentation><draw:page draw:name="Slide1">'
+        '<draw:frame svg:width="20cm" svg:height="4cm" svg:x="2cm" svg:y="6cm">'
+        '<draw:text-box><text:p>Hello ClippyShot.</text:p>'
+        '<text:p>Line two.</text:p></draw:text-box></draw:frame>'
+        '</draw:page></office:presentation></office:body></office:document>'
     )
     for ext in ("pptx", "odp", "ppt"):
         soffice_make(seed, ext, output_name="fixture")
