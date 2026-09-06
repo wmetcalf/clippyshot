@@ -138,3 +138,78 @@ def test_the_converter_hands_the_helper_an_absolute_deadline(tmp_path):
     assert 41.0 < budget_left <= 42.0, (
         f"the deadline must carry the remaining 42s budget, got {budget_left}"
     )
+
+
+def _budget(*values: float):
+    """A budget that reports each value in turn, holding the last one.
+
+    The outer check needs a HEALTHY budget (below _MIN_OCR_CALL_S it skips OCR
+    entirely), and the cold fallback then RECOMPUTES it -- which is the whole
+    point of the recompute: a warm attempt's wait is deducted first. So the only
+    route to a zero at the cold call is a budget that drains between the two,
+    which is what this stub reproduces.
+    """
+    seq = list(values)
+
+    def _next() -> float:
+        return seq.pop(0) if len(seq) > 1 else seq[0]
+
+    return _next
+
+
+def test_an_exhausted_ocr_budget_still_gets_a_positive_timeout(tmp_path):
+    """A budget spent by the warm attempt must never reach the cold CLI as 0.
+
+    `ocr_time_left()` floors at 0.0 by design, and `subprocess.run(timeout=0)`
+    does not mean "no limit" -- it expires immediately. Without the `max(1, ...)`
+    floor the fallback that exists to rescue the page becomes a guaranteed
+    `OCRError: tesseract timeout after 0s`.
+
+    Nothing covered it: dropping the floor left the whole suite green.
+    """
+    seen: list[int] = []
+
+    def cli(png, *, lang, psm, timeout_s, **kw):
+        seen.append(timeout_s)
+        return OCRResult("cli text", 8, 1)
+
+    rec = {"file": "page-001.png", "index": 1, "width": 100, "height": 100}
+    (tmp_path / "page-001.png").write_bytes(b"x")
+    _process_page_scanners(
+        tmp_path, rec,
+        is_blank=False, qr_enabled=False, qr_formats="", qr_timeout_s=5,
+        ocr_enabled=True, ocr_lang="eng", ocr_psm=3,
+        # healthy at the outer check, spent by the time the warm attempt fails
+        ocr_time_left=_budget(60.0, 0.0), has_images=True, ocr_all=True,
+        _ocr_fn=cli, ocr_helper=Helper(raises=True),
+    )
+
+    # NOT `seen and ...`: skipping the page once the budget is gone is a legitimate
+    # -- arguably better -- implementation, and the surrounding code already skips
+    # below _MIN_OCR_CALL_S for exactly that reason. Requiring the call would make
+    # this test block that change (codex). What must never happen is a call with a
+    # non-positive timeout, because subprocess.run(timeout=0) expires immediately:
+    # the rescue attempt would be guaranteed to fail rather than not made.
+    assert all(t >= 1 for t in seen), f"cold OCR was handed timeout_s={seen}"
+
+
+def test_a_healthy_ocr_budget_is_passed_through_not_replaced(tmp_path):
+    """The floor is a floor: a real budget still reaches the CLI intact, so the
+    test above cannot be satisfied by pinning every call to 1 second."""
+    seen: list[int] = []
+
+    def cli(png, *, lang, psm, timeout_s, **kw):
+        seen.append(timeout_s)
+        return OCRResult("cli text", 8, 1)
+
+    rec = {"file": "page-001.png", "index": 1, "width": 100, "height": 100}
+    (tmp_path / "page-001.png").write_bytes(b"x")
+    _process_page_scanners(
+        tmp_path, rec,
+        is_blank=False, qr_enabled=False, qr_formats="", qr_timeout_s=5,
+        ocr_enabled=True, ocr_lang="eng", ocr_psm=3,
+        ocr_time_left=_budget(60.0, 42.0), has_images=True, ocr_all=True,
+        _ocr_fn=cli, ocr_helper=Helper(raises=True),
+    )
+
+    assert seen == [42], seen
