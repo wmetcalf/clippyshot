@@ -168,9 +168,14 @@ def select_sandbox(
     )
 
 
-# Backends that sandbox EVERY command they are given, as opposed to a tier where the
-# boundary is the container or guest around the whole worker.
-_PER_CALL_BACKENDS = frozenset({"nsjail", "bwrap"})
+# Layers applied to EVERY command, as opposed to a tier where the boundary is the
+# container or guest around the whole worker.
+#
+# `nono` counts. `NonoWrappedSandbox.run()` is `inner.run(self.wrap.apply(request))` --
+# Landlock applied per request -- so `container+nono` confines each conversion even
+# though the container is the outer boundary, and a warm server started outside it skips
+# that layer exactly as it would skip nsjail's (codex).
+_PER_CALL_BACKENDS = frozenset({"nsjail", "bwrap", "nono"})
 
 
 def sandboxes_each_call(sandbox: object) -> bool:

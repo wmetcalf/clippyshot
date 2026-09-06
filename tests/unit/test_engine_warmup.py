@@ -451,7 +451,7 @@ def test_warm_ocr_survives_an_unresolvable_sandbox(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="clippyshot.engine"):
         engine._warmup_ocr()
     assert started == [True], "an unresolvable backend must not disable the warm tier"
-    assert any("could not determine the sandbox" in r.message for r in caplog.records), (
+    assert any("no sandbox backend on this host" in r.message for r in caplog.records), (
         "the ambiguity must be logged, not silent"
     )
 
@@ -632,3 +632,41 @@ def test_inner_nono_decoration_does_not_disable_either_guard(monkeypatch, inner)
 
     assert started == [], f"{wrapped.name} still sandboxes each call; nothing warm may start"
     assert eng._uno_server is None and eng._ocr_server is None
+
+
+@pytest.mark.parametrize("warm", ["uno", "ocr"])
+def test_an_indeterminate_backend_declines_rather_than_starting(monkeypatch, warm):
+    """Fail CLOSED when selection raises.
+
+    This used to start the helper anyway, reasoning that the work fails on its own in
+    that state so declining made nothing safer. It does: `_build_converter()` retries
+    selection later, and a retry that succeeds with nsjail leaves a warm server already
+    running outside it (codex on #41). "Indeterminate" is not "no sandbox".
+    """
+    from clippyshot.engine import ClippyShotEngine
+
+    def _boom(**kw):
+        raise RuntimeError("selection smoketest failed transiently")
+
+    monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", _boom)
+    started = []
+    monkeypatch.setattr(
+        "clippyshot.libreoffice.uno.UnoServer", lambda *a, **k: started.append("uno")
+    )
+    monkeypatch.setattr(
+        "clippyshot.libreoffice.uno_pipe.SofficePipeServer",
+        lambda *a, **k: started.append("uno-pipe"),
+    )
+    monkeypatch.setattr("clippyshot.ocr_warm.WarmOCR", lambda *a, **k: started.append("ocr"))
+
+    eng = ClippyShotEngine()
+    if warm == "uno":
+        monkeypatch.setenv("CLIPPYSHOT_WARM_UNO", "1")
+        eng._warmup_uno()
+        assert eng._uno_server is None
+    else:
+        monkeypatch.setenv("CLIPPYSHOT_WARM_OCR", "1")
+        monkeypatch.delenv("CLIPPYSHOT_OCR_ENGINE", raising=False)
+        eng._warmup_ocr()
+        assert eng._ocr_server is None
+    assert started == [], "an unresolvable backend started a warm helper anyway"

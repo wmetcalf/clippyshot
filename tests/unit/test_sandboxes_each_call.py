@@ -27,8 +27,17 @@ class TestPerCallBackendsAreRecognised:
         """The guest/container tier IS the boundary; a warm helper there is fine."""
         assert sandboxes_each_call(_Named("container")) is False
 
-    def test_nono_alone_is_not(self):
-        assert sandboxes_each_call(_Named("nono")) is False
+    def test_nono_counts_too(self):
+        """`NonoWrappedSandbox.run()` is `inner.run(wrap.apply(request))` -- Landlock per
+        request. A warm server outside it skips that layer exactly as it would skip
+        nsjail's (codex)."""
+        assert sandboxes_each_call(_Named("nono")) is True
+
+    def test_container_plus_nono_counts(self):
+        """The container is the outer boundary, but nono still confines each CALL, so a
+        warm helper started outside it is unconfined by Landlock while the cold path is
+        not. A supported configuration on runc and in the Firecracker guest."""
+        assert sandboxes_each_call(_Named("container+nono")) is True
 
 
 class TestDecorationDoesNotHideIt:
