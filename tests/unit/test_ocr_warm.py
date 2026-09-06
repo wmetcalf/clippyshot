@@ -403,3 +403,38 @@ class TestSandboxedSpawn:
         and at worst a duplicate-mount error."""
         sb, _ = self._spawn(prefix="/usr")
         assert all(str(m.host_path) != "/usr" for m in sb.request.ro_mounts)
+
+
+class TestTheHelperHonoursConfiguredLimits:
+    """A deployment that caps memory is capping what an untrusted image parser may
+    allocate, and the cold scanner path honours it. The long-lived warm parser is the
+    one process where that cap matters most (codex)."""
+
+    class _FakeSandbox:
+        name = "fake"
+        request = None
+
+        def spawn(self, request, **kwargs):
+            type(self).request = request
+            return "POPEN"
+
+    def _limits(self, monkeypatch, tmp_path, **env):
+        from clippyshot.ocr_warm import sandboxed_popen
+
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        sb = self._FakeSandbox()
+        sandboxed_popen(sb, prefix=str(tmp_path))(["/x/python", "serve"])
+        return sb.request.limits
+
+    def test_a_configured_memory_cap_reaches_the_helper(self, monkeypatch, tmp_path):
+        limits = self._limits(monkeypatch, tmp_path, CLIPPYSHOT_MEM=str(512 * 1024 * 1024))
+        assert limits.memory_bytes == 512 * 1024 * 1024, (
+            "the warm parser was given the default cap, not the configured one"
+        )
+
+    def test_the_default_still_applies_when_nothing_is_configured(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("CLIPPYSHOT_MEM", raising=False)
+        from clippyshot.limits import Limits
+
+        assert self._limits(monkeypatch, tmp_path).memory_bytes == Limits().memory_bytes

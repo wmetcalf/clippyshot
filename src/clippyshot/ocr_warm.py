@@ -101,11 +101,15 @@ def sandboxed_popen(sandbox, *, prefix: str | None = None) -> Callable[..., subp
         env["PYTHONPATH"] = str(pkg_root)
 
     def _popen(argv, **kwargs) -> subprocess.Popen:
+        # `Limits.from_env()`, not `Limits()`: a deployment that sets CLIPPYSHOT_MEM is
+        # capping what an untrusted image parser may allocate, and the cold scanner path
+        # honours it. A fresh default here would hand the LONG-LIVED parser the 8 GiB
+        # default instead -- the one process where the cap matters most (codex).
         request = SandboxRequest(
             argv=list(argv),
             ro_mounts=mounts,
             rw_mounts=[],
-            limits=Limits(),
+            limits=Limits.from_env(),
             env=dict(env),
             attach_apparmor=False,
         )
