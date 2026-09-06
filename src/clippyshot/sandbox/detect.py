@@ -166,3 +166,31 @@ def select_sandbox(
     raise SandboxUnavailable(
         f"no sandbox backend available; last error: {last_error}"
     )
+
+
+# Backends that sandbox EVERY command they are given, as opposed to a tier where the
+# boundary is the container or guest around the whole worker.
+_PER_CALL_BACKENDS = frozenset({"nsjail", "bwrap"})
+
+
+def sandboxes_each_call(sandbox: object) -> bool:
+    """Does this selection wrap every individual command in its own sandbox?
+
+    Asked by the warm tiers before starting a persistent helper: where each cold
+    invocation is sandboxed, a long-lived server outside that wrapper would carry the
+    untrusted input past a boundary the cold path insists on.
+
+    Decoration-proof by construction. `CLIPPYSHOT_INNER_NONO=1` returns a
+    `NonoWrappedSandbox` whose name is `nsjail+nono`, and an exact-name check silently
+    stopped matching -- so the guard was off for exactly the deployment that had asked
+    for MORE confinement (codex). This checks each `+`-separated component AND walks the
+    `inner` chain, so a decorator that renames entirely is still seen through.
+    """
+    seen = 0
+    while sandbox is not None and seen < 8:   # bounded: a cycle must not hang warmup
+        name = str(getattr(sandbox, "name", "") or "")
+        if any(part in _PER_CALL_BACKENDS for part in name.split("+")):
+            return True
+        sandbox = getattr(sandbox, "inner", None)
+        seen += 1
+    return False

@@ -586,3 +586,49 @@ def test_warm_uno_still_starts_where_the_guest_is_the_boundary(monkeypatch, warm
     eng._warmup_uno()
     assert started == [True], "the warm tier lost its warm server"
     assert eng._uno_server is not None
+
+
+@pytest.mark.parametrize("inner", ["nsjail", "bwrap"])
+def test_inner_nono_decoration_does_not_disable_either_guard(monkeypatch, inner):
+    """`CLIPPYSHOT_INNER_NONO=1` wraps the selection as `<backend>+nono`, which an
+    exact-name check misses -- so BOTH warm tiers started outside the per-call sandbox on
+    a deployment that had asked for MORE confinement, not less (codex on #41).
+
+    The warm-OCR guard has had this hole since it was written; it is the same predicate
+    now, so this covers both.
+    """
+    from clippyshot.engine import ClippyShotEngine
+    from clippyshot.sandbox.nono_wrap import NonoWrap, NonoWrappedSandbox
+
+    class Base:
+        name = inner
+
+        def run(self, request):  # pragma: no cover - never called
+            raise AssertionError
+
+    wrapped = NonoWrappedSandbox(inner=Base(), wrap=NonoWrap())
+    assert wrapped.name == f"{inner}+nono"
+    monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", lambda **kw: wrapped)
+
+    started = []
+    monkeypatch.setattr(
+        "clippyshot.libreoffice.uno.UnoServer", lambda *a, **k: started.append("uno")
+    )
+    monkeypatch.setattr(
+        "clippyshot.libreoffice.uno_pipe.SofficePipeServer",
+        lambda *a, **k: started.append("uno-pipe"),
+    )
+    monkeypatch.setattr(
+        "clippyshot.ocr_warm.WarmOCR", lambda *a, **k: started.append("ocr")
+    )
+
+    monkeypatch.setenv("CLIPPYSHOT_WARM_UNO", "1")
+    monkeypatch.setenv("CLIPPYSHOT_WARM_OCR", "1")
+    monkeypatch.delenv("CLIPPYSHOT_OCR_ENGINE", raising=False)
+
+    eng = ClippyShotEngine()
+    eng._warmup_uno()
+    eng._warmup_ocr()
+
+    assert started == [], f"{wrapped.name} still sandboxes each call; nothing warm may start"
+    assert eng._uno_server is None and eng._ocr_server is None

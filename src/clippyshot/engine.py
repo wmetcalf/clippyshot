@@ -289,10 +289,11 @@ class ClippyShotEngine:
         # the boundary and no per-call sandbox is in play, keeps its warm tier.
         # Sandboxing the helper ITSELF is the better answer and is open as #35.
         try:
-            from clippyshot.sandbox.detect import select_sandbox
+            from clippyshot.sandbox.detect import sandboxes_each_call, select_sandbox
 
             sandbox = select_sandbox()
             backend = sandbox.name
+            per_call = sandboxes_each_call(sandbox)
         except Exception as exc:  # noqa: BLE001
             # Undeterminable -- e.g. a forced backend this host cannot satisfy.
             # Left OPEN rather than closed: the scanners fail on their own in
@@ -308,6 +309,7 @@ class ClippyShotEngine:
             )
             backend = ""
             sandbox = None
+            per_call = False
         # Under nsjail/bwrap the helper runs INSIDE the sandbox rather than being
         # declined. The cold path sandboxes each scanner call; a persistent helper
         # cannot mount a page directory that does not exist yet at spawn -- which is
@@ -315,7 +317,7 @@ class ClippyShotEngine:
         # the page travels as bytes, so the helper needs no job-filesystem access at
         # all (issue #35).
         popen = None
-        if backend in ("nsjail", "bwrap"):
+        if per_call:
             from clippyshot.sandbox.base import SpawningSandbox
 
             if not isinstance(sandbox, SpawningSandbox):
@@ -381,9 +383,11 @@ class ClippyShotEngine:
         # staging-mount design, because unoconvert takes file PATHS and a persistent
         # helper's mounts are fixed before any job directory exists.
         try:
-            from clippyshot.sandbox.detect import select_sandbox
+            from clippyshot.sandbox.detect import sandboxes_each_call, select_sandbox
 
-            backend = select_sandbox().name
+            _selected = select_sandbox()
+            backend = _selected.name
+            per_call = sandboxes_each_call(_selected)
         except Exception as exc:  # noqa: BLE001
             # Undeterminable: left OPEN, matching _warmup_ocr. Conversion fails on its own
             # in this state, so declining here would disable the warm tier on a deployment
@@ -396,7 +400,8 @@ class ClippyShotEngine:
                 exc,
             )
             backend = ""
-        if backend in ("nsjail", "bwrap"):
+            per_call = False
+        if per_call:
             logging.getLogger("clippyshot.engine").info(
                 "warm-UNO declined: %s sandboxes each conversion, and the warm server "
                 "would run outside it; using the sandboxed cold soffice path",
