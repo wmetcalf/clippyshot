@@ -250,6 +250,10 @@ case "$_bb_version_deadline" in
     exit 2
     ;;
 esac
+# Strip leading zeros first, so a fixed-width `000008` is judged on its value rather
+# than its padding (codex). An all-zero value becomes empty and is caught below as 0.
+_bb_version_deadline="$(printf '%s' "$_bb_version_deadline" | sed 's/^0*//')"
+[ -n "$_bb_version_deadline" ] || _bb_version_deadline=0
 # Length first: all-digits but astronomically large overflows the shell's integer
 # comparison, which reports "integer expression expected" and does NOT take the
 # rejection branch -- after which `sleep` fails and the watchdog dies silently
@@ -340,7 +344,14 @@ wait "$BB_PID" && BB_RC=0 || BB_RC=$?
 kill -- "-$_bb_watchdog_pid" 2>/dev/null || true
 wait "$_bb_watchdog_pid" 2>/dev/null || true
 _bb_watchdog_pid=""
-kill -KILL -- "-$BB_PID" 2>/dev/null || true
+# ONLY when the probe was killed by us. If it exited on its own, `wait` has already
+# reaped it and its process-group id is free to be reused -- sweeping then could
+# signal a group that now belongs to someone else. When our watchdog fired, any
+# stubborn descendant is still holding that pgid, so it cannot have been recycled
+# (codex).
+case "$BB_RC" in
+  143|137) kill -KILL -- "-$BB_PID" 2>/dev/null || true ;;
+esac
 # The version is grepped from the WHOLE file, which `ulimit -f` has already capped
 # at 512 KiB. Reading a 4 KiB prefix instead meant a CLI that prints a long banner
 # before its version was rejected as unusable even though it exited zero (codex).
@@ -352,8 +363,13 @@ kill -KILL -- "-$BB_PID" 2>/dev/null || true
 # Bounded three ways: the last 64 KiB, of that the last 20 lines, and each line cut
 # to 500 characters. Line COUNT alone is not a bound -- a multi-megabyte stream with
 # no newlines is one line, and the diagnostic would print all of it (codex).
-BB_VERSION_OUT="$(tail -c 65536 "$BB_OUT_FILE" 2>/dev/null | tail -n 20 | cut -c1-500 || true)"
-BB_VERSION_ERR="$(tail -c 65536 "$BB_ERR_FILE" 2>/dev/null | tail -n 20 | cut -c1-500 || true)"
+# The TAIL of an over-long line, not its head. `cut -c1-500` kept the first 500
+# characters, and a CLI that writes a long preamble and then its actual error puts
+# that error at the END -- so the bound threw away the only part worth printing
+# (codex).
+_bb_tail_of_line='{ if (length($0) > 500) print substr($0, length($0) - 499); else print }'
+BB_VERSION_OUT="$(tail -c 65536 "$BB_OUT_FILE" 2>/dev/null | tail -n 20 | awk "$_bb_tail_of_line" || true)"
+BB_VERSION_ERR="$(tail -c 65536 "$BB_ERR_FILE" 2>/dev/null | tail -n 20 | awk "$_bb_tail_of_line" || true)"
 # Everything read out of the files happens HERE, before the cleanup below deletes
 # them -- including the version itself, which is grepped from the whole capped
 # file rather than from a truncated copy of it.

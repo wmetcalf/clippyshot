@@ -1256,6 +1256,46 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         assert "no usable `version` output" in r.stderr
         assert elapsed < 60, f"a zero-padded deadline lost the deadline: waited {elapsed:.0f}s"
 
+    def test_a_fixed_width_padded_deadline_is_accepted(self, tmp_path: Path) -> None:
+        """`000008` is eight seconds, not a malformed value. Judging the LENGTH before
+        stripping the padding rejected a perfectly ordinary generated value (codex)."""
+        d = self._stub(
+            tmp_path,
+            f'if [ "$1" = version ]; then echo "blastbox {BB_MIN}"; exit 0; fi\n'
+            'printf "%s\\n" "$@"\n',
+        )
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "BLASTBOX_VERSION_TIMEOUT_S": "000008",
+        }
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True, text=True, errors="replace", env=env, timeout=60, check=False,
+        )
+        assert r.returncode == 0, r.stderr[-300:]
+        assert "--dry-run" in r.stdout
+
+    def test_the_end_of_a_long_line_is_what_survives(self, tmp_path: Path) -> None:
+        """A CLI that writes a long preamble and then its actual error puts that error at the
+        END of the line. Keeping the first 500 characters threw away the only part worth
+        printing (codex)."""
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            "  for i in $(seq 1 40); do\n"
+            '    printf "%s" "preamble-padding-that-is-not-the-error-" >&2\n'
+            "  done\n"
+            '  printf "%s\\n" "FATAL: the config at /etc/blastbox.toml is unreadable" >&2\n'
+            "  exit 1\n"
+            "fi\n",
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert r.returncode == 2
+        assert "is unreadable" in r.stderr, (
+            "the bound kept the preamble and dropped the error: " + r.stderr[-300:]
+        )
+
     def test_a_legitimate_large_write_is_not_punished(self, tmp_path: Path) -> None:
         """RLIMIT_FSIZE is process-wide, not a cap on the two capture files: a CLI that appends
         to a cache or log larger than the limit takes SIGXFSZ and is rejected as unusable
