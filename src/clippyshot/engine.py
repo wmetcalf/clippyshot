@@ -156,12 +156,25 @@ def _build_converter(uno_server: WarmConverter | None = None, ocr_helper=None):
         # throw away the warm tier restored there while protecting nothing (codex).
         # There is no in-sandbox warm soffice yet -- that is #42 -- so the UNO server is
         # unconditionally outside and always dropped.
-        dropped = []
+        def _reject(helper, label: str) -> None:
+            # STOP it, do not merely stop using it. Clearing the local leaves the process
+            # running -- an unsandboxed soffice alive on the box for the life of the
+            # worker, holding its memory, and reachable by anything that later picks the
+            # server up (codex). Best-effort: teardown must never fail a job.
+            dropped.append(label)
+            try:
+                helper.stop()
+            except Exception:  # noqa: BLE001
+                logging.getLogger("clippyshot.engine").warning(
+                    "could not stop the rejected warm %s helper", label, exc_info=True
+                )
+
+        dropped: list[str] = []
         if uno_server is not None:
-            dropped.append("soffice")
+            _reject(uno_server, "soffice")
             uno_server = None
         if ocr_helper is not None and not getattr(ocr_helper, "sandboxed", False):
-            dropped.append("ocr")
+            _reject(ocr_helper, "ocr")
             ocr_helper = None
         if dropped:
             logging.getLogger("clippyshot.engine").warning(

@@ -850,3 +850,70 @@ def test_the_helper_only_claims_to_be_sandboxed_when_it_is(monkeypatch, warm_tie
     assert eng._ocr_server.sandboxed is False, (
         "the helper claimed to be inside a sandbox it was never started in"
     )
+
+
+def test_a_rejected_helper_is_stopped_not_merely_ignored(monkeypatch):
+    """Clearing the local leaves the process running -- an unsandboxed soffice alive on
+    the box for the life of the worker, holding its memory (codex on #41)."""
+    import clippyshot.engine as eng_mod
+
+    class Fake:
+        name = "nsjail"
+
+    monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", lambda **kw: Fake())
+    monkeypatch.setattr("clippyshot.rasterizer.build_rasterizer", lambda sb: object())
+    monkeypatch.setattr("clippyshot.selftest.detect_runtime_apparmor_profile", lambda: None)
+    monkeypatch.setattr(
+        "clippyshot.selftest.detect_soffice_apparmor_profile", lambda _sandbox: None
+    )
+    monkeypatch.setattr("clippyshot.converter.Converter", lambda **kw: None)
+
+    class FakeRunner:
+        def __init__(self, sandbox=None, uno_server=None):
+            pass
+
+    monkeypatch.setattr("clippyshot.libreoffice.runner.LibreOfficeRunner", FakeRunner)
+
+    stopped = []
+
+    class Server:
+        sandboxed = False
+
+        def __init__(self, label):
+            self.label = label
+
+        def stop(self):
+            stopped.append(self.label)
+
+    eng_mod._build_converter(uno_server=Server("uno"), ocr_helper=Server("ocr"))
+    assert sorted(stopped) == ["ocr", "uno"], f"rejected helpers left running: {stopped}"
+
+
+def test_a_helper_that_cannot_be_stopped_does_not_fail_the_job(monkeypatch):
+    """Teardown of something we are already refusing to use must never raise."""
+    import clippyshot.engine as eng_mod
+
+    class Fake:
+        name = "bwrap"
+
+    monkeypatch.setattr("clippyshot.sandbox.detect.select_sandbox", lambda **kw: Fake())
+    monkeypatch.setattr("clippyshot.rasterizer.build_rasterizer", lambda sb: object())
+    monkeypatch.setattr("clippyshot.selftest.detect_runtime_apparmor_profile", lambda: None)
+    monkeypatch.setattr(
+        "clippyshot.selftest.detect_soffice_apparmor_profile", lambda _sandbox: None
+    )
+    monkeypatch.setattr("clippyshot.converter.Converter", lambda **kw: None)
+
+    class FakeRunner:
+        def __init__(self, sandbox=None, uno_server=None):
+            pass
+
+    monkeypatch.setattr("clippyshot.libreoffice.runner.LibreOfficeRunner", FakeRunner)
+
+    class Stubborn:
+        sandboxed = False
+
+        def stop(self):
+            raise RuntimeError("already reaped")
+
+    eng_mod._build_converter(uno_server=Stubborn(), ocr_helper=None)  # must not raise
