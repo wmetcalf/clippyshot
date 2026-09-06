@@ -1011,6 +1011,78 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         assert "no usable `version` output" in r.stderr
         assert elapsed < 60, f"no deadline without timeout(1): waited {elapsed:.0f}s"
 
+    def test_a_bogus_deadline_is_rejected_not_ignored(self, tmp_path: Path) -> None:
+        """`sleep bogus` fails, and the watchdog subshell inherits `set -e`, so it would exit
+        before signalling anything -- the deadline silently gone. Same fail-open shape as
+        depending on timeout(1), so it says so instead (codex)."""
+        d = self._stub(
+            tmp_path,
+            f'if [ "$1" = version ]; then echo "blastbox {BB_MIN}"; exit 0; fi\n'
+            'printf "%s\\n" "$@"\n',
+        )
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "BLASTBOX_VERSION_TIMEOUT_S": "bogus",
+        }
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            env=env,
+            timeout=60,
+            check=False,
+        )
+        assert r.returncode == 2
+        assert "BLASTBOX_VERSION_TIMEOUT_S" in r.stderr
+        assert "build-images" not in r.stdout
+
+    def test_a_descendant_that_ignores_term_is_killed_after_the_deadline(
+        self, tmp_path: Path
+    ) -> None:
+        """When the deadline fires and the CLI dies on TERM but its child ignores it, `wait`
+        returns at once -- and cancelling the watchdog there cut short the grace period in
+        which the child would have been KILLed (codex). The escalation is inline now."""
+        import time
+
+        grandpid = tmp_path / "stubborn-descendant"
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            "  /usr/bin/env bash -c 'trap \"\" TERM; echo $$ > "
+            + f'\"{grandpid}\"; sleep 300\' &\n'
+            "  sleep 300\n"
+            "fi\n",
+        )
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "BLASTBOX_VERSION_TIMEOUT_S": "3",
+        }
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            env=env,
+            timeout=120,
+            check=False,
+        )
+        assert r.returncode == 2
+        assert grandpid.exists(), "the stubborn descendant never started"
+        kid = int(grandpid.read_text().strip())
+        time.sleep(1.0)
+        alive = _is_alive(kid)
+        if alive:
+            import signal
+
+            try:
+                os.kill(kid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        assert not alive, f"a TERM-ignoring descendant ({kid}) survived the deadline"
+
     def test_a_legitimate_large_write_is_not_punished(self, tmp_path: Path) -> None:
         """RLIMIT_FSIZE is process-wide, not a cap on the two capture files: a CLI that appends
         to a cache or log larger than the limit takes SIGXFSZ and is rejected as unusable

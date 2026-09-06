@@ -235,6 +235,21 @@ BB_PID_FILE="$(mktemp)"
 # build hosts, exactly where an odd CLI is likeliest -- and it failed OPEN, silently
 # leaving no deadline at all (codex). One mechanism, always present, no branch.
 _bb_version_deadline="${BLASTBOX_VERSION_TIMEOUT_S:-30}"
+# REJECT a bad value rather than carry on without a deadline. `sleep bogus` fails,
+# and the watchdog subshell inherits `set -e`, so it would exit before sending any
+# signal -- the guarantee silently gone, which is the same fail-open shape as
+# depending on `timeout(1)` (codex). A typo in an env var should say so.
+case "$_bb_version_deadline" in
+  ''|*[!0-9]*)
+    echo "BLASTBOX_VERSION_TIMEOUT_S must be a whole number of seconds;" >&2
+    echo "  got: $_bb_version_deadline" >&2
+    exit 2
+    ;;
+esac
+if [ "$_bb_version_deadline" -lt 1 ]; then
+  echo "BLASTBOX_VERSION_TIMEOUT_S must be at least 1 second; got: $_bb_version_deadline" >&2
+  exit 2
+fi
 _bb_watchdog_pid=""
 # stdin comes from /dev/null. `set -m` puts this job in a process group that is NOT
 # the terminal's foreground group, so a CLI that tried to read the terminal would be
@@ -281,9 +296,15 @@ set +m
   kill -KILL -- "-$BB_PID" 2>/dev/null || true ) >/dev/null 2>&1 &
 _bb_watchdog_pid=$!
 wait "$BB_PID" && BB_RC=0 || BB_RC=$?
+# The escalation happens HERE, not in the watchdog's grace period. `wait` returns as
+# soon as the direct process dies, so cancelling the watchdog at that moment cut
+# short the five seconds in which it would have KILLed a descendant that ignored
+# TERM (codex). Doing it inline is also faster and safer than a detached process
+# signalling a group number five seconds later.
 kill "$_bb_watchdog_pid" 2>/dev/null || true
 wait "$_bb_watchdog_pid" 2>/dev/null || true
 _bb_watchdog_pid=""
+kill -KILL -- "-$BB_PID" 2>/dev/null || true
 # The version is grepped from the WHOLE file, which `ulimit -f` has already capped
 # at 512 KiB. Reading a 4 KiB prefix instead meant a CLI that prints a long banner
 # before its version was rejected as unusable even though it exited zero (codex).
