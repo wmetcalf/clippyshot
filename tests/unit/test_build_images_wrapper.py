@@ -1324,6 +1324,64 @@ class TestAFailedVersionCannotSatisfyTheFloor:
         assert "no usable `version` output" in r.stderr
         assert "build-images" not in r.stdout
 
+    def test_a_helper_left_by_a_successful_probe_is_reaped(self, tmp_path: Path) -> None:
+        """A CLI that exits 0 after leaving a background helper leaves that helper in the
+        probe's process group, where it outlived the wrapper. Keying the sweep off deadline
+        expiry alone missed it (codex)."""
+        import time
+
+        helper = tmp_path / "helper-pid"
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            "  /bin/sleep 300 &\n"
+            f'  echo $! > "{helper}"\n'
+            f'  echo "blastbox {BB_MIN}"\n'
+            "  exit 0\n"
+            "fi\n"
+            'printf "%s\\n" "$@"\n',
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert "--dry-run" in r.stdout, r.stderr[-300:]
+        assert helper.exists(), "the stub never started its helper"
+        kid = int(helper.read_text().strip())
+        time.sleep(1.5)
+        alive = _is_alive(kid)
+        if alive:
+            import signal
+
+            try:
+                os.kill(kid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        assert not alive, f"a helper ({kid}) left by a successful probe outlived the wrapper"
+
+    def test_an_expired_probe_says_the_deadline_was_the_reason(self, tmp_path: Path) -> None:
+        """Rejecting it is not enough: 'no usable version output' beside a printed version
+        reads like a parsing bug rather than a deadline (codex)."""
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            "  trap 'echo \"blastbox 99.0.0\"; exit 0' TERM\n"
+            "  sleep 300 &\n"
+            "  wait\n"
+            "fi\n",
+        )
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "BLASTBOX_VERSION_TIMEOUT_S": "3",
+        }
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True, text=True, errors="replace", env=env, timeout=120, check=False,
+        )
+        assert r.returncode == 2
+        assert "deadline" in r.stderr, (
+            "the operator is not told the deadline was the reason: " + r.stderr[-300:]
+        )
+        assert "BLASTBOX_VERSION_TIMEOUT_S" in r.stderr
+
     def test_a_legitimate_large_write_is_not_punished(self, tmp_path: Path) -> None:
         """RLIMIT_FSIZE is process-wide, not a cap on the two capture files: a CLI that appends
         to a cache or log larger than the limit takes SIGXFSZ and is rejected as unusable

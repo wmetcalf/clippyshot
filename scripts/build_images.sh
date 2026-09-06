@@ -230,9 +230,12 @@ trap '_bb_version_kill; _bb_version_cleanup; trap - QUIT; kill -QUIT $$' QUIT
 # nothing for it. A flood on either stream now dies of SIGXFSZ at 512 KiB.
 BB_OUT_FILE="$(mktemp)"
 BB_PID_FILE="$(mktemp)"
-# Derived, not mktemp'd: this file must exist ONLY if the watchdog created it, and
-# mktemp would create it up front.
+# Derived rather than mktemp'd, but PREALLOCATED here: creating it inside the
+# watchdog meant a $TMPDIR that filled up after startup killed the watchdog on
+# `set -e` before it signalled anything -- losing the deadline to a disk problem
+# (codex). Emptiness is the signal, so it can exist from the start.
 BB_EXPIRY_FILE="$BB_PID_FILE.expired"
+: > "$BB_EXPIRY_FILE"
 # BOUND THE PROBE'S DURATION, rather than chase the ways a CLI can block. `</dev/null`
 # does not cover a CLI that opens /dev/tty itself, and `set -m` means such a read is
 # STOPPED by SIGTTIN and `wait` never returns (codex). Rather than add a mechanism per
@@ -339,7 +342,7 @@ set -m
   # that traps the watchdog's TERM, prints a plausible version and exits 0 is
   # indistinguishable by status from one that simply answered -- so the wrapper would
   # accept a version from a probe that had already blown its deadline (codex).
-  : > "$BB_EXPIRY_FILE"
+  echo expired > "$BB_EXPIRY_FILE" 2>/dev/null || true
   kill -TERM -- "-$BB_PID" 2>/dev/null || true
   sleep 5
   kill -KILL -- "-$BB_PID" 2>/dev/null || true ) >/dev/null 2>&1 &
@@ -360,13 +363,24 @@ _bb_watchdog_pid=""
 # stubborn descendant is still holding that pgid, so it cannot have been recycled
 # (codex).
 _bb_deadline_expired=""
-if [ -e "$BB_EXPIRY_FILE" ]; then
+if [ -s "$BB_EXPIRY_FILE" ]; then
   _bb_deadline_expired=1
-  # Sweep only here. If the probe exited on its own, `wait` has reaped it and the
-  # process-group id is free to be recycled; when the watchdog fired, a stubborn
-  # descendant is still holding it (codex).
+fi
+# Sweep whenever the group STILL HAS MEMBERS, which is the honest test. A probe that
+# exits 0 after leaving a background helper behind also leaves that helper in the
+# group (codex), so keying the sweep off expiry alone let it outlive the wrapper --
+# but sweeping unconditionally could signal a pgid that was freed and recycled the
+# instant `wait` reaped the leader. `kill -0` on the GROUP distinguishes the two: a
+# surviving member keeps the pgid allocated, so it cannot have been reused. The
+# residue is the check-then-act window, which no pgid-based cleanup can close.
+if kill -0 -- "-$BB_PID" 2>/dev/null; then
+  kill -TERM -- "-$BB_PID" 2>/dev/null || true
+  sleep 1
   kill -KILL -- "-$BB_PID" 2>/dev/null || true
 fi
+# The pid is spent: `wait` has reaped it, so from here it names nothing of ours and a
+# late signal handler must not act on it (codex).
+BB_PID=""
 # The version is grepped from the WHOLE file, which `ulimit -f` has already capped
 # at 512 KiB. Reading a 4 KiB prefix instead meant a CLI that prints a long banner
 # before its version was rejected as unusable even though it exited zero (codex).
@@ -403,6 +417,11 @@ fi
 _bb_version_cleanup
 trap - EXIT INT TERM HUP QUIT
 [ -n "$BB_HAVE" ] || {
+  if [ -n "${_bb_deadline_expired:-}" ]; then
+    echo "\`blastbox version\` exceeded its ${_bb_version_deadline}s deadline and was killed;" >&2
+    echo "  anything it printed is not trusted. Raise BLASTBOX_VERSION_TIMEOUT_S if the CLI is" >&2
+    echo "  merely slow." >&2
+  fi
   echo "this blastbox has no usable \`version\` output; need >= $BB_MIN" >&2
   echo "\`blastbox version\` exited $BB_RC and printed:" >&2
   if [ -n "$BB_VERSION_OUT$BB_VERSION_ERR" ]; then
