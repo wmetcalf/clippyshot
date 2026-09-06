@@ -85,20 +85,40 @@ def test_external_image_is_not_fetched(converter, tmp_path: Path):
 @needs_soffice
 @needs_pdftoppm
 @needs_bwrap_userns
-def test_ole_link_does_not_read_outside_sandbox(converter, tmp_path: Path):
+def test_an_ole_link_document_still_converts(converter, tmp_path: Path):
+    """A document carrying an OLE \\objupdate link converts and renders.
+
+    This was test_ole_link_does_not_read_outside_sandbox: it wrote a canary file
+    into tmp_path, converted the fixture, and asserted the canary's bytes were
+    absent from page-001.png. It could not fail, for two independent reasons,
+    both measured rather than argued.
+
+      * The fixture has no link target. It is
+        {\\object\\objupdate\\objemb {\\*\\objclass Excel.Sheet.12}{\\*\\objdata 0102}},
+        two bytes of junk object data naming no path -- and the canary lived at
+        a random tmp_path the fixture could not have referenced anyway.
+      * The detection could not see the canary even if it were rendered. A PNG
+        that VISIBLY draws "THIS_SHOULD_NEVER_BE_READ" does not contain those
+        bytes -- the raster is compressed, so the assertion holds either way.
+
+    Nor is there a positive control to build one from: LibreOffice does not
+    follow an INCLUDETEXT field pointing at a real file during a headless
+    conversion even with a DEFAULT profile and no sandbox (measured on 24.2.7.2
+    -- the field renders its cached placeholder). What the sandbox does enforce
+    is tested where it can fail: test_a_write_to_tmp_inside_the_sandbox_never_
+    reaches_the_host, and tests/integration/test_sandbox_escape.py.
+    """
     src = MALICIOUS / "ole_link.rtf"
     if not src.exists():
         pytest.skip("malicious fixture not built")
-    secret = tmp_path / "outside_secret.txt"
-    secret.write_text("THIS_SHOULD_NEVER_BE_READ")
     out = tmp_path / "out"
     converter.convert(
         src,
         out,
         ConvertOptions(limits=Limits(timeout_s=60, max_pages=2)),
     )
-    rendered = (out / "page-001.png").read_bytes()
-    assert b"THIS_SHOULD_NEVER_BE_READ" not in rendered
+    render = json.loads((out / "metadata.json").read_text())["render"]
+    assert render["page_count_rendered"] >= 1
 
 
 @needs_soffice
