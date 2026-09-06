@@ -1,40 +1,88 @@
-"""Every third-party module the tests import must be declared, or the tests cannot run.
+"""Every third-party module the tests import must be reachable from a DECLARED dependency.
 
 `tests/integration/conftest.py` imported `qrcode` -- inside a fixture, so collection
 succeeded and only EXECUTION failed -- and it was declared nowhere. The whole integration
 tree was therefore unrunnable in any environment built from this pyproject, and CI never
 noticed because it runs only `tests/unit`, `tests/cli` and `tests/http`.
 
-`--collect-only` does not catch this: a function-level import is not executed at
-collection. That is why this walks the AST instead, and why it asserts on the DECLARATION
-rather than on an import that happens to work on the machine running it.
+Two things this deliberately does NOT do, because both are how the same defect gets
+through again:
+
+* It does not rely on `--collect-only`. A function-level import is not executed at
+  collection, so collection of that conftest succeeded with `qrcode` absent.
+
+* It does not accept "the module imports fine here" as evidence. Importability is a
+  property of the machine running the test, not of the declaration: an undeclared package
+  that is already installed -- left over in a venv, or preinstalled on a CI runner --
+  imports perfectly while a fresh environment built from this pyproject still cannot run
+  the tests. Allowance is therefore derived from the declared requirements' own dependency
+  metadata: a module is acceptable only if some distribution that provides it is in the
+  transitive closure of what pyproject declares.
 """
 from __future__ import annotations
 
 import ast
-import importlib.util
+import importlib.metadata as md
 import pathlib
 import re
 import sys
 import tomllib
 
+from packaging.requirements import Requirement
+
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _FIRST_PARTY = {"clippyshot", "tests", "conftest"}
 
 
-def _declared() -> set[str]:
-    data = tomllib.loads((_ROOT / "pyproject.toml").read_text())
-    project = data["project"]
-    groups = [project.get("dependencies", [])]
-    groups += list(project.get("optional-dependencies", {}).values())
-    names = set()
-    for group in groups:
-        for spec in group:
-            name = re.split(r"[<>=!~\[; ]", spec)[0].strip().lower()
-            if name:
-                names.add(name)
-                names.add(name.replace("-", "_"))
-    return names
+def _canon(name: str) -> str:
+    """PEP 503 canonical distribution name."""
+    return re.sub(r"[-_.]+", "-", name).strip().lower()
+
+
+def _declared_roots() -> list[Requirement]:
+    """Every requirement pyproject declares: runtime plus every optional group."""
+    project = tomllib.loads((_ROOT / "pyproject.toml").read_text())["project"]
+    specs = list(project.get("dependencies", []))
+    for group in project.get("optional-dependencies", {}).values():
+        specs.extend(group)
+    return [Requirement(s) for s in specs]
+
+
+def _closure(roots: list[Requirement]) -> set[str]:
+    """Canonical names of every distribution reachable from the declared requirements.
+
+    Walks each installed distribution's own `Requires-Dist` metadata, honouring the
+    extras that were asked for -- so `blastbox[host]` pulls in what that extra requires
+    and nothing more. A declared distribution that is not installed still counts as
+    declared; we simply cannot walk through it.
+    """
+    seen: set[str] = set()
+    queue = [(_canon(r.name), frozenset(r.extras)) for r in roots]
+    visited: set[tuple[str, frozenset[str]]] = set()
+    while queue:
+        name, extras = queue.pop()
+        if (name, extras) in visited:
+            continue
+        visited.add((name, extras))
+        seen.add(name)
+        try:
+            requires = md.requires(name) or []
+        except md.PackageNotFoundError:
+            continue  # declared but not installed here -- still declared
+        for spec in requires:
+            try:
+                req = Requirement(spec)
+            except Exception:  # pragma: no cover - malformed metadata in the wild
+                continue
+            if req.marker is not None:
+                # A dependency guarded by `extra == "x"` applies only when x was asked
+                # for; an unguarded one must hold in this environment.
+                if not any(
+                    req.marker.evaluate({"extra": e}) for e in (extras or frozenset({""}))
+                ):
+                    continue
+            queue.append((_canon(req.name), frozenset(req.extras)))
+    return seen
 
 
 def _imported_modules() -> dict[str, str]:
@@ -61,21 +109,27 @@ def _imported_modules() -> dict[str, str]:
 
 
 def test_every_third_party_test_import_is_declared_or_provided():
-    declared = _declared()
+    closure = _closure(_declared_roots())
+    providers = md.packages_distributions()
     stdlib = set(sys.stdlib_module_names)
     offenders = []
     for mod, where in sorted(_imported_modules().items()):
         if mod in stdlib or mod in _FIRST_PARTY:
             continue
-        if mod.lower() in declared:
-            continue
-        # Not named in pyproject, but present anyway -> a transitive dependency of
-        # something that IS declared (fastapi arrives with blastbox[host]). That is
-        # provided, if implicitly, so it does not break a fresh environment.
-        if importlib.util.find_spec(mod) is not None:
-            continue
-        offenders.append(f"{mod} (imported by {where})")
+        if _canon(mod) in closure:
+            continue                       # declared, or required by something declared
+        dists = [d for d in providers.get(mod, []) if _canon(d) in closure]
+        if dists:
+            continue                       # the module's own distribution is in the closure
+        installed = providers.get(mod)
+        why = (
+            f"installed as {sorted(installed)}, which nothing declared requires"
+            if installed
+            else "not provided by any installed distribution"
+        )
+        offenders.append(f"{mod} (imported by {where}; {why})")
     assert not offenders, (
-        "these modules are imported by the tests but declared nowhere in pyproject, so "
-        "a fresh environment cannot run them: " + "; ".join(offenders)
+        "these modules are imported by the tests but are not reachable from any dependency "
+        "pyproject declares, so an environment built from this pyproject cannot run the "
+        "tests: " + "; ".join(offenders)
     )
