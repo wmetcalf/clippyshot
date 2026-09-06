@@ -53,10 +53,14 @@ def _run(binpath: Path, *args: str) -> subprocess.CompletedProcess[str]:
         **os.environ,
         "PATH": f"{binpath}:{Path(sys.executable).parent}:{os.environ['PATH']}",
     }
+    # errors="replace": the wrapper is supposed to pass a broken CLI's bytes through, and a
+    # diagnostic containing one undecodable byte would otherwise blow up the HARNESS rather
+    # than fail the assertion -- a test that cannot even read the output it is judging.
     return subprocess.run(
         ["bash", str(SCRIPT), *args],
         capture_output=True,
         text=True,
+        errors="replace",
         env=env,
         check=False,
     )
@@ -65,6 +69,13 @@ def _run(binpath: Path, *args: str) -> subprocess.CompletedProcess[str]:
 _MINIMAL_TOOLS = (
     "bash",
     "sh",
+    # `sleep` is not decoration here: the wrapper gives its version probe a deadline
+    # implemented by a shell watchdog, and refuses to run without it rather than
+    # proceed with no deadline at all. A fixture missing it is not a realistic
+    # minimal host, it is a host where the wrapper legitimately declines.
+    "sleep",
+    "tail",
+    "cut",
     "sed",
     "head",
     "sort",
@@ -442,3 +453,1247 @@ def test_the_too_old_refusal_runs_nothing_and_keeps_its_text(tmp_path: Path) -> 
     assert "is too old" in p.stderr, p.stderr
     assert not marker.exists(), f"the refusal ran docker: {marker.read_text()}"
     assert "`docker build -t`" in p.stderr, p.stderr
+
+
+class TestAFailingCliIsDiagnosable:
+    """`blastbox version 2>/dev/null` threw away the only evidence of WHY the CLI failed.
+
+    Measured, not imagined: blastbox installed without its `host` extra shipped a console script
+    that died on `ModuleNotFoundError: No module named 'structlog'`. The traceback went to the
+    discarded stderr, so this wrapper reported "no usable `version` output" for a perfectly
+    current blastbox, and the remediation it printed reinstalled the same thing. Fixed in the
+    library (blastbox 0.1.40); this keeps the NEXT such failure visible.
+    """
+
+    @pytest.fixture
+    def broken_cli(self, tmp_path: Path) -> Path:
+        """A `blastbox` that exists, exits non-zero, and explains itself on STDERR."""
+        d = tmp_path / "bin"
+        d.mkdir()
+        stub = d / "blastbox"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            'echo "Traceback (most recent call last):" >&2\n'
+            "echo \"ModuleNotFoundError: No module named 'structlog'\" >&2\n"
+            "exit 1\n"
+        )
+        stub.chmod(0o755)
+        return d
+
+    def test_the_real_error_is_shown(self, broken_cli: Path) -> None:
+        r = _run(broken_cli, "sometag", "--dry-run")
+        assert r.returncode == 2
+        assert "no usable `version` output" in r.stderr
+        assert "ModuleNotFoundError" in r.stderr, (
+            "the wrapper hid the only line that explains the failure: " + r.stderr
+        )
+        assert "structlog" in r.stderr
+
+    def test_a_silent_cli_says_so_rather_than_printing_nothing(self, tmp_path: Path) -> None:
+        """A stub that prints NOTHING must not produce an empty 'printed:' section -- the
+        absence of output is itself the diagnosis."""
+        d = tmp_path / "bin"
+        d.mkdir()
+        stub = d / "blastbox"
+        stub.write_text("#!/usr/bin/env bash\nexit 0\n")
+        stub.chmod(0o755)
+
+        r = _run(d, "sometag", "--dry-run")
+        assert r.returncode == 2
+        assert "(nothing at all)" in r.stderr
+
+    def test_a_working_cli_is_unaffected(self, stub_cli: Path) -> None:
+        """The capture must not change the happy path: a good version still passes the gate."""
+        r = _run(stub_cli, "sometag", "--dry-run")
+        assert "no usable `version` output" not in r.stderr
+
+
+
+def _is_alive(pid: int) -> bool:
+    """True only if the process exists AND is not a zombie.
+
+    `os.kill(pid, 0)` succeeds for a defunct process, so on a runner whose PID 1 does not reap
+    promptly -- containers, mostly -- a child that HAS been killed still answers, and a test
+    asserting "nothing outlived the wrapper" fails at random (codex saw it locally with the
+    `sleep` in state Z). The state comes from /proc; where that is unreadable, fall back to the
+    signal probe rather than pretending to know.
+    """
+    if not Path("/proc").is_dir():
+        # No procfs at all (macOS, the BSDs). FileNotFoundError here would otherwise be read
+        # as "the process is gone" and the orphan assertions would pass vacuously (codex).
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    except OSError:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+    # `comm` can contain spaces and parentheses; the state is the field after the last ')'.
+    state = stat.rpartition(")")[2].split()[0]
+    return state != "Z"
+
+class TestAFailedVersionCannotSatisfyTheFloor:
+    """Capturing stderr for the diagnostic must not feed it to the version parser.
+
+    A Python traceback names paths like `/usr/lib/python3.11/site-packages/...`. Merged into the
+    parsed stream, `3.11` becomes the "installed version" -- and 3.11 sorts far above the 0.1.x
+    floor, so a CLI that cannot start would CLEAR the gate and the wrapper would go on to run
+    `blastbox build-images` with it. The change meant to explain failures would have disabled the
+    check that catches them (codex).
+    """
+
+    def _stub(self, tmp_path: Path, body: str) -> Path:
+        d = tmp_path / "bin"
+        d.mkdir()
+        stub = d / "blastbox"
+        stub.write_text("#!/usr/bin/env bash\n" + body)
+        stub.chmod(0o755)
+        return d
+
+    def test_a_traceback_path_is_not_a_version(self, tmp_path: Path) -> None:
+        d = self._stub(
+            tmp_path,
+            'echo "Traceback (most recent call last):" >&2\n'
+            'echo "  File \"/usr/lib/python3.11/site-packages/blastbox/cli.py\"" >&2\n'
+            "echo \"ModuleNotFoundError: No module named 'structlog'\" >&2\n"
+            "exit 1\n",
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert r.returncode == 2, (
+            "a CLI that cannot start cleared the version floor via its own traceback: " + r.stdout
+        )
+        assert "no usable `version` output" in r.stderr
+        assert "ModuleNotFoundError" in r.stderr
+        assert "build-images" not in r.stdout
+
+    def test_a_noisy_failure_cannot_fill_the_temp_filesystem(self, tmp_path: Path) -> None:
+        """Capturing stderr introduced an exposure `2>/dev/null` did not have.
+
+        The stub floods stderr and only then touches a marker. Under the size cap the flood
+        dies of SIGXFSZ first, so the marker is never created -- an observable proof of the
+        bound rather than an assertion about the wrapper's intentions.
+        """
+        marker = tmp_path / "finished-writing"
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            "  for i in $(seq 1 200000); do\n"
+            '    printf "%s\\n" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" >&2\n'
+            "  done\n"
+            f'  touch "{marker}"\n'
+            "  exit 0\n"
+            "fi\n"
+            'printf "%s\\n" "$@"\n',
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert not marker.exists(), (
+            "the CLI wrote its whole flood to $TMPDIR; the size cap is not in effect"
+        )
+        assert r.returncode == 2
+        assert "no usable `version` output" in r.stderr
+
+    def test_temp_paths_are_never_derived_from_another_temp_path(self) -> None:
+        """Source-level, because the defect needs a hostile local process to race us.
+
+        A name derived from another temp file's name is PREDICTABLE: in a shared $TMPDIR
+        another user can plant a symlink at it between the two creations and have our write
+        follow it into a file of their choosing (codex). Every temp path must come from
+        `mktemp`, which creates the file atomically with a name nobody can guess.
+        """
+        import re
+
+        offenders = [
+            line.strip()
+            for line in (ln.split("#", 1)[0] for ln in SCRIPT.read_text().splitlines())
+            if re.search(r'^\s*BB_\w*FILE="\$[A-Za-z_]', line)
+        ]
+        assert not offenders, (
+            "temp paths must come from mktemp, not from another temp path: " + "; ".join(offenders)
+        )
+
+    def test_bashpid_is_never_referenced_unguarded(self) -> None:
+        """A lint-style check, and deliberately so: this one cannot be executed here.
+
+        `BASHPID` is Bash 4+. Under `set -u` a Bash 3.2 -- the stock /bin/bash on macOS --
+        aborts on an unguarded reference, which would abort the subshell before the CLI ran and
+        report every valid install as having no usable version output (codex). Measured:
+
+            $ bash -c 'set -u; unset BASHPID; ( echo "$BASHPID" )'
+            bash: line 1: BASHPID: unbound variable
+            $ bash -c 'set -u; unset BASHPID; ( echo "${BASHPID:-}" )'   # fine
+
+        Proving the fix by RUNNING it needs a Bash 3.2 binary, which is not present here, so
+        the guard is asserted on the source instead of pretended to be executed.
+        """
+        import re
+
+        code = [
+            line.split("#", 1)[0]          # the rule is about code; the comment above the
+            for line in SCRIPT.read_text().splitlines()  # guard names the form it forbids
+        ]
+        unguarded = [
+            line.strip()
+            for line in code
+            if re.search(r"\$BASHPID\b", line) or re.search(r"\$\{BASHPID\}", line)
+        ]
+        assert not unguarded, (
+            "reference BASHPID as ${BASHPID:-}; Bash 3.2 under `set -u` aborts on: "
+            + "; ".join(unguarded)
+        )
+
+    def test_an_undecodable_byte_does_not_swallow_the_diagnostic(self, tmp_path: Path) -> None:
+        """One invalid byte anywhere in the captured stderr used to cost the whole message.
+
+        Measured on this host rather than assumed:
+
+            printf '\\xc3ABC\\nsecond line\\n' | grep -v '^$'
+            grep: (standard input): binary file matches
+            second line
+
+        -- the line with the byte in it is REPLACED by that notice, and it is exactly the line
+        an operator needs. A byte-wise `tail -c` can manufacture such a byte by cutting a
+        multibyte character in half, which is why the truncation is line-wise now; `grep -a`
+        covers the case where the CLI emitted one itself (codex).
+        """
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            '  printf "Traceback (most recent call last):\\n" >&2\n'
+            '  printf "  File \\"/opt/x\\xc3/cli.py\\", line 1\\n" >&2\n'
+            "  printf \"ModuleNotFoundError: No module named 'structlog'\\n\" >&2\n"
+            "  exit 1\n"
+            "fi\n",
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert r.returncode == 2
+        assert "binary file matches" not in r.stderr.lower(), (
+            "the diagnostic was replaced by grep's binary-file notice: " + r.stderr
+        )
+        assert "ModuleNotFoundError" in r.stderr
+
+    def test_a_long_banner_does_not_hide_the_version(self, tmp_path: Path) -> None:
+        """A CLI that prints a banner before its version is still a usable CLI.
+
+        Parsing only the first 4 KiB of stdout rejected one, exit code zero and all -- the
+        wrapper would have told a working install it was unusable (codex).
+        """
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            "  for i in $(seq 1 120); do\n"
+            '    printf "%s\\n" "note: warming up 0000000000000000000000000000000000000000"\n'
+            "  done\n"
+            f'  echo "blastbox {BB_MIN}"\n'
+            "  exit 0\n"
+            "fi\n"
+            'printf "%s\\n" "$@"\n',
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert "no usable `version` output" not in r.stderr, (
+            "a banner longer than the parsed prefix hid a perfectly good version"
+        )
+        assert "--dry-run" in r.stdout
+
+    def test_a_failing_second_mktemp_leaves_nothing_behind(self, tmp_path: Path) -> None:
+        """The cleanup trap must be armed before the SECOND temp file is allocated.
+
+        With both allocations ahead of the trap, a failure of the second one -- $TMPDIR out of
+        space or inodes -- exits under `set -e` before any cleanup exists and leaks the first
+        (codex). The stub lets the first mktemp through and fails the rest.
+        """
+        d = tmp_path / "bin"
+        d.mkdir()
+        counter = tmp_path / "mktemp-calls"
+        (d / "blastbox").write_text(
+            "#!/usr/bin/env bash\n"
+            f'if [ "$1" = version ]; then echo "blastbox {BB_MIN}"; exit 0; fi\n'
+        )
+        (d / "blastbox").chmod(0o755)
+        (d / "mktemp").write_text(
+            "#!/usr/bin/env bash\n"
+            f'n=$(cat "{counter}" 2>/dev/null || echo 0)\n'
+            "n=$((n + 1))\n"
+            f'echo "$n" > "{counter}"\n'
+            'if [ "$n" -ge 2 ]; then echo "mktemp: no space left on device" >&2; exit 1; fi\n'
+            'exec /usr/bin/mktemp "$@"\n'
+        )
+        (d / "mktemp").chmod(0o755)
+
+        tmpdir = tmp_path / "tmp"
+        tmpdir.mkdir()
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "TMPDIR": str(tmpdir),
+        }
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        assert r.returncode != 0, "a failed mktemp was treated as success"
+        leftovers = list(tmpdir.iterdir())
+        assert leftovers == [], f"the first temp file leaked when the second failed: {leftovers}"
+
+    def test_a_cli_that_reads_stdin_does_not_hang_the_wrapper(self, tmp_path: Path) -> None:
+        """`set -m` puts the CLI in a non-foreground process group, so a read from the terminal
+        would stop it with SIGTTIN and `wait` would block forever -- a hang introduced by the
+        isolation that makes the group killable (codex).
+
+        The wrapper is given an OPEN stdin pipe that never receives data: without the
+        `</dev/null` redirect the stub's read blocks and this test times out.
+        """
+        d = self._stub(tmp_path, 'if [ "$1" = version ]; then read -r line; echo "$line"; fi\n')
+        proc = subprocess.Popen(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={
+                **os.environ,
+                "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            },
+        )
+        # `wait`, NOT `communicate`: communicate CLOSES stdin, which hands the stub an EOF and
+        # makes the test pass even without the redirect -- it was the reason the mutation that
+        # removes `</dev/null` survived. The pipe must stay open and silent, like a terminal
+        # nobody is typing at.
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)
+            raise AssertionError(
+                "the wrapper hung waiting for a CLI that was reading stdin"
+            ) from None
+        finally:
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None:
+                    stream.close()
+        assert proc.returncode == 2
+
+    def test_a_cli_that_ignores_sigterm_is_killed_anyway(self, tmp_path: Path) -> None:
+        """An isolated process group that ignores TERM would outlive the wrapper as an orphan
+        no supervisor can reach afterwards -- worse than the leak the isolation prevents
+        (codex). The handler escalates to KILL, which nothing can trap."""
+        import signal
+        import time
+
+        childpid = tmp_path / "stubborn-pid"
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            "  trap '' TERM INT HUP\n"
+            f'  echo $$ > "{childpid}"\n'
+            "  sleep 300\n"
+            "fi\n",
+        )
+        proc = subprocess.Popen(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={
+                **os.environ,
+                "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            },
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not childpid.exists():
+            time.sleep(0.05)
+        assert childpid.exists(), "the stub CLI never started"
+        kid = int(childpid.read_text().strip())
+
+        proc.send_signal(signal.SIGTERM)
+        try:
+            proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate(timeout=10)
+            os.kill(kid, signal.SIGKILL)
+            raise AssertionError("the wrapper never terminated") from None
+
+        time.sleep(1.0)
+        alive = _is_alive(kid)
+        if alive:
+            try:
+                os.kill(kid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        assert not alive, f"a TERM-ignoring CLI ({kid}) survived as an unreachable orphan"
+
+    def test_an_error_on_stdout_is_not_crowded_out_by_stderr(self, tmp_path: Path) -> None:
+        """Concatenating the streams and tailing five lines discarded the actual error whenever
+        it was on stdout and stderr had five lines after it -- the diagnostic throwing away the
+        diagnosis (codex)."""
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            '  echo "FATAL: config at /etc/blastbox.toml is unreadable"\n'
+            "  for i in $(seq 1 8); do\n"
+            '    printf "%s\\n" "noise line filling the tail" >&2\n'
+            "  done\n"
+            "  exit 1\n"
+            "fi\n",
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert r.returncode == 2
+        assert "is unreadable" in r.stderr, (
+            "the error on stdout was crowded out by stderr noise: " + r.stderr
+        )
+
+    def test_every_trapped_signal_is_cleared_afterwards(self) -> None:
+        """Source-level, and it says so: a handler left installed after the probe would later
+        read a deleted pidfile, fall back to the finished probe's pid, and signal whatever
+        process group has that number by then (codex). Observing that needs pid REUSE, which a
+        test cannot arrange, so the invariant is asserted on the script instead.
+        """
+        import re
+
+        code = [line.split("#", 1)[0] for line in SCRIPT.read_text().splitlines()]
+        trapped: set[str] = set()
+        cleared: set[str] = set()
+        for line in code:
+            m = re.match(r"\s*trap\s+(-|'[^']*'|\"[^\"]*\")\s+(.+?)\s*$", line)
+            if not m:
+                continue
+            sigs = {s for s in m.group(2).split() if s.isalpha()}
+            if m.group(1) == "-":
+                cleared |= sigs
+            else:
+                trapped |= sigs
+        missing = sorted(trapped - cleared - {"EXIT"})
+        assert not missing, f"these traps are installed but never cleared: {missing}"
+
+    def test_a_stricter_inherited_file_limit_is_respected(self, tmp_path: Path) -> None:
+        """`ulimit -f 512` RAISES the limit when the caller already set something stricter, and
+        raising fails -- under `set -e` that kills the subshell before the CLI runs, so a
+        perfectly good install is reported as unusable (codex). The cap only ever lowers."""
+        d = self._stub(
+            tmp_path,
+            f'if [ "$1" = version ]; then echo "blastbox {BB_MIN}"; exit 0; fi\n'
+            'printf "%s\\n" "$@"\n',
+        )
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+        }
+        r = subprocess.run(
+            ["bash", "-c", f"ulimit -f 100; exec bash {SCRIPT} sometag --dry-run"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            env=env,
+            check=False,
+        )
+        assert "no usable `version` output" not in r.stderr, (
+            "a stricter caller-imposed file limit broke the version probe: " + r.stderr
+        )
+        assert "--dry-run" in r.stdout
+
+    def test_an_inherited_bb_pid_is_not_signalled(self, tmp_path: Path) -> None:
+        """An exported BB_PID from the caller must never become the handler's fallback.
+
+        A bystander process is started in its own process group, its pid is exported as BB_PID,
+        and the wrapper is interrupted mid-probe. The bystander must be alive afterwards --
+        with an uninitialised BB_PID the handler would TERM and then KILL that whole group
+        (codex).
+        """
+        import signal
+        import time
+
+        bystander = subprocess.Popen(
+            ["/bin/sleep", "300"], start_new_session=True, stdout=subprocess.DEVNULL
+        )
+        try:
+            childpid = tmp_path / "probe-pid"
+            d = self._stub(
+                tmp_path,
+                'if [ "$1" = version ]; then\n'
+                f'  echo $$ > "{childpid}"\n'
+                "  sleep 300\n"
+                "fi\n",
+            )
+            proc = subprocess.Popen(
+                ["bash", str(SCRIPT), "sometag", "--dry-run"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env={
+                    **os.environ,
+                    "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+                    "BB_PID": str(bystander.pid),
+                },
+                start_new_session=True,
+            )
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not childpid.exists():
+                time.sleep(0.05)
+            assert childpid.exists(), "the stub CLI never started"
+            kid = int(childpid.read_text().strip())
+
+            proc.send_signal(signal.SIGTERM)
+            try:
+                proc.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate(timeout=10)
+            for stray in (kid,):
+                try:
+                    os.kill(stray, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+            time.sleep(1.0)
+            assert _is_alive(bystander.pid), (
+                "the wrapper signalled a process group it inherited through BB_PID"
+            )
+        finally:
+            bystander.kill()
+            bystander.wait(timeout=10)
+
+    def test_a_hung_probe_is_abandoned_rather_than_waited_on_forever(
+        self, tmp_path: Path
+    ) -> None:
+        """`</dev/null` does not cover a CLI that opens /dev/tty itself, and `set -m` means such
+        a read is STOPPED by SIGTTIN with `wait` never returning (codex). Rather than a
+        mechanism per blocking mode, the probe has a deadline -- whatever the reason, it ends
+        and the operator gets the diagnostic.
+        """
+        import time
+
+        d = self._stub(tmp_path, 'if [ "$1" = version ]; then sleep 300; fi\n')
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "BLASTBOX_VERSION_TIMEOUT_S": "3",
+        }
+        started = time.monotonic()
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            env=env,
+            timeout=120,
+            check=False,
+        )
+        elapsed = time.monotonic() - started
+        assert r.returncode == 2
+        assert "no usable `version` output" in r.stderr
+        assert elapsed < 60, f"the wrapper waited {elapsed:.0f}s on a hung probe"
+
+    def test_the_deadline_does_not_depend_on_the_timeout_binary(self, tmp_path: Path) -> None:
+        """The deadline used to be `timeout(1)`, which is absent on stock macOS and on minimal
+        build hosts -- exactly where an odd CLI is likeliest -- and its absence failed OPEN,
+        leaving no deadline at all (codex). This runs with a PATH that has no `timeout`."""
+        import shutil
+        import time
+
+        d = self._stub(tmp_path, 'if [ "$1" = version ]; then sleep 300; fi\n')
+        # A mirror of the real PATH with exactly one thing missing. A hand-picked list of
+        # tools is not the same environment -- the first version of this test failed on
+        # `dirname: command not found`, which says nothing about deadlines.
+        bare = tmp_path / "bare"
+        bare.mkdir()
+        for entry in os.environ.get("PATH", "").split(os.pathsep):
+            if not entry or not os.path.isdir(entry):
+                continue
+            for name in os.listdir(entry):
+                if name == "timeout" or (bare / name).exists():
+                    continue
+                try:
+                    (bare / name).symlink_to(os.path.join(entry, name))
+                except OSError:
+                    pass
+        assert shutil.which("timeout", path=str(bare)) is None, "the bare PATH still has timeout"
+
+        started = time.monotonic()
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            env={
+                "PATH": f"{d}:{bare}",
+                "HOME": os.environ.get("HOME", "/tmp"),
+                "BLASTBOX_VERSION_TIMEOUT_S": "3",
+            },
+            timeout=120,
+            check=False,
+        )
+        elapsed = time.monotonic() - started
+        assert r.returncode == 2, r.stderr[-400:]
+        assert "no usable `version` output" in r.stderr
+        assert elapsed < 60, f"no deadline without timeout(1): waited {elapsed:.0f}s"
+
+    def test_a_bogus_deadline_is_rejected_not_ignored(self, tmp_path: Path) -> None:
+        """`sleep bogus` fails, and the watchdog subshell inherits `set -e`, so it would exit
+        before signalling anything -- the deadline silently gone. Same fail-open shape as
+        depending on timeout(1), so it says so instead (codex)."""
+        d = self._stub(
+            tmp_path,
+            f'if [ "$1" = version ]; then echo "blastbox {BB_MIN}"; exit 0; fi\n'
+            'printf "%s\\n" "$@"\n',
+        )
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "BLASTBOX_VERSION_TIMEOUT_S": "bogus",
+        }
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            env=env,
+            timeout=60,
+            check=False,
+        )
+        assert r.returncode == 2
+        assert "BLASTBOX_VERSION_TIMEOUT_S" in r.stderr
+        assert "build-images" not in r.stdout
+
+    def test_a_descendant_that_ignores_term_is_killed_after_the_deadline(
+        self, tmp_path: Path
+    ) -> None:
+        """When the deadline fires and the CLI dies on TERM but its child ignores it, `wait`
+        returns at once -- and cancelling the watchdog there cut short the grace period in
+        which the child would have been KILLed (codex). The escalation is inline now."""
+        import time
+
+        grandpid = tmp_path / "stubborn-descendant"
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            "  /usr/bin/env bash -c 'trap \"\" TERM; echo $$ > "
+            + f'\"{grandpid}\"; sleep 300\' &\n'
+            "  sleep 300\n"
+            "fi\n",
+        )
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "BLASTBOX_VERSION_TIMEOUT_S": "3",
+        }
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            env=env,
+            timeout=120,
+            check=False,
+        )
+        assert r.returncode == 2
+        assert grandpid.exists(), "the stubborn descendant never started"
+        kid = int(grandpid.read_text().strip())
+        time.sleep(1.0)
+        alive = _is_alive(kid)
+        if alive:
+            import signal
+
+            try:
+                os.kill(kid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        assert not alive, f"a TERM-ignoring descendant ({kid}) survived the deadline"
+
+    def test_the_watchdog_leaves_no_sleeping_orphan(self, tmp_path: Path) -> None:
+        """Cancelling the watchdog means killing the `sleep` it is blocked in. Killing the
+        subshell alone left that sleep reparented to init, ticking away for the full deadline
+        after a perfectly successful build (codex)."""
+        import time
+
+        if not Path("/proc").is_dir():
+            pytest.skip("the stray-process scan needs procfs (Linux)")
+        deadline = "4321"
+        d = self._stub(
+            tmp_path,
+            f'if [ "$1" = version ]; then echo "blastbox {BB_MIN}"; exit 0; fi\n'
+            'printf "%s\\n" "$@"\n',
+        )
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "BLASTBOX_VERSION_TIMEOUT_S": deadline,
+        }
+        # Its own SESSION, so ownership is provable. A reparented process keeps its
+        # session id, and matching on `sleep <duration>` alone would blame -- and then
+        # KILL -- an unrelated job that happened to use the same number (codex).
+        proc = subprocess.Popen(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            start_new_session=True,
+        )
+        out, _err = proc.communicate(timeout=60)
+        assert "--dry-run" in out
+        session = proc.pid                    # session leader == the pid we started
+        time.sleep(1.0)
+
+        strays = []
+        for proc_dir in Path("/proc").iterdir():
+            if not proc_dir.name.isdigit():
+                continue
+            try:
+                stat = (proc_dir / "stat").read_text()
+                cmdline = (proc_dir / "cmdline").read_bytes().split(b"\0")
+            except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+                continue
+            fields = stat.rpartition(")")[2].split()
+            # fields[3] is the SESSION id: after dropping the pid and the parenthesised
+            # comm, the order is state, ppid, pgrp, session, tty_nr. I had used [4] --
+            # tty_nr, which is 0 for a session with no terminal -- so the scan matched
+            # nothing and the test passed while checking nothing at all (codex).
+            if len(fields) < 4 or fields[3] != str(session):
+                continue
+            if cmdline[:1] == [b"sleep"]:
+                strays.append(int(proc_dir.name))
+        for stray in strays:
+            import signal
+
+            try:
+                os.kill(stray, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        assert not strays, f"the watchdog's sleep outlived the build: {strays}"
+
+    def test_an_out_of_range_deadline_is_rejected(self, tmp_path: Path) -> None:
+        """All digits, but past the shell's integer range: the comparison reports "integer
+        expression expected" WITHOUT taking the rejection branch, and then `sleep` fails and the
+        watchdog dies silently (codex)."""
+        d = self._stub(
+            tmp_path,
+            f'if [ "$1" = version ]; then echo "blastbox {BB_MIN}"; exit 0; fi\n'
+            'printf "%s\\n" "$@"\n',
+        )
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "BLASTBOX_VERSION_TIMEOUT_S": "99999999999999999999",
+        }
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True, text=True, errors="replace", env=env, timeout=60, check=False,
+        )
+        assert r.returncode == 2
+        assert "BLASTBOX_VERSION_TIMEOUT_S" in r.stderr
+        assert "build-images" not in r.stdout
+
+    def test_a_missing_sleep_is_refused_rather_than_silently_undeadlined(
+        self, tmp_path: Path
+    ) -> None:
+        """The deadline is only a guarantee if what implements it exists. Without `sleep` the
+        watchdog dies on command-not-found, its stderr discarded, and the wrapper waits forever
+        on a hung CLI (codex)."""
+        import shutil
+
+        d = self._stub(
+            tmp_path,
+            f'if [ "$1" = version ]; then echo "blastbox {BB_MIN}"; exit 0; fi\n'
+            'printf "%s\\n" "$@"\n',
+        )
+        bare = tmp_path / "nosleep"
+        bare.mkdir()
+        for entry in os.environ.get("PATH", "").split(os.pathsep):
+            if not entry or not os.path.isdir(entry):
+                continue
+            for name in os.listdir(entry):
+                if name == "sleep" or (bare / name).exists():
+                    continue
+                try:
+                    (bare / name).symlink_to(os.path.join(entry, name))
+                except OSError:
+                    pass
+        assert shutil.which("sleep", path=str(bare)) is None, "the PATH still has sleep"
+
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            env={"PATH": f"{d}:{bare}", "HOME": os.environ.get("HOME", "/tmp")},
+            timeout=60,
+            check=False,
+        )
+        assert r.returncode == 2
+        assert "sleep" in r.stderr and "deadline" in r.stderr
+
+    def test_one_enormous_line_does_not_flood_the_terminal(self, tmp_path: Path) -> None:
+        """A line COUNT is not a bound. A multi-megabyte stream with no newlines is one line,
+        and `tail -n 20` keeps all of it -- the diagnostic then prints megabytes at an operator
+        who wanted to know why the CLI failed (codex)."""
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            "  for i in $(seq 1 40000); do\n"
+            '    printf "%s" "0123456789012345678901234567890123456789" >&2\n'
+            "  done\n"
+            '  printf "\\n" >&2\n'
+            "  exit 1\n"
+            "fi\n",
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert r.returncode == 2
+        assert "no usable `version` output" in r.stderr
+        assert len(r.stderr) < 50_000, (
+            f"the diagnostic printed {len(r.stderr)} bytes; one line is not a bound"
+        )
+
+    def test_a_zero_padded_deadline_is_read_as_decimal(self, tmp_path: Path) -> None:
+        """`08` passes the all-digits and range checks and is then read as OCTAL by the
+        watchdog's arithmetic, which aborts it -- the deadline gone, from a value that looks
+        perfectly ordinary (codex)."""
+        import time
+
+        d = self._stub(tmp_path, 'if [ "$1" = version ]; then sleep 300; fi\n')
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "BLASTBOX_VERSION_TIMEOUT_S": "08",
+        }
+        started = time.monotonic()
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True, text=True, errors="replace", env=env, timeout=120, check=False,
+        )
+        elapsed = time.monotonic() - started
+        assert r.returncode == 2
+        assert "no usable `version` output" in r.stderr
+        assert elapsed < 60, f"a zero-padded deadline lost the deadline: waited {elapsed:.0f}s"
+
+    def test_a_fixed_width_padded_deadline_is_accepted(self, tmp_path: Path) -> None:
+        """`000008` is eight seconds, not a malformed value. Judging the LENGTH before
+        stripping the padding rejected a perfectly ordinary generated value (codex)."""
+        d = self._stub(
+            tmp_path,
+            f'if [ "$1" = version ]; then echo "blastbox {BB_MIN}"; exit 0; fi\n'
+            'printf "%s\\n" "$@"\n',
+        )
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "BLASTBOX_VERSION_TIMEOUT_S": "000008",
+        }
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True, text=True, errors="replace", env=env, timeout=60, check=False,
+        )
+        assert r.returncode == 0, r.stderr[-300:]
+        assert "--dry-run" in r.stdout
+
+    def test_the_end_of_a_long_line_is_what_survives(self, tmp_path: Path) -> None:
+        """A CLI that writes a long preamble and then its actual error puts that error at the
+        END of the line. Keeping the first 500 characters threw away the only part worth
+        printing (codex)."""
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            "  for i in $(seq 1 40); do\n"
+            '    printf "%s" "preamble-padding-that-is-not-the-error-" >&2\n'
+            "  done\n"
+            '  printf "%s\\n" "FATAL: the config at /etc/blastbox.toml is unreadable" >&2\n'
+            "  exit 1\n"
+            "fi\n",
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert r.returncode == 2
+        assert "is unreadable" in r.stderr, (
+            "the bound kept the preamble and dropped the error: " + r.stderr[-300:]
+        )
+
+    def test_a_version_from_an_expired_probe_is_not_trusted(self, tmp_path: Path) -> None:
+        """A hung CLI that traps the watchdog's TERM, prints a plausible version and exits 0 is
+        indistinguishable BY STATUS from one that simply answered -- so expiry is recorded by
+        the watchdog rather than inferred afterwards (codex)."""
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            "  trap 'echo \"blastbox 99.0.0\"; exit 0' TERM\n"
+            "  sleep 300 &\n"
+            "  wait\n"
+            "fi\n"
+            'printf "%s\\n" "$@"\n',
+        )
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "BLASTBOX_VERSION_TIMEOUT_S": "3",
+        }
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True, text=True, errors="replace", env=env, timeout=120, check=False,
+        )
+        assert r.returncode == 2, (
+            "a version printed by a probe that had already blown its deadline was accepted"
+        )
+        assert "no usable `version` output" in r.stderr
+        assert "build-images" not in r.stdout
+
+    def test_a_helper_left_by_a_successful_probe_is_reaped(self, tmp_path: Path) -> None:
+        """A CLI that exits 0 after leaving a background helper leaves that helper in the
+        probe's process group, where it outlived the wrapper. Keying the sweep off deadline
+        expiry alone missed it (codex)."""
+        import time
+
+        helper = tmp_path / "helper-pid"
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            "  /bin/sleep 300 &\n"
+            f'  echo $! > "{helper}"\n'
+            f'  echo "blastbox {BB_MIN}"\n'
+            "  exit 0\n"
+            "fi\n"
+            'printf "%s\\n" "$@"\n',
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert "--dry-run" in r.stdout, r.stderr[-300:]
+        assert helper.exists(), "the stub never started its helper"
+        kid = int(helper.read_text().strip())
+        time.sleep(1.5)
+        alive = _is_alive(kid)
+        if alive:
+            import signal
+
+            try:
+                os.kill(kid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        assert not alive, f"a helper ({kid}) left by a successful probe outlived the wrapper"
+
+    def test_an_expired_probe_says_the_deadline_was_the_reason(self, tmp_path: Path) -> None:
+        """Rejecting it is not enough: 'no usable version output' beside a printed version
+        reads like a parsing bug rather than a deadline (codex)."""
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            "  trap 'echo \"blastbox 99.0.0\"; exit 0' TERM\n"
+            "  sleep 300 &\n"
+            "  wait\n"
+            "fi\n",
+        )
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "BLASTBOX_VERSION_TIMEOUT_S": "3",
+        }
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True, text=True, errors="replace", env=env, timeout=120, check=False,
+        )
+        assert r.returncode == 2
+        assert "deadline" in r.stderr, (
+            "the operator is not told the deadline was the reason: " + r.stderr[-300:]
+        )
+        assert "BLASTBOX_VERSION_TIMEOUT_S" in r.stderr
+
+    def test_a_legitimate_large_write_is_not_punished(self, tmp_path: Path) -> None:
+        """RLIMIT_FSIZE is process-wide, not a cap on the two capture files: a CLI that appends
+        to a cache or log larger than the limit takes SIGXFSZ and is rejected as unusable
+        (codex). 1 MiB is ordinary; it must not fail."""
+        scratch = tmp_path / "cli-cache"
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            f'  dd if=/dev/zero of="{scratch}" bs=1024 count=1024 2>/dev/null\n'
+            f'  echo "blastbox {BB_MIN}"\n'
+            "  exit 0\n"
+            "fi\n"
+            'printf "%s\\n" "$@"\n',
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert "no usable `version` output" not in r.stderr, (
+            "a 1 MiB write by the CLI was treated as a broken CLI: " + r.stderr
+        )
+        assert scratch.exists() and scratch.stat().st_size == 1024 * 1024
+        assert "--dry-run" in r.stdout
+
+    def test_a_quit_takes_the_cli_with_it(self, tmp_path: Path) -> None:
+        """Ctrl-\\ sends SIGQUIT to the foreground group, which no longer contains the isolated
+        probe -- so without a handler neither the wrapper nor the probe goes away (codex)."""
+        import signal
+        import time
+
+        childpid = tmp_path / "quit-childpid"
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            f'  echo $$ > "{childpid}"\n'
+            "  sleep 300\n"
+            "fi\n",
+        )
+        proc = subprocess.Popen(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={
+                **os.environ,
+                "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+                "BLASTBOX_VERSION_TIMEOUT_S": "300",
+            },
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not childpid.exists():
+            time.sleep(0.05)
+        assert childpid.exists(), "the stub CLI never started"
+        kid = int(childpid.read_text().strip())
+
+        proc.send_signal(signal.SIGQUIT)
+        try:
+            proc.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate(timeout=10)
+            os.kill(kid, signal.SIGKILL)
+            raise AssertionError("SIGQUIT did not terminate the wrapper") from None
+
+        time.sleep(1.0)
+        alive = _is_alive(kid)
+        if alive:
+            try:
+                os.kill(kid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        assert not alive, f"the CLI ({kid}) survived the quit as an orphan"
+
+    def test_a_hangup_takes_the_cli_with_it(self, tmp_path: Path) -> None:
+        """SIGHUP is what arrives when the terminal goes away -- precisely when nobody is left
+        to notice a CLI still running. Only INT and TERM forwarded before (codex)."""
+        import signal
+        import time
+
+        childpid = tmp_path / "hup-childpid"
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            f'  echo $$ > "{childpid}"\n'
+            "  sleep 300\n"
+            "fi\n",
+        )
+        proc = subprocess.Popen(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={
+                **os.environ,
+                "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            },
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not childpid.exists():
+            time.sleep(0.05)
+        assert childpid.exists(), "the stub CLI never started"
+        kid = int(childpid.read_text().strip())
+
+        proc.send_signal(signal.SIGHUP)
+        try:
+            proc.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate(timeout=10)
+            raise AssertionError("SIGHUP did not terminate the wrapper") from None
+
+        time.sleep(0.5)
+        alive = _is_alive(kid)
+        if alive:
+            try:
+                os.kill(kid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        assert not alive, f"the CLI ({kid}) survived the hangup as an orphan"
+
+    def test_a_supervisor_signal_terminates_the_wrapper(self, tmp_path: Path) -> None:
+        """A signal to THIS PID ONLY -- what a process supervisor sends, and what the
+        process-group test cannot cover, because that one also kills the child.
+
+        A cleanup handler that returns instead of re-raising makes bash swallow the request:
+        it waits out the CLI, runs the handler, and then proceeds into the build.
+        """
+        import signal
+        import time
+
+        # The CLI HANGS. A four-second child hid the defect codex found: with a foreground
+        # command substitution bash defers the trap until the command returns, so the wrapper
+        # was unkillable for as long as the CLI ran -- and a short sleep let the test pass
+        # anyway. It also records its pid, so the child can be checked for afterwards.
+        childpid = tmp_path / "childpid"
+        grandpid = tmp_path / "grandpid"
+        # The CLI spawns a child of its own. Killing only the CLI leaves that grandchild
+        # reparented to init and running -- an orphan the earlier version of this test could
+        # not see, because it checked the stub's `$$` alone (codex).
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            f'  echo $$ > "{childpid}"\n'
+            "  /bin/sleep 300 &\n"
+            f'  echo $! > "{grandpid}"\n'
+            "  wait\n"
+            "fi\n",
+        )
+        proc = subprocess.Popen(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={
+                **os.environ,
+                "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            },
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not childpid.exists():
+            time.sleep(0.05)
+        assert childpid.exists(), "the stub CLI never started"
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not grandpid.exists():
+            time.sleep(0.05)
+        assert grandpid.exists(), "the stub CLI never spawned its child"
+        kid = int(childpid.read_text().strip())
+        grandkid = int(grandpid.read_text().strip())
+
+        proc.send_signal(signal.SIGTERM)          # the PID, deliberately not the group
+        try:
+            # Well under the child's 300s: the point is that the wrapper does NOT wait for it.
+            out, _err = proc.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate(timeout=10)
+            for stray in (kid, grandkid):
+                try:
+                    os.kill(stray, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            raise AssertionError(
+                "the wrapper waited for a hung CLI instead of terminating"
+            ) from None
+
+        assert proc.returncode != 0, "SIGTERM was swallowed and the wrapper reported success"
+        assert "--dry-run" not in out, (
+            "the wrapper carried on into the build after being told to stop: " + out
+        )
+        time.sleep(0.5)
+        survivors = [
+            f"{label} ({stray})"
+            for stray, label in ((kid, "the CLI"), (grandkid, "the CLI's child"))
+            if _is_alive(stray)
+        ]
+        for stray, _ in ((kid, None), (grandkid, None)):
+            try:
+                os.kill(stray, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        assert not survivors, f"{', '.join(survivors)} outlived the wrapper as an orphan"
+
+    def test_a_stdout_flood_cannot_exhaust_memory(self, tmp_path: Path) -> None:
+        """stdout used to be captured by a command substitution, i.e. buffered whole in shell
+        memory, and `ulimit -f` does not bound a pipe. Both streams are files now; the marker
+        after the flood is the observable proof the writer was stopped."""
+        marker = tmp_path / "finished-stdout"
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            "  for i in $(seq 1 200000); do\n"
+            '    printf "%s\\n" "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"\n'
+            "  done\n"
+            f'  touch "{marker}"\n'
+            "  exit 0\n"
+            "fi\n"
+            'printf "%s\\n" "$@"\n',
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert not marker.exists(), "the flood ran to completion; stdout is not bounded"
+        assert r.returncode == 2
+
+    def test_an_interrupted_run_leaves_no_temp_file(self, tmp_path: Path) -> None:
+        """Ctrl-C while `blastbox version` is running must not strand the diagnostic file.
+
+        The wrapper is started with its own TMPDIR, interrupted mid-`version`, and that
+        directory is then required to be empty -- executed, not reasoned about.
+        """
+        import signal
+        import time
+
+        d = self._stub(tmp_path, 'if [ "$1" = version ]; then sleep 30; fi\n')
+        tmpdir = tmp_path / "tmp"
+        tmpdir.mkdir()
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "TMPDIR": str(tmpdir),
+        }
+        # Its own session, and the signal goes to the process GROUP -- which is what a
+        # terminal does on Ctrl-C. Signalling only the bash pid does not reproduce it: bash
+        # defers a trap until the foreground command returns, so the `sleep` inside the
+        # command substitution keeps running and the script sits there for its full duration.
+        proc = subprocess.Popen(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not any(tmpdir.iterdir()):
+            time.sleep(0.05)
+        assert any(tmpdir.iterdir()), "the wrapper never created its diagnostic temp file"
+
+        os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired as exc:
+            proc.kill()
+            proc.wait(timeout=10)
+            raise AssertionError("the wrapper did not exit on SIGINT") from exc
+
+        leftovers = list(tmpdir.iterdir())
+        assert leftovers == [], f"interrupted run stranded {leftovers} in TMPDIR"
+
+    def test_a_nonzero_exit_is_not_trusted_even_with_a_version_on_stdout(
+        self, tmp_path: Path
+    ) -> None:
+        """The exit status is its own gate. A CLI that prints a plausible version and then dies
+        has not answered the question -- and without this check, parsing stdout alone would
+        accept it."""
+        d = self._stub(tmp_path, 'echo "blastbox 9.9.9"\nexit 1\n')
+        r = _run(d, "sometag", "--dry-run")
+        assert r.returncode == 2, "a failed `version` was trusted because stdout looked right"
+        assert "no usable `version` output" in r.stderr
+
+    def test_a_zero_exit_with_only_stderr_noise_does_not_pass(self, tmp_path: Path) -> None:
+        """Exit 0 but nothing on stdout: stderr must not be scavenged for a number."""
+        d = self._stub(tmp_path, 'echo "note: /opt/python3.11/lib warming up" >&2\nexit 0\n')
+        r = _run(d, "sometag", "--dry-run")
+        assert r.returncode == 2
+        assert "no usable `version` output" in r.stderr
+
+    def test_stderr_noise_beside_a_good_stdout_version_is_ignored(self, tmp_path: Path) -> None:
+        """The version comes from stdout; a warning mentioning python3.11 must not become it."""
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            '  echo "warning: /usr/lib/python3.11/site-packages deprecation" >&2\n'
+            f'  echo "blastbox {BB_MIN}"\n'
+            "  exit 0\n"
+            "fi\n"
+            'printf "%s\\n" "$@"\n',
+        )
+        r = _run(d, "sometag", "--dry-run")
+        assert "no usable `version` output" not in r.stderr
+        assert "--dry-run" in r.stdout
