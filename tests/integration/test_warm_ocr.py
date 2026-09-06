@@ -49,9 +49,13 @@ def test_warm_helper_matches_direct_tesserocr(text_png):
     a direct in-process tesserocr call (same engine, same image)."""
     from tesserocr import PSM, PyTessBaseAPI
 
-    from clippyshot.ocr_warm import WarmOCR
+    from clippyshot.ocr_warm import WarmOCR, tessdata_dir
 
-    api = PyTessBaseAPI(lang="eng", psm=PSM.AUTO)
+    # Resolve tessdata the way the helper does, rather than assuming the caller's
+    # environment sets TESSDATA_PREFIX. A bare PyTessBaseAPI() fails with
+    # "invalid tessdata path: ./" on any host that does not, which fails this
+    # test on its own CONTROL arm and says nothing about the helper.
+    api = PyTessBaseAPI(lang="eng", psm=PSM.AUTO, path=tessdata_dir() or "")
     api.SetVariable("user_defined_dpi", "150")
     api.SetImageFile(str(text_png))
     direct = (api.GetUTF8Text() or "").rstrip("\n")
