@@ -619,6 +619,39 @@ class TestAFailedVersionCannotSatisfyTheFloor:
             "temp paths must come from mktemp, not from another temp path: " + "; ".join(offenders)
         )
 
+    def test_the_wrapper_runs_in_a_shell_where_bashpid_is_unset(self, stub_cli: Path) -> None:
+        """The same guard, EXECUTED -- which turns out to be possible after all.
+
+        `unset BASHPID` makes bash 4+ behave exactly as Bash 3.2 does for this purpose:
+        the variable stays unset in subshells, and `set -u` aborts on an unguarded
+        reference. So the failure mode is reproducible on this host without a Bash 3.2
+        binary, and the guard can be proven by running the wrapper rather than reading
+        it. Measured with the guard reverted to a bare `$BASHPID`:
+
+            normal bash run   rc=0
+            BASHPID unset     rc=2, "build_images.sh: line 311: BASHPID: unbound variable"
+
+        The lint check below stays rather than being replaced: it covers references on
+        paths this one invocation does not reach.
+        """
+        env = {
+            **os.environ,
+            "PATH": f"{stub_cli}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+        }
+        p = subprocess.run(
+            ["bash", "-c", 'unset BASHPID; . "$0" "$@"', str(SCRIPT), "tagX", "--dry-run"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            env=env,
+            check=False,
+        )
+        assert p.returncode == 0, (
+            "the wrapper aborted in a shell without BASHPID, which is what a Bash 3.2 "
+            f"host looks like: rc={p.returncode}\n{p.stderr[-800:]}"
+        )
+        assert "BASHPID" not in p.stderr, p.stderr[-800:]
+
     def test_bashpid_is_never_referenced_unguarded(self) -> None:
         """A lint-style check, and deliberately so: this one cannot be executed here.
 
