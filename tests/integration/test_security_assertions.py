@@ -15,6 +15,7 @@ from tests.conftest import (
 )
 
 MALICIOUS = FIXTURES_DIR / "malicious"
+SAFE = FIXTURES_DIR / "safe"
 
 pytestmark = [pytest.mark.integration]
 
@@ -101,19 +102,67 @@ def test_ole_link_does_not_read_outside_sandbox(converter, tmp_path: Path):
 @needs_soffice
 @needs_pdftoppm
 @needs_bwrap_userns
+@pytest.mark.parametrize(
+    "max_pages,expect_rendered,expect_truncated",
+    [(1, 1, True), (2, 2, False)],
+)
+def test_max_pages_truncation_is_reported(
+    converter, tmp_path: Path, max_pages: int, expect_rendered: int, expect_truncated: bool
+):
+    """Truncation, on an input whose page count this repo controls.
+
+    The spreadsheet test below cannot pin this down: how LibreOffice paginates a
+    CSV varies by host, and where it emits a single page nothing is truncated,
+    so a `truncated` regression survives there. An RTF with a hard `\\page`
+    break is two pages on any LibreOffice, which makes both sides of the
+    boundary reachable everywhere -- including max_pages == the page count,
+    where an off-by-one reads as truncation that did not happen.
+
+    (two_page.pdf, the obvious candidate, cannot be used: the converter rejects
+    PDF input outright -- `unsupported_type: magika=pdf`.)
+    """
+    src = tmp_path / "two_pages.rtf"
+    src.write_text(
+        "{\\rtf1\\ansi\\deff0 {\\fonttbl{\\f0 Helvetica;}}"
+        "\\f0\\fs24 Page one.\\page Page two.}"
+    )
+    out = tmp_path / "out"
+    converter.convert(
+        src, out, ConvertOptions(limits=Limits(timeout_s=120, max_pages=max_pages))
+    )
+    render = json.loads((out / "metadata.json").read_text())["render"]
+    assert render["page_count_total"] == 2
+    assert render["page_count_rendered"] == expect_rendered
+    assert render["truncated"] is expect_truncated
+
+
+@needs_soffice
+@needs_pdftoppm
+@needs_bwrap_userns
 def test_max_pages_truncation_on_spreadsheet(converter, tmp_path: Path):
     src = MALICIOUS / "sleeper.csv"
     if not src.exists():
         pytest.skip("malicious fixture not built")
     out = tmp_path / "out"
+    max_pages = 1
     converter.convert(
         src,
         out,
-        ConvertOptions(limits=Limits(timeout_s=120, max_pages=1)),
+        ConvertOptions(limits=Limits(timeout_s=120, max_pages=max_pages)),
     )
-    meta = json.loads((out / "metadata.json").read_text())
-    assert meta["render"]["page_count_rendered"] == 1
-    assert meta["render"]["truncated"] is True
+    render = json.loads((out / "metadata.json").read_text())["render"]
+
+    # How LibreOffice paginates a 20k-row CSV is its business, not ours: on this
+    # host the whole file comes out as ONE 13x29632px page, on the Docker image
+    # it is many. Asserting `truncated is True` therefore fails where nothing
+    # needed truncating -- a fact about the renderer, dressed up as a security
+    # regression. What max_pages actually promises is a relationship, so assert
+    # that: never more than the limit, everything that existed when it fits, and
+    # `truncated` exactly when pages were dropped.
+    total = render["page_count_total"]
+    assert render["page_count_rendered"] == min(total, max_pages)
+    assert render["page_count_rendered"] >= 1, "a page of content must survive"
+    assert render["truncated"] is (total > max_pages)
 
 
 @needs_soffice
