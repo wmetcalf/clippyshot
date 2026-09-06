@@ -188,10 +188,30 @@ def test_timeout_kills_long_running_conversion(converter, tmp_path: Path):
 @needs_soffice
 @needs_pdftoppm
 @needs_bwrap_userns
-def test_autoopen_macro_does_not_execute(converter, tmp_path: Path):
-    """A document with a Document_Open Basic macro that would write to a
-    sentinel path must NOT execute the macro under our hardened LO profile
-    (MacroSecurityLevel=4, DisableMacrosExecution=true)."""
+def test_macro_document_writes_nothing_to_the_host(converter, tmp_path: Path):
+    """Converting a document whose Basic macro writes /tmp/clippyshot-macro-pwned
+    must leave nothing on the HOST filesystem.
+
+    Named for what it can actually prove. It used to be called
+    test_autoopen_macro_does_not_execute and its failure message blamed
+    MacroSecurityLevel / DisableMacrosExecution, neither of which it can
+    detect a regression in. Two measurements, both on this LibreOffice
+    (24.2.7.2):
+
+      * Removing MacroSecurityLevel, DisableMacrosExecution and OfficeBasic from
+        the hardened profile entirely -> this test still passed.
+      * Running soffice --headless --convert-to on the same fixture with a
+        DEFAULT profile and NO sandbox -> the sentinel is still never written.
+        LibreOffice does not fire Document_Open during a headless conversion,
+        so macro execution is not reachable on this path at all.
+
+    On top of that the sandbox mounts /tmp as a tmpfs (bwrap --tmpfs /tmp), so a
+    sentinel written inside it could not reach the host anyway.
+
+    What remains, and is worth keeping, is the host-isolation claim: whatever
+    LibreOffice does with this document, nothing appears at that path outside
+    the sandbox. The profile settings themselves are asserted directly, and
+    falsifiably, in tests/unit/test_libreoffice_profile.py."""
     src = MALICIOUS / "macro_autoopen.odt"
     if not src.exists():
         pytest.skip("malicious fixture macro_autoopen.odt not built")
@@ -210,16 +230,15 @@ def test_autoopen_macro_does_not_execute(converter, tmp_path: Path):
             ConvertOptions(limits=Limits(timeout_s=60, max_pages=2)),
         )
     finally:
-        # Inside the sandbox the macro CANNOT see /tmp on the host (it's
-        # in a tmpfs in the sandbox), so this is also a "did anything escape
-        # the sandbox" test. The sentinel must not exist on the host either.
-        macro_executed = sentinel.exists()
-        if macro_executed:
+        # The sandbox gives the guest its own /tmp, so this is the
+        # escape check: the sentinel must not exist on the host.
+        wrote_to_host = sentinel.exists()
+        if wrote_to_host:
             sentinel.unlink()  # cleanup before asserting so the next run is clean
 
-    assert not macro_executed, (
-        "AutoOpen macro executed and wrote sentinel — MacroSecurityLevel=4 "
-        "and/or DisableMacrosExecution=true is not effective"
+    assert not wrote_to_host, (
+        "the conversion wrote /tmp/clippyshot-macro-pwned on the HOST — "
+        "something escaped the sandbox, whose /tmp is a tmpfs"
     )
 
 

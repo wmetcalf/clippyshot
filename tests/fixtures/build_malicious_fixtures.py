@@ -95,7 +95,7 @@ def build_macro_autoopen_odt() -> None:
 
     When loaded by LibreOffice, the macro would write a sentinel file to
     /tmp/clippyshot-macro-pwned.  Under our hardened profile
-    (MacroSecurityLevel=4, DisableMacrosExecution=true) the macro must NOT
+    (MacroSecurityLevel=3, DisableMacrosExecution=true) the macro must NOT
     execute — the integration test asserts the sentinel file is absent after
     conversion.
     """
