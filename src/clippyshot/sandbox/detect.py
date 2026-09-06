@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Callable
 
@@ -166,3 +167,63 @@ def select_sandbox(
     raise SandboxUnavailable(
         f"no sandbox backend available; last error: {last_error}"
     )
+
+
+# Layers applied to EVERY command, as opposed to a tier where the boundary is the
+# container or guest around the whole worker.
+#
+# `nono` counts. `NonoWrappedSandbox.run()` is `inner.run(self.wrap.apply(request))` --
+# Landlock applied per request -- so `container+nono` confines each conversion even
+# though the container is the outer boundary, and a warm server started outside it skips
+# that layer exactly as it would skip nsjail's (codex).
+_PER_CALL_BACKENDS = frozenset({"nsjail", "bwrap", "nono"})
+
+
+def sandboxes_each_call(sandbox: object) -> bool:
+    """Does this selection wrap every individual command in its own sandbox?
+
+    Asked by the warm tiers before starting a persistent helper: where each cold
+    invocation is sandboxed, a long-lived server outside that wrapper would carry the
+    untrusted input past a boundary the cold path insists on.
+
+    Decoration-proof by construction. `CLIPPYSHOT_INNER_NONO=1` returns a
+    `NonoWrappedSandbox` whose name is `nsjail+nono`, and an exact-name check silently
+    stopped matching -- so the guard was off for exactly the deployment that had asked
+    for MORE confinement (codex). This checks each `+`-separated component AND walks the
+    `inner` chain, so a decorator that renames entirely is still seen through.
+    """
+    seen = 0
+    while sandbox is not None and seen < 8:   # bounded: a cycle must not hang warmup
+        name = str(getattr(sandbox, "name", "") or "")
+        if any(part in _PER_CALL_BACKENDS for part in name.split("+")):
+            return True
+        sandbox = getattr(sandbox, "inner", None)
+        seen += 1
+    return False
+
+
+def per_call_sandbox_possible() -> bool:
+    """Could a per-call sandbox be selected on this host, even though selection just failed?
+
+    Asked when `select_sandbox()` RAISES during warmup. The exception type cannot answer
+    it: `select_sandbox` turns a flaky smoketest into `SandboxUnavailable` too, so that
+    error means "none usable right now", not "none installed" (codex). Starting a warm
+    parser on it would be starting one on a transient failure, and `_build_converter()`
+    retries later -- possibly succeeding with nsjail, by which time the parser is already
+    outside it.
+
+    So this asks the host instead, which is stable across a flake: is a per-call backend
+    even POSSIBLE here? A warm FC/gVisor guest has no nsjail and no bwrap, so the answer
+    is no and the warm tier keeps working; a host that has them declines until selection
+    is answerable again.
+    """
+    # nono FIRST: it decorates whatever is selected, so it makes even a forced
+    # `container` per-call. Checking the forced backend first returned False for
+    # `CLIPPYSHOT_SANDBOX=container` + `CLIPPYSHOT_INNER_NONO=1`, which is precisely the
+    # combination the previous round was about.
+    if _env_truthy("CLIPPYSHOT_INNER_NONO"):
+        return True
+    forced = os.environ.get("CLIPPYSHOT_SANDBOX", "").strip().lower()
+    if forced:
+        return any(part in _PER_CALL_BACKENDS for part in forced.split("+"))
+    return bool(shutil.which("nsjail") or shutil.which("bwrap"))

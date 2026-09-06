@@ -127,9 +127,15 @@ class WarmOCR:
         python_bin: str = sys.executable,
         popen: Callable[..., subprocess.Popen] = subprocess.Popen,
         ready_timeout_s: float = 30.0,
+        sandboxed: bool = False,
     ) -> None:
         self._python_bin = python_bin
         self._popen = popen
+        # Whether this helper was started INSIDE the per-call sandbox (via
+        # `sandboxed_popen`). The converter needs to tell the two apart: a helper that is
+        # already confined must be kept, and dropping it would throw away the warm tier
+        # this repo just restored under nsjail/bwrap (#40, codex on #41).
+        self.sandboxed = sandboxed
         self._ready_timeout_s = ready_timeout_s
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()  # serialises ocr() over the single pipe

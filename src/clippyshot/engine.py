@@ -134,13 +134,55 @@ def _build_converter(uno_server: WarmConverter | None = None, ocr_helper=None):
     from clippyshot.detector import Detector
     from clippyshot.libreoffice.runner import LibreOfficeRunner
     from clippyshot.rasterizer import build_rasterizer
-    from clippyshot.sandbox.detect import select_sandbox
+    import logging
+
+    from clippyshot.sandbox.detect import sandboxes_each_call, select_sandbox
     from clippyshot.selftest import (
         detect_runtime_apparmor_profile,
         detect_soffice_apparmor_profile,
     )
 
     sandbox = select_sandbox()
+    # THE INVARIANT IS ENFORCED HERE, where the sandbox that will actually be used is
+    # known. Warmup asks the same question earlier, but the two selections are
+    # independent and the answer can differ between them -- inside an OCI worker that
+    # also ships nsjail, a transient failure of the nsjail candidate makes selection fall
+    # through to `container` at warmup, and a later selection can succeed with nsjail
+    # (codex). Warmup's guard saves the cost of starting a helper that must not be used;
+    # this one is what makes it true.
+    if sandboxes_each_call(sandbox):
+        # Drop only what is NOT already confined. `_warmup_ocr` starts its helper INSIDE
+        # this sandbox where the backend can host one (#40), and discarding that would
+        # throw away the warm tier restored there while protecting nothing (codex).
+        # There is no in-sandbox warm soffice yet -- that is #42 -- so the UNO server is
+        # unconditionally outside and always dropped.
+        def _reject(helper, label: str) -> None:
+            # STOP it, do not merely stop using it. Clearing the local leaves the process
+            # running -- an unsandboxed soffice alive on the box for the life of the
+            # worker, holding its memory, and reachable by anything that later picks the
+            # server up (codex). Best-effort: teardown must never fail a job.
+            dropped.append(label)
+            try:
+                helper.stop()
+            except Exception:  # noqa: BLE001
+                logging.getLogger("clippyshot.engine").warning(
+                    "could not stop the rejected warm %s helper", label, exc_info=True
+                )
+
+        dropped: list[str] = []
+        if uno_server is not None:
+            _reject(uno_server, "soffice")
+            uno_server = None
+        if ocr_helper is not None and not getattr(ocr_helper, "sandboxed", False):
+            _reject(ocr_helper, "ocr")
+            ocr_helper = None
+        if dropped:
+            logging.getLogger("clippyshot.engine").warning(
+                "dropping warm helpers (%s): %s sandboxes each call, and a helper "
+                "started outside it would carry untrusted input past that boundary",
+                ", ".join(dropped),
+                sandbox.name,
+            )
     return Converter(
         detector=Detector(),
         runner=LibreOfficeRunner(sandbox=sandbox, uno_server=uno_server),
@@ -273,6 +315,7 @@ class ClippyShotEngine:
         import atexit
         import logging
 
+
         if os.environ.get("CLIPPYSHOT_WARM_OCR", "").lower() not in ("1", "true", "yes"):
             return
         if os.environ.get("CLIPPYSHOT_OCR_ENGINE", "tesserocr").strip().lower() == "tesseract_cli":
@@ -289,25 +332,39 @@ class ClippyShotEngine:
         # the boundary and no per-call sandbox is in play, keeps its warm tier.
         # Sandboxing the helper ITSELF is the better answer and is open as #35.
         try:
-            from clippyshot.sandbox.detect import select_sandbox
+            from clippyshot.sandbox.detect import (
+                per_call_sandbox_possible,
+                sandboxes_each_call,
+                select_sandbox,
+            )
 
             sandbox = select_sandbox()
             backend = sandbox.name
+            per_call = sandboxes_each_call(sandbox)
         except Exception as exc:  # noqa: BLE001
-            # Undeterminable -- e.g. a forced backend this host cannot satisfy.
-            # Left OPEN rather than closed: the scanners fail on their own in
-            # this state, so declining here would disable the warm tier on a
-            # deployment whose selection simply is not resolvable at warmup,
-            # without making anything safer. Logged, because a silent
-            # fall-through is how the asymmetry this gate closes went unnoticed.
+            # Selection failed. The exception TYPE cannot say whether that means "nothing
+            # is installed" or "the smoketest flaked" -- `select_sandbox` reports both as
+            # SandboxUnavailable (codex) -- so ask the HOST, which is stable across a
+            # flake: could a per-call backend be selected here at all?
+            if per_call_sandbox_possible():
+                logging.getLogger("clippyshot.engine").warning(
+                    "warm-OCR declined: selection failed (%s) but this host can select a "
+                    "per-call sandbox, and a later retry may; using the tesseract CLI",
+                    exc,
+                )
+                return
+            # WARNING, not info: this is the branch that STARTS a warm parser on the
+            # belief that nothing confines each call. Legitimate in a warm guest, and
+            # exactly the line someone will look for when asking why a parser ran
+            # outside a sandbox.
             logging.getLogger("clippyshot.engine").warning(
-                "warm-OCR: could not determine the sandbox backend (%s); "
-                "starting the helper anyway -- verify this deployment does not "
-                "sandbox scanner calls per invocation",
+                "warm-OCR: selection failed (%s) and no per-call sandbox is possible on "
+                "this host; the guest is the boundary, starting the helper",
                 exc,
             )
             backend = ""
             sandbox = None
+            per_call = False
         # Under nsjail/bwrap the helper runs INSIDE the sandbox rather than being
         # declined. The cold path sandboxes each scanner call; a persistent helper
         # cannot mount a page directory that does not exist yet at spawn -- which is
@@ -315,7 +372,7 @@ class ClippyShotEngine:
         # the page travels as bytes, so the helper needs no job-filesystem access at
         # all (issue #35).
         popen = None
-        if backend in ("nsjail", "bwrap"):
+        if per_call:
             from clippyshot.sandbox.base import SpawningSandbox
 
             if not isinstance(sandbox, SpawningSandbox):
@@ -332,7 +389,9 @@ class ClippyShotEngine:
         try:
             from clippyshot.ocr_warm import WarmOCR
 
-            ocr_server = WarmOCR(popen=popen) if popen is not None else WarmOCR()
+            ocr_server = (
+                WarmOCR(popen=popen, sandboxed=True) if popen is not None else WarmOCR()
+            )
             ocr_server.start()
         except Exception as exc:  # noqa: BLE001 - non-fatal: cold CLI path
             logging.getLogger("clippyshot.engine").warning(
@@ -362,7 +421,59 @@ class ClippyShotEngine:
         import atexit
         import logging
 
+
         from clippyshot.libreoffice.profile import HardenedProfile
+
+        # Not where the deployment sandboxes each CONVERSION. nsjail and bwrap wrap every
+        # cold soffice invocation -- that is what the `clippyshot-soffice` AppArmor profile
+        # and the KAFEL seccomp policy are FOR -- and a warm server is a persistent process
+        # outside that wrapper. `LibreOfficeRunner` prefers it whenever it is ready, so
+        # enabling the warm tier there silently moved document parsing, the largest attack
+        # surface in this program, OUT of the sandbox the cold path beside it insists on.
+        #
+        # The same asymmetry was closed for warm OCR (#35). It matters more here: a page
+        # image reaches tesseract, a document reaches LibreOffice.
+        #
+        # The warm tiers are unaffected -- they run with CLIPPYSHOT_SANDBOX=container (see
+        # deploy/docker/docker-compose.gvisor.yml), where the guest itself is the boundary
+        # and no per-call sandbox is in play. Declining is the interim, not the end state:
+        # running the warm server INSIDE the sandbox is the better answer and needs a
+        # staging-mount design, because unoconvert takes file PATHS and a persistent
+        # helper's mounts are fixed before any job directory exists.
+        try:
+            from clippyshot.sandbox.detect import (
+                per_call_sandbox_possible,
+                sandboxes_each_call,
+                select_sandbox,
+            )
+
+            _selected = select_sandbox()
+            backend = _selected.name
+            per_call = sandboxes_each_call(_selected)
+        except Exception as exc:  # noqa: BLE001
+            # Ask the host, not the exception type -- see _warmup_ocr above.
+            if per_call_sandbox_possible():
+                logging.getLogger("clippyshot.engine").warning(
+                    "warm-UNO declined: selection failed (%s) but this host can select a "
+                    "per-call sandbox, and a later retry may; using the sandboxed cold "
+                    "soffice path",
+                    exc,
+                )
+                return
+            logging.getLogger("clippyshot.engine").warning(
+                "warm-UNO: selection failed (%s) and no per-call sandbox is possible on "
+                "this host; the guest is the boundary, starting the server",
+                exc,
+            )
+            backend = ""
+            per_call = False
+        if per_call:
+            logging.getLogger("clippyshot.engine").info(
+                "warm-UNO declined: %s sandboxes each conversion, and the warm server "
+                "would run outside it; using the sandboxed cold soffice path",
+                backend,
+            )
+            return
 
         # SECURITY: the warm soffice/unoserver MUST boot with the same hardened LibreOffice
         # profile the cold path writes (MacroSecurityLevel=3, DisableMacrosExecution=true, no
