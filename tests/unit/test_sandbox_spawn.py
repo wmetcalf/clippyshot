@@ -74,3 +74,34 @@ class TestBwrapPersistentRlimits:
         assert resource.RLIMIT_AS in calls, "memory bound dropped with the CPU deadline"
         assert resource.RLIMIT_FSIZE in calls, "file-size bound dropped with the CPU deadline"
         assert calls[resource.RLIMIT_CORE] == (0, 0)
+
+
+class TestBwrapPersistentSeccomp:
+    """A helper that lives for a whole slot is the LAST place to lose the syscall
+    denylist -- and `spawn()` first built its argv without the seccomp memfd `run()`
+    passes, so `--seccomp` was silently absent (codex)."""
+
+    def _spawn_argv(self, monkeypatch, *, bpf: bytes | None):
+        seen = {}
+
+        class FakePopen:
+            def __init__(self, argv, **kwargs):
+                seen["argv"] = argv
+                seen["kwargs"] = kwargs
+
+        monkeypatch.setattr(bwrap.shutil, "which", lambda _n: "/usr/bin/bwrap")
+        sb = bwrap.BwrapSandbox()
+        monkeypatch.setattr(sb, "_seccomp_bpf", bpf, raising=False)
+        monkeypatch.setattr(bwrap.subprocess, "Popen", FakePopen)
+        sb.spawn(_req())
+        return seen
+
+    def test_the_denylist_is_attached(self, monkeypatch):
+        seen = self._spawn_argv(monkeypatch, bpf=b"\x00" * 8)
+        assert "--seccomp" in seen["argv"], "the persistent helper runs unfiltered"
+        assert seen["kwargs"]["pass_fds"], "the bpf fd was not passed to the child"
+
+    def test_without_a_policy_nothing_is_claimed(self, monkeypatch):
+        seen = self._spawn_argv(monkeypatch, bpf=None)
+        assert "--seccomp" not in seen["argv"]
+        assert seen["kwargs"]["pass_fds"] == ()

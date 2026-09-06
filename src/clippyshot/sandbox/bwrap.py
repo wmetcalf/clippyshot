@@ -246,12 +246,28 @@ class BwrapSandbox:
         those bound a single moment, not a lifetime. Each request is bounded by the
         client.
         """
-        return subprocess.Popen(
-            self._build_argv(request),
-            preexec_fn=_apply_rlimits(request.limits, cpu_deadline=False),
-            close_fds=True,
-            **popen_kwargs,
-        )
+        # The seccomp memfd, exactly as `run()` builds it. Omitting it silently dropped
+        # `--seccomp` and left the LONG-LIVED image parser without the syscall denylist --
+        # a helper that lives for a whole slot is the last place to lose it (codex).
+        seccomp_fd: int | None = None
+        try:
+            if self._seccomp_bpf is not None:
+                seccomp_fd = os.memfd_create("clippyshot_seccomp", 0)
+                os.write(seccomp_fd, self._seccomp_bpf)
+                os.lseek(seccomp_fd, 0, os.SEEK_SET)
+                os.set_inheritable(seccomp_fd, True)
+            return subprocess.Popen(
+                self._build_argv(request, seccomp_fd=seccomp_fd),
+                preexec_fn=_apply_rlimits(request.limits, cpu_deadline=False),
+                close_fds=True,
+                pass_fds=() if seccomp_fd is None else (seccomp_fd,),
+                **popen_kwargs,
+            )
+        finally:
+            # The child inherited it at fork; this closes the parent's copy. A persistent
+            # helper outlives this call, so leaving it open would leak one fd per spawn.
+            if seccomp_fd is not None:
+                os.close(seccomp_fd)
 
     def _build_argv(self, req: SandboxRequest, *, seccomp_fd: int | None = None) -> list[str]:
         argv: list[str] = [
