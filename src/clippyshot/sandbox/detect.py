@@ -111,6 +111,13 @@ def select_sandbox(
         return _wrap(sb)
 
     last_error: Exception | None = None
+    # Why each backend was passed over, in order. The per-branch _log.debug calls
+    # below carry this already, but only in `extra=` and only at DEBUG -- the
+    # default formatter drops both, so in practice the reasons were unreachable:
+    # diagnosing a fleet worker meant re-running it under a debug harness, and the
+    # exception then named only the LAST backend's reason, hiding that the other
+    # two had failed for entirely different ones.
+    skipped: list[str] = []
     for name in ("nsjail", "bwrap", "container"):
         factory = factories[name]
         try:
@@ -122,6 +129,7 @@ def select_sandbox(
                 "sandbox backend unavailable",
                 extra={"backend": name, "error": str(e)},
             )
+            skipped.append(f"{name}: unavailable ({e})")
             continue
         try:
             smoke = sb.smoketest()
@@ -132,6 +140,7 @@ def select_sandbox(
                 "sandbox backend smoketest raised",
                 extra={"backend": name, "error": str(e)},
             )
+            skipped.append(f"{name}: smoketest raised {type(e).__name__} ({e})")
             continue
         if smoke.exit_code != 0 or smoke.killed:
             last_error = SandboxUnavailable(
@@ -146,6 +155,9 @@ def select_sandbox(
                     "stderr": smoke.stderr.decode(errors="replace")[:200],
                 },
             )
+            skipped.append(
+                f"{name}: smoketest exit={smoke.exit_code} killed={smoke.killed}"
+            )
             continue
         secure, reasons = _security_state(sb)
         if not secure:
@@ -156,16 +168,25 @@ def select_sandbox(
                     "sandbox backend rejected as insecure",
                     extra={"backend": name, "reasons": reasons},
                 )
+                skipped.append(f"{name}: insecure ({detail})")
                 continue
             _log.warning(
                 "sandbox backend selected in insecure mode",
                 extra={"backend": name, "reasons": reasons},
             )
-        _log.info("sandbox backend selected", extra={"backend": name})
+        if skipped:
+            _log.info(
+                "sandbox backend selected: %s (passed over %s)",
+                name, "; ".join(skipped),
+                extra={"backend": name, "skipped": skipped},
+            )
+        else:
+            _log.info("sandbox backend selected", extra={"backend": name})
         return _wrap(sb)
 
     raise SandboxUnavailable(
-        f"no sandbox backend available; last error: {last_error}"
+        "no sandbox backend available; "
+        + ("; ".join(skipped) if skipped else f"last error: {last_error}")
     )
 
 
