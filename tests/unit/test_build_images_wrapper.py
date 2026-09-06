@@ -1296,6 +1296,34 @@ class TestAFailedVersionCannotSatisfyTheFloor:
             "the bound kept the preamble and dropped the error: " + r.stderr[-300:]
         )
 
+    def test_a_version_from_an_expired_probe_is_not_trusted(self, tmp_path: Path) -> None:
+        """A hung CLI that traps the watchdog's TERM, prints a plausible version and exits 0 is
+        indistinguishable BY STATUS from one that simply answered -- so expiry is recorded by
+        the watchdog rather than inferred afterwards (codex)."""
+        d = self._stub(
+            tmp_path,
+            'if [ "$1" = version ]; then\n'
+            "  trap 'echo \"blastbox 99.0.0\"; exit 0' TERM\n"
+            "  sleep 300 &\n"
+            "  wait\n"
+            "fi\n"
+            'printf "%s\\n" "$@"\n',
+        )
+        env = {
+            **os.environ,
+            "PATH": f"{d}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "BLASTBOX_VERSION_TIMEOUT_S": "3",
+        }
+        r = subprocess.run(
+            ["bash", str(SCRIPT), "sometag", "--dry-run"],
+            capture_output=True, text=True, errors="replace", env=env, timeout=120, check=False,
+        )
+        assert r.returncode == 2, (
+            "a version printed by a probe that had already blown its deadline was accepted"
+        )
+        assert "no usable `version` output" in r.stderr
+        assert "build-images" not in r.stdout
+
     def test_a_legitimate_large_write_is_not_punished(self, tmp_path: Path) -> None:
         """RLIMIT_FSIZE is process-wide, not a cap on the two capture files: a CLI that appends
         to a cache or log larger than the limit takes SIGXFSZ and is rejected as unusable

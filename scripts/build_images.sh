@@ -156,8 +156,10 @@ BB_PID=""
 # while the real one is still unassigned, so a signal in that window would TERM a
 # process group the caller happens to name (codex).
 _bb_watchdog_pid=""
+BB_EXPIRY_FILE=""
 _bb_version_cleanup() {
-  rm -f "$BB_ERR_FILE" ${BB_OUT_FILE:+"$BB_OUT_FILE"} ${BB_PID_FILE:+"$BB_PID_FILE"}
+  rm -f "$BB_ERR_FILE" ${BB_OUT_FILE:+"$BB_OUT_FILE"} ${BB_PID_FILE:+"$BB_PID_FILE"} \
+        ${BB_EXPIRY_FILE:+"$BB_EXPIRY_FILE"}
 }
 # `blastbox version` runs in the BACKGROUND and is waited on, which is the only
 # arrangement that survives all three problems at once:
@@ -228,6 +230,9 @@ trap '_bb_version_kill; _bb_version_cleanup; trap - QUIT; kill -QUIT $$' QUIT
 # nothing for it. A flood on either stream now dies of SIGXFSZ at 512 KiB.
 BB_OUT_FILE="$(mktemp)"
 BB_PID_FILE="$(mktemp)"
+# Derived, not mktemp'd: this file must exist ONLY if the watchdog created it, and
+# mktemp would create it up front.
+BB_EXPIRY_FILE="$BB_PID_FILE.expired"
 # BOUND THE PROBE'S DURATION, rather than chase the ways a CLI can block. `</dev/null`
 # does not cover a CLI that opens /dev/tty itself, and `set -m` means such a read is
 # STOPPED by SIGTTIN and `wait` never returns (codex). Rather than add a mechanism per
@@ -330,6 +335,11 @@ set -m
     kill -0 "$BB_PID" 2>/dev/null || exit 0
     _bb_left=$((_bb_left - 1))
   done
+  # RECORD the expiry rather than let it be inferred from the exit status. A hung CLI
+  # that traps the watchdog's TERM, prints a plausible version and exits 0 is
+  # indistinguishable by status from one that simply answered -- so the wrapper would
+  # accept a version from a probe that had already blown its deadline (codex).
+  : > "$BB_EXPIRY_FILE"
   kill -TERM -- "-$BB_PID" 2>/dev/null || true
   sleep 5
   kill -KILL -- "-$BB_PID" 2>/dev/null || true ) >/dev/null 2>&1 &
@@ -349,9 +359,14 @@ _bb_watchdog_pid=""
 # signal a group that now belongs to someone else. When our watchdog fired, any
 # stubborn descendant is still holding that pgid, so it cannot have been recycled
 # (codex).
-case "$BB_RC" in
-  143|137) kill -KILL -- "-$BB_PID" 2>/dev/null || true ;;
-esac
+_bb_deadline_expired=""
+if [ -e "$BB_EXPIRY_FILE" ]; then
+  _bb_deadline_expired=1
+  # Sweep only here. If the probe exited on its own, `wait` has reaped it and the
+  # process-group id is free to be recycled; when the watchdog fired, a stubborn
+  # descendant is still holding it (codex).
+  kill -KILL -- "-$BB_PID" 2>/dev/null || true
+fi
 # The version is grepped from the WHOLE file, which `ulimit -f` has already capped
 # at 512 KiB. Reading a 4 KiB prefix instead meant a CLI that prints a long banner
 # before its version was rejected as unusable even though it exited zero (codex).
@@ -368,13 +383,21 @@ esac
 # that error at the END -- so the bound threw away the only part worth printing
 # (codex).
 _bb_tail_of_line='{ if (length($0) > 500) print substr($0, length($0) - 499); else print }'
-BB_VERSION_OUT="$(tail -c 65536 "$BB_OUT_FILE" 2>/dev/null | tail -n 20 | awk "$_bb_tail_of_line" || true)"
-BB_VERSION_ERR="$(tail -c 65536 "$BB_ERR_FILE" 2>/dev/null | tail -n 20 | awk "$_bb_tail_of_line" || true)"
+# `LC_ALL=C awk`: the byte-wise `tail -c` can split a multibyte character, and a
+# locale-sensitive awk then chokes on the invalid leading byte. Bytes are the right
+# unit for a bounded diagnostic anyway (codex).
+BB_VERSION_OUT="$(tail -c 65536 "$BB_OUT_FILE" 2>/dev/null | tail -n 20 \
+  | LC_ALL=C awk "$_bb_tail_of_line" || true)"
+BB_VERSION_ERR="$(tail -c 65536 "$BB_ERR_FILE" 2>/dev/null | tail -n 20 \
+  | LC_ALL=C awk "$_bb_tail_of_line" || true)"
 # Everything read out of the files happens HERE, before the cleanup below deletes
 # them -- including the version itself, which is grepped from the whole capped
 # file rather than from a truncated copy of it.
 BB_HAVE=""
-if [ "$BB_RC" -eq 0 ]; then
+# An expired probe is not trusted whatever it exited with. A hung CLI that traps the
+# watchdog's TERM, prints a plausible version and exits 0 looks by status exactly
+# like one that simply answered (codex).
+if [ "$BB_RC" -eq 0 ] && [ -z "$_bb_deadline_expired" ]; then
   BB_HAVE="$(grep -aoE '[0-9]+(\.[0-9]+)+' "$BB_OUT_FILE" 2>/dev/null | head -1 || true)"
 fi
 _bb_version_cleanup
