@@ -1,0 +1,53 @@
+# Declarative image chain for ClippyShot warm/cold tiers.
+#
+# Rebuild everything (images + Firecracker rootfs) with:
+#
+#     BLASTBOX_SRC=/home/coz/bb-v0140 \
+#     CLIPPYSHOT_FC_DIR=/home/coz/clippyshot-fc \
+#     blastbox build-images /home/coz/clippyshot --tag <tag>     # --dry-run to inspect
+#
+# WHY THIS FILE EXISTS: the FC rootfs is an ext4 exported from an image. When that
+# export is done by hand it drifts from the running host tier, and the symptom is
+# silent -- the microVM boots, the guest never signals READY, and every warm job
+# dies on the 300s timeout while the API still reports the engine healthy.
+# That is exactly how this deployment broke (rootfs Jul-20 vs host Sep-18).
+#
+# $BLASTBOX_SRC must be a blastbox checkout at the SAME version this engine pins
+# in deploy/docker/Dockerfile (`blastbox[s3]==X`). The guest agent is installed
+# FROM THAT TREE, so a mismatch reintroduces the skew this file prevents.
+
+[engine]
+name = "clippyshot"
+
+# 1. Host/API tier: LibreOffice + clippyshot + blastbox[host] (pinned in the Dockerfile).
+[[image]]
+name       = "clippyshot"
+dockerfile = "deploy/docker/Dockerfile"
+base       = "ubuntu:24.04"
+context    = "."
+
+# 2. Cold worker: blastbox core only (no [host]); Dockerfile lives in blastbox.
+[[image]]
+name        = "clippyshot-cold-worker"
+dockerfile  = "deploy/docker/Dockerfile.clippyshot-cold-worker"
+base        = "clippyshot"
+context     = "$BLASTBOX_SRC"
+source_repo = "$BLASTBOX_SRC"
+
+# 3. Firecracker guest: adds the blastbox FC agent + /init + warm-UNO soffice.
+[[image]]
+name        = "clippyshot-fc-worker"
+dockerfile  = "deploy/firecracker/Dockerfile.clippyshot"
+base        = "clippyshot"
+context     = "$BLASTBOX_SRC"
+source_repo = "$BLASTBOX_SRC"
+build_args  = { ENGINE = "clippyshot" }
+
+# 4. The ext4 the microVM boots. `requires` is the guard that would have caught
+#    the outage: an image without /init cannot boot and is refused here.
+[[rootfs]]
+kind     = "ext4"
+image    = "clippyshot-fc-worker"
+dest     = "$CLIPPYSHOT_FC_DIR/rootfs.ext4"
+size_mib = 6144
+requires = ["/init", "/opt/blastbox/run_guest.py", "/opt/blastbox/engine"]

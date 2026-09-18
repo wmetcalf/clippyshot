@@ -1,9 +1,13 @@
 # syntax=docker/dockerfile:1.7
 
+# Pinnable base so `blastbox build-images` can stamp the digest it actually built
+# against. Without this ARG docker silently ignores --build-arg BASE_IMAGE.
+ARG BASE_IMAGE=ubuntu:24.04
+
 #####################
 # Stage 1 — builder #
 #####################
-FROM ubuntu:24.04 AS builder
+FROM ${BASE_IMAGE} AS builder
 ARG NSJAIL_REF=3.4
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -46,7 +50,7 @@ RUN curl -fsSL -o /tmp/nono.tgz \
 #####################
 # Stage 2 — runtime #
 #####################
-FROM ubuntu:24.04 AS runtime
+FROM ${BASE_IMAGE} AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -150,7 +154,7 @@ COPY pyproject.toml /tmp/build/pyproject.toml
 COPY src /tmp/build/src
 RUN python3 -m venv /opt/clippyshot \
     && /opt/clippyshot/bin/pip install --upgrade pip \
-    && /opt/clippyshot/bin/pip install '/tmp/build[host]' \
+    && /opt/clippyshot/bin/pip install '/tmp/build[host]' 'blastbox[s3]==0.1.40' \
     && rm -rf /tmp/build
 
 ENV PATH=/opt/clippyshot/bin:$PATH
