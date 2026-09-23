@@ -51,3 +51,24 @@ image    = "clippyshot-fc-worker"
 dest     = "$CLIPPYSHOT_FC_DIR/rootfs.ext4"
 size_mib = 6144
 requires = ["/init", "/opt/blastbox/run_guest.py", "/opt/blastbox/engine"]
+
+# 5. gVisor warm guest: the KVM-less C/R tier. base_arg is "BASE", NOT the
+#    default "BASE_IMAGE" -- blastbox gVisor Dockerfiles use the shorter name and
+#    docker silently discards a --build-arg the Dockerfile never declares.
+[[image]]
+name        = "clippyshot-warm-gvisor"
+dockerfile  = "deploy/gvisor/Dockerfile.clippyshot"
+base        = "clippyshot-cold-worker"
+base_arg    = "BASE"
+context     = "$BLASTBOX_SRC"
+source_repo = "$BLASTBOX_SRC"
+build_args  = { ENGINE = "clippyshot.engine:ClippyShotEngine" }
+
+# 6. runsc restores a DIRECTORY tree, not an ext4.
+[[rootfs]]
+kind     = "dir"
+image    = "clippyshot-warm-gvisor"
+dest     = "$CLIPPYSHOT_GVISOR_DIR/rootfs"
+# No /init: runsc launches BLASTBOX_GVISOR_WARM_ARGV directly; /init is the
+# Firecracker guest s PID 1 and does not exist in this image.
+requires = ["/opt/blastbox/run_warm.py", "/opt/blastbox/engines.py", "/opt/blastbox/engine", "/in", "/out", "/ctrl"]
