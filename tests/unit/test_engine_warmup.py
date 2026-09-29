@@ -91,7 +91,9 @@ def test_warmup_writes_and_passes_hardened_profile(monkeypatch, tmp_path):
     assert xcu.exists(), "warmup() must write the hardened profile before starting the server"
     body = xcu.read_text()
     assert "DisableMacrosExecution" in body and "MacroSecurityLevel" in body
-    assert captured["user_installation"] == "file://%s" % prof.resolve()
+    # A PATH for unoserver: it runs Path(--user-installation).as_uri() itself, and a URL passed
+    # through that reads as relative, so unoserver exited and every job went cold.
+    assert captured["user_installation"] == str(prof.resolve())
 
 
 def test_warmup_fails_closed_when_profile_unwritable(monkeypatch):
@@ -319,3 +321,32 @@ def test_detonate_maps_detection_error_to_rejected(tmp_path):
     assert res.artifacts == []
     assert any(w.code == "rejected" for w in res.warnings)
     assert "unsupported_type" in res.warnings[0].message
+
+
+def test_warmup_hands_unoserver_the_exact_profile_dir_even_with_url_metacharacters(
+        monkeypatch, tmp_path):
+    """A URL round-trip is lossy: '#' split off as a fragment, '%20' decoded to a space -- and
+    unoserver then started on a DIFFERENT, unhardened directory, bypassing the macro lockdown."""
+    monkeypatch.setenv("CLIPPYSHOT_WARM_UNO", "1")
+    prof = tmp_path / "x#y a%20b"
+    monkeypatch.setenv("CLIPPYSHOT_WARM_PROFILE_DIR", str(prof))
+    captured = {}
+
+    class FakeServer:
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def convert(self, *a):
+            pass
+
+    def _factory(*a, **k):
+        captured["user_installation"] = k.get("user_installation")
+        return FakeServer()
+
+    monkeypatch.setattr("clippyshot.libreoffice.uno.UnoServer", _factory)
+    ClippyShotEngine().warmup()
+    assert captured["user_installation"] == str(prof.resolve())
+    assert (prof / "user" / "registrymodifications.xcu").exists()

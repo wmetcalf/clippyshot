@@ -343,7 +343,9 @@ class ClippyShotEngine:
         else:
             from clippyshot.libreoffice.uno import UnoServer
 
-            server = UnoServer(user_installation=user_installation)
+            # A PATH, not the URL: unoserver builds the URL itself (Path(arg).as_uri()), and a URL
+            # passed through that reads as relative -- unoserver exited and every job went cold.
+            server = UnoServer(user_installation=str(profile_dir.resolve()))
         try:
             server.start()
         except Exception as exc:
