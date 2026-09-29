@@ -27,6 +27,21 @@ from typing import Protocol
 from clippyshot.errors import LibreOfficeError
 
 
+def _as_path(user_installation: str) -> str:
+    """unoserver's --user-installation is a filesystem PATH (it calls ``Path(arg).as_uri()``).
+
+    Callers hold the ``file://`` URL form that LibreOffice's ``-env:UserInstallation`` wants
+    (the pipe server passes it straight through). Handed to unoserver as-is, the URL reads as a
+    relative path and unoserver exits at startup -- the warm tier silently fell back to cold
+    LibreOffice for every job.
+    """
+    if user_installation.startswith("file://"):
+        from urllib.parse import unquote, urlparse
+
+        return unquote(urlparse(user_installation).path)
+    return user_installation
+
+
 class WarmConverter(Protocol):
     """Structural type for a warm conversion server. Both :class:`UnoServer`
     (FC tier: TCP ``unoserver``) and ``SofficePipeServer`` (gVisor C/R tier:
@@ -168,7 +183,7 @@ class UnoServer:
             "--port", str(self._port),
         ]
         if self._user_installation:
-            argv += ["--user-installation", self._user_installation]
+            argv += ["--user-installation", _as_path(self._user_installation)]
         return argv
 
     def start(self) -> None:

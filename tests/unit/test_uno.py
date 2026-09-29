@@ -285,3 +285,17 @@ def test_convert_via_uno_unlinks_stale_output(tmp_path):
     convert_via_uno(UnoServer(), tmp_path / "a.docx", out, "docx", run=fake_run)
     assert seen["existed_at_run"] is False
     assert out.read_bytes() == b"%PDF new"
+
+
+def test_unoserver_gets_a_path_even_when_handed_a_file_url():
+    """unoserver 3.7 runs Path(--user-installation).as_uri(): a file:// URL (what the engine and
+    the pipe server use for -env:UserInstallation) is read as a RELATIVE path and unoserver dies
+    with "relative path can't be expressed as a file URI" -- so the warm tier never started and
+    every job fell back to cold LibreOffice."""
+    argv = UnoServer(user_installation="file:///tmp/.clippyshot-warm-profile").argv()
+    assert argv[argv.index("--user-installation") + 1] == "/tmp/.clippyshot-warm-profile"
+
+
+def test_unoserver_decodes_a_percent_encoded_file_url():
+    argv = UnoServer(user_installation="file:///tmp/a%20b").argv()
+    assert argv[argv.index("--user-installation") + 1] == "/tmp/a b"
