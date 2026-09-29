@@ -154,7 +154,7 @@ COPY pyproject.toml /tmp/build/pyproject.toml
 COPY src /tmp/build/src
 RUN python3 -m venv /opt/clippyshot \
     && /opt/clippyshot/bin/pip install --upgrade pip \
-    && /opt/clippyshot/bin/pip install '/tmp/build[host]' 'blastbox[s3]==0.1.42' \
+    && /opt/clippyshot/bin/pip install '/tmp/build[host]' 'blastbox[s3]==0.1.43' \
     && rm -rf /tmp/build
 
 ENV PATH=/opt/clippyshot/bin:$PATH
