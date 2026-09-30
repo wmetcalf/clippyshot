@@ -75,5 +75,9 @@ class HardenedProfile:
         return "".join(parts)
 
     def url(self) -> str:
-        """Return the file:// URL form expected by `-env:UserInstallation`."""
-        return f"file://{self.root.resolve()}"
+        """Return the file:// URL form expected by `-env:UserInstallation`.
+
+        Percent-encoded (Path.as_uri): an f-string left '#', '?' and '%' raw, so any URL reader
+        resolved a DIFFERENT directory than the one hardened here.
+        """
+        return self.root.resolve().as_uri()

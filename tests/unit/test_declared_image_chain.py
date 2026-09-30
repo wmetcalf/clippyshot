@@ -94,16 +94,20 @@ def test_the_declared_base_matches_the_dockerfiles_own_default() -> None:
     assert spec.base == declared.group(1)
 
 
-def test_the_gvisor_shim_uses_its_own_arg_name() -> None:
-    """`BASE`, not `BASE_IMAGE` -- it is the shared shim, not an engine file.
+def test_the_gvisor_guest_uses_its_own_arg_name() -> None:
+    """`BASE`, not `BASE_IMAGE` -- blastbox's gVisor Dockerfiles use the shorter name.
 
     Not a style note: docker ignores the wrong one silently, so this pins
     nothing and stamps a digest the build never used. Recorded here because a
     copy-paste from another engine's spec is the obvious way to break it.
+
+    Built from blastbox's clippyshot-specific gVisor Dockerfile on the COLD WORKER: the generic
+    Dockerfile.shim on the host image built a guest the warm tier could not serve (toolz2).
     """
-    shim = next(i for i in PLAN.images if i.name == "clippyshot-warm-gvisor")
-    assert shim.base_arg == "BASE"
-    assert shim.dockerfile.endswith("Dockerfile.shim")
+    guest = next(i for i in PLAN.images if i.name == "clippyshot-warm-gvisor")
+    assert guest.base_arg == "BASE"
+    assert guest.dockerfile.endswith("deploy/gvisor/Dockerfile.clippyshot")
+    assert guest.base == "clippyshot-cold-worker"
 
 
 def test_the_firecracker_rootfs_declares_what_it_must_contain() -> None:

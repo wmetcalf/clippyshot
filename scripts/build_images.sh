@@ -21,7 +21,7 @@ set -euo pipefail
 # Declared ONCE, above the first message that mentions it. Written out by hand
 # in two places, this drifted before: the script told an operator to install a
 # version it then rejected.
-BB_MIN=0.1.39
+BB_MIN=0.1.43
 
 # One check for EVERY way a version can arrive: the legacy bare argument and
 # the `--blastbox-version V` / `--blastbox-version=V` option, which is
