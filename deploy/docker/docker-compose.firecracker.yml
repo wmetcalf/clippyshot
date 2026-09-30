@@ -80,7 +80,10 @@ services:
       - "${CLIPPYSHOT_FC_DIR:-/var/lib/clippyshot-fc}:/var/lib/blastbox-fc:ro"
     tmpfs:
       # FC warm-base memory snapshot (BLASTBOX_FC_SCRATCH defaults to /tmp/blastbox-fc-slots,
-      # not env-overridable) + per-slot outdisks. tmpfs = fast warm restores; sized for 16 slots.
-      - /tmp:rw,exec,nosuid,size=20g
+      # not env-overridable) + per-slot outdisks. tmpfs = fast warm restores. Sized for up to
+      # 24 slots: TWO ~4.6g bases (the max-age refresh builds the new base beside the serving
+      # one) + 24 x 600m outdisks + headroom. At 20g a 24-slot pool had ~1g left idle, and a
+      # refresh would have hit ENOSPC. Grow this WITH BLASTBOX_FC_WARM_SIZE.
+      - /tmp:rw,exec,nosuid,size=28g
     networks:
       - backend
