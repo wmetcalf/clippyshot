@@ -22,49 +22,48 @@ base = "ubuntu:24.04"
 # the image would then install a version its own stamp does not name.
 build_args = { BLASTBOX_VERSION = "$BLASTBOX_VERSION" }
 
-# Built from blastbox's tree, and stamped with THAT tree's revision -- ours
-# would name a commit that does not contain the file which built them.
+# Cold worker: blastbox core only (no [host]); its Dockerfile lives in blastbox.
 [[image]]
 name = "clippyshot-cold-worker"
 dockerfile = "deploy/docker/Dockerfile.clippyshot-cold-worker"
 base = "clippyshot"
 context = "$BLASTBOX_SRC"
+source_repo = "$BLASTBOX_SRC"
 
-# NOTE THE ARG NAME. This one is `BASE`, not `BASE_IMAGE`, because it is the
-# shared gVisor shim rather than an engine-specific file. docker silently
-# ignores a --build-arg the Dockerfile does not declare, so getting this wrong
-# pins nothing and stamps a digest the build never used; `blastbox build-images`
-# refuses rather than building that.
-[[image]]
-name = "clippyshot-warm-gvisor"
-dockerfile = "deploy/gvisor/Dockerfile.shim"
-base = "clippyshot"
-base_arg = "BASE"
-context = "$BLASTBOX_SRC"
-
+# Firecracker guest: the blastbox FC agent + /init + warm-UNO soffice.
 [[image]]
 name = "clippyshot-fc-worker"
 dockerfile = "deploy/firecracker/Dockerfile.clippyshot"
 base = "clippyshot"
 context = "$BLASTBOX_SRC"
+source_repo = "$BLASTBOX_SRC"
+build_args = { ENGINE = "clippyshot" }
 
-# The DEFAULTS match the compose files, which are what actually mount these.
-# They were taken from blastbox's redeploy-warm.sh, whose presets point at
-# /home/coz/... -- so an unset build wrote where nothing reads. The deployed
-# .env sets both variables, so in practice they agreed; a default build did not.
+# gVisor warm guest, layered on the COLD WORKER with blastbox's clippyshot-specific Dockerfile
+# (run_warm.py + engines.py + the engine selector). The generic Dockerfile.shim on the host image
+# built a guest the warm tier could not run; this one is proven on toolz2 (warm, 8/8).
+# base_arg is "BASE": blastbox's gVisor Dockerfiles use the shorter name, and docker silently
+# discards a --build-arg the Dockerfile never declares.
+[[image]]
+name = "clippyshot-warm-gvisor"
+dockerfile = "deploy/gvisor/Dockerfile.clippyshot"
+base = "clippyshot-cold-worker"
+base_arg = "BASE"
+context = "$BLASTBOX_SRC"
+source_repo = "$BLASTBOX_SRC"
+build_args = { ENGINE = "clippyshot.engine:ClippyShotEngine" }
+
+# runsc restores a DIRECTORY tree. No /init: runsc launches the warm argv directly.
 [[rootfs]]
 kind = "dir"
 image = "clippyshot-warm-gvisor"
 dest = "${CLIPPYSHOT_GVISOR_DIR:-/var/lib/clippyshot-gvisor}/rootfs"
+requires = ["/opt/blastbox/run_warm.py", "/opt/blastbox/engines.py", "/opt/blastbox/engine", "/in", "/out", "/ctrl"]
 
+# The ext4 the microVM boots. `requires` refuses an image that cannot boot or serve.
 [[rootfs]]
 kind = "ext4"
 image = "clippyshot-fc-worker"
 dest = "${CLIPPYSHOT_FC_DIR:-/var/lib/clippyshot-fc}/rootfs.ext4"
-# 7000 MiB: this engine carries LibreOffice and a tesseract data set, so it is
-# several times the size of the other two engines' rootfs. Overridable, as the
-# script it replaces was -- a deployment that grew this deliberately must not be
-# shrunk back by a literal in the spec.
 size_mib = "${ROOTFS_MIB:-7000}"
-# The guest boots /init, which execs run_guest.py against a baked guest.env.
-requires = ["/init", "/opt/blastbox/guest.env"]
+requires = ["/init", "/opt/blastbox/guest.env", "/opt/blastbox/run_guest.py", "/opt/blastbox/engine"]
