@@ -69,6 +69,7 @@ class LibreOfficeRunner:
         # Each worker process handles one job sequentially, so a single
         # instance attribute is safe here.
         self.last_run_sheets: list[dict] = []
+        self.last_run_single_page_sheets = False
         # Populated when a docx-family input contains <w:altChunk>
         # references to embedded content (MHT / HTML / nested Word).
         # Entries are lightweight summaries (no raw bytes) for surfacing
@@ -173,6 +174,7 @@ class LibreOfficeRunner:
         # Reset per-call capture; populated by subsequent pre- or
         # post-processing steps.
         self.last_run_sheets = []
+        self.last_run_single_page_sheets = False
         self.last_altchunks = []
 
         # Stage input into a per-call dir so we can mount its parent
@@ -478,6 +480,9 @@ class LibreOfficeRunner:
                     )
                 else:
                     _warm_diag("WARM_OK\n")
+                    from clippyshot.libreoffice.uno import pdf_filter_for_label
+                    _, export_options = pdf_filter_for_label(label)
+                    self.last_run_single_page_sheets = export_options.get('SinglePageSheets') == 'true'
                     if staged_input.suffix.lower() in (".xlsx", ".xlsm"):
                         try:
                             from clippyshot.libreoffice.sheet_prep import (
@@ -584,19 +589,17 @@ class LibreOfficeRunner:
                             last_error = "soffice produced no PDF"
                             break
 
+                    self.last_run_single_page_sheets = filt == _CALC_FILTER
                     # Capture sheet names from the staged xlsx (the final
                     # form LO just exported from). For xlsx/xlsm inputs
                     # this is the original file patched in place; for
                     # xls/xlsb/ods/csv it's the intermediate xlsx the
                     # two-pass produced. Either way it's what LO actually
                     # saw, so the visible-sheet order aligns with the PDF.
-                    if staged_input.suffix.lower() in (".xlsx", ".xlsm"):
+                    if attempt_input.suffix.lower() in (".xlsx", ".xlsm"):
                         try:
-                            from clippyshot.libreoffice.sheet_prep import (
-                                read_sheet_list,
-                            )
-
-                            self.last_run_sheets = read_sheet_list(staged_input)
+                            from clippyshot.libreoffice.sheet_prep import read_sheet_list
+                            self.last_run_sheets = read_sheet_list(attempt_input)
                         except Exception:
                             self.last_run_sheets = []
 

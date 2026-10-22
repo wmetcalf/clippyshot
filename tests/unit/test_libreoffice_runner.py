@@ -422,3 +422,19 @@ def test_no_uno_server_uses_cold_path(tmp_path: Path):
     sb = FakeSandbox()
     LibreOfficeRunner(sandbox=sb, uno_server=None).convert_to_pdf(src, out, Limits(), "docx")
     assert sb.last_request is not None  # cold path (no warm server present)
+
+
+@pytest.mark.parametrize('warm', [True, False])
+def test_successful_export_records_actual_sheet_mode_and_resets_between_jobs(tmp_path, warm):
+    import zipfile
+    src=tmp_path/'book.xlsx'
+    with zipfile.ZipFile(src,'w') as z:
+        z.writestr('xl/workbook.xml','<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets><sheet name="Hidden" state="hidden" sheetId="1"/></sheets></workbook>')
+    uno=_ReadyUno(on_convert=lambda inp,out,label:Path(out).write_bytes(b'%PDF warm')) if warm else None
+    runner=LibreOfficeRunner(sandbox=FakeSandbox(),uno_server=uno)
+    runner.convert_to_pdf(src,tmp_path/'sheet-out',Limits(),'xlsx')
+    assert runner.last_run_single_page_sheets is True
+    assert runner.last_run_sheets[0]['state']=='hidden'
+    doc=tmp_path/'word.docx';doc.write_bytes(b'fixture')
+    runner.convert_to_pdf(doc,tmp_path/'word-out',Limits(),'docx')
+    assert runner.last_run_single_page_sheets is False and runner.last_run_sheets==[]

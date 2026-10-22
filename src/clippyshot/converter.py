@@ -90,39 +90,34 @@ def _sheets_from_runner(runner) -> list[dict]:
     return cleaned
 
 
-def _page_sheet_names(sheets: list[dict], page_count: int) -> list[str | None]:
-    """Map rasterized page index → source sheet name (or ``None``).
+def _page_sheet_names(sheets: list[dict], page_count: int, *,
+                      total_pages: int | None = None,
+                      single_page_sheets: bool = False) -> list[str | None]:
+    """SinglePageSheets exports hidden sheets too; paginated fallback is not positional.
 
-    ``SinglePageSheets=true`` lays down exactly one PDF page per sheet LO
-    chose to export, in workbook order. We reproduce the same filter so
-    position i of the filtered list corresponds to PDF page i+1. Any tail
-    mismatch falls through to ``None`` on the unaligned entries.
+    Bind names only when the actual export mode and full PDF count agree with the
+    workbook inventory. A capped rasterization may safely use the matching prefix.
     """
-    from clippyshot.libreoffice.sheet_prep import visible_sheet_names
-    if not sheets:
+    if not single_page_sheets or total_pages != len(sheets):
         return [None] * page_count
-    visible = visible_sheet_names(sheets)
-    return [visible[i] if i < len(visible) else None for i in range(page_count)]
+    return [sheets[i]['name'] if i < len(sheets) else None for i in range(page_count)]
 
 
-def _non_rendered_sheets(sheets: list[dict]) -> list[dict]:
-    """Return sheet entries LO is expected to skip (hidden / macro).
-
-    Useful malware-analysis signal: a hidden or Excel 4 macro sheet is
-    present in the workbook but never rasterized, so the usual per-page
-    scanners can't see it.
-    """
-    out: list[dict] = []
-    for s in sheets:
-        state = s.get("state", "visible")
-        sheet_type = s.get("type", "worksheet")
-        if state != "visible" or sheet_type == "macro":
-            name = s.get("name")
-            if isinstance(name, str) and name:
-                if len(name) > _MAX_SHEET_NAME_CHARS:
-                    name = name[:_MAX_SHEET_NAME_CHARS]
-                out.append({"name": name, "state": state, "type": sheet_type})
-    return out
+def _sheet_provenance(sheets: list[dict], total_pages: int, single_page_sheets: bool,
+                      pages: list[dict], blank_pages: list[int]) -> dict:
+    mapped = single_page_sheets and total_pages == len(sheets)
+    captured = {p['index'] for p in pages}
+    blanks = set(blank_pages)
+    inventory = []
+    for index, sheet in enumerate(sheets, 1):
+        status = ('unverified' if not mapped else 'captured' if index in captured else
+                  'blank_skipped' if index in blanks else 'not_captured')
+        inventory.append({**sheet, 'page_number': index if mapped else None, 'capture_status': status})
+    return {'total': len(sheets), 'rendered': len(captured) if mapped else None,
+            'exported': total_pages if mapped else None,
+            'export_mode': 'single_page_sheets' if single_page_sheets else 'paginated_or_unknown',
+            'page_mapping_verified': mapped, 'inventory': inventory,
+            'non_rendered': [s for s in inventory if s['capture_status'] == 'not_captured']}
 
 
 def _mediabox_mm(page) -> tuple[float, float]:
@@ -635,12 +630,9 @@ class Converter:
                         _sheets_discovered = _sheets_from_runner(self._runner)
                     else:
                         _sheets_discovered = []
-                    page_sheet_names = _page_sheet_names(_sheets_discovered, pages_to_render)
-                    # Sheets that LO skips (hidden / veryHidden / macro)
-                    # never appear in the PDF so they don't get a page —
-                    # but their presence is still useful malware-analysis
-                    # signal, so surface them on the metadata below.
-                    non_rendered_sheets = _non_rendered_sheets(_sheets_discovered)
+                    single_page_sheets = getattr(self._runner, 'last_run_single_page_sheets', False) is True
+                    page_sheet_names = _page_sheet_names(_sheets_discovered, pages_to_render,
+                        total_pages=total_pages, single_page_sheets=single_page_sheets)
                     # Detect which PDF pages are OCR-worthy. We run OCR on a
                     # page when ANY of:
                     #   (a) the page carries raster images (pypdf reports
@@ -1048,15 +1040,9 @@ class Converter:
                 # metadata lean and only attach the block when at least
                 # one sheet (rendered or not) was discovered.
                 if detected.label in _SPREADSHEET_LABELS and _sheets_discovered:
-                    metadata["sheets"] = {
-                        "total": len(_sheets_discovered),
-                        "rendered": sum(
-                            1 for s in _sheets_discovered
-                            if s.get("state") == "visible"
-                            and s.get("type") != "macro"
-                        ),
-                        "non_rendered": non_rendered_sheets,
-                    }
+                    metadata["sheets"] = _sheet_provenance(
+                        _sheets_discovered, total_pages, single_page_sheets, page_records,
+                        blank_indices if options.limits.skip_blanks else [])
                 (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
             finally:
                 # 7. Copy the intermediate PDF to the output dir as

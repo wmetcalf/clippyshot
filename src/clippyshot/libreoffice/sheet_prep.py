@@ -99,12 +99,9 @@ def read_sheet_list(xlsx_path: Path) -> list[dict]:
 
 
 def visible_sheet_names(sheets: list[dict]) -> list[str]:
-    """Return names of sheets LibreOffice will emit as PDF pages.
+    """Visible non-macro names for callers explicitly filtering workbook inventory.
 
-    LO Calc's PDF export skips ``hidden`` and ``veryHidden`` sheets, and
-    (for ``SinglePageSheets=true``) also drops Excel 4 macro sheets since
-    they can't meaningfully render one-per-page. Output order matches the
-    input workbook order so the i-th name aligns with PDF page i.
+    This is NOT the SinglePageSheets PDF order: that mode includes hidden sheets.
     """
     return [
         s["name"]
