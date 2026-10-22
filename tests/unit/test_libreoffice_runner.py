@@ -435,6 +435,7 @@ def test_successful_export_records_actual_sheet_mode_and_resets_between_jobs(tmp
     runner.convert_to_pdf(src,tmp_path/'sheet-out',Limits(),'xlsx')
     assert runner.last_run_single_page_sheets is True
     assert runner.last_run_sheets[0]['state']=='hidden'
-    doc=tmp_path/'word.docx';doc.write_bytes(b'fixture')
+    doc=tmp_path/'word.docx'
+    doc.write_bytes(b'fixture')
     runner.convert_to_pdf(doc,tmp_path/'word-out',Limits(),'docx')
     assert runner.last_run_single_page_sheets is False and runner.last_run_sheets==[]
