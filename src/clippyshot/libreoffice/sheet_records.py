@@ -130,6 +130,18 @@ def _ok(sheets: list[dict] | None) -> list[dict]:
 # ─── xls (BIFF8) ─────────────────────────────────────────────────────────────
 
 
+# olefile defects that change neither the directory LibreOffice builds nor the stream bytes
+# it reads (header CLSID/transaction quirks, a size high-dword some writers set, a storage
+# with a size): common in dropper tooling, so refusing them would lose real signal.
+_BENIGN_OLE_ISSUES = (
+    "incorrect OLE stream size",
+    "incorrect CLSID in OLE header",
+    "transaction_signature_number",
+    "non-null reserved bytes",
+    "OLE storage with size>0",
+)
+
+
 def _check_cfb_header(path: Path) -> None:
     """Refuse a CFB header whose counts olefile would act on before any cap of ours runs
     (the DIFAT/FAT loops in its constructor, copied quadratically), or whose mini-stream
@@ -201,7 +213,8 @@ def _read_xls(path: Path) -> list[dict] | None:
     with olefile.OleFileIO(str(path)) as ole:
         # A directory olefile had to repair (an entry linked twice, a sibling link to the
         # root, ...) is one LibreOffice may build differently: not ours to interpret.
-        if getattr(ole, "parsing_issues", None):
+        if any(not any(q in str(msg) for q in _BENIGN_OLE_ISSUES)
+               for _kind, msg in (getattr(ole, "parsing_issues", None) or [])):
             raise _Declined("unreadable")
         workbook = _stream_entry(ole, "Workbook")
         if workbook is None:
@@ -373,7 +386,8 @@ def _xlsb_workbook_part(zf: zipfile.ZipFile) -> str | None:
     if overrides:
         ok = all(o.attrib.get("ContentType", "") == _XLSB_WORKBOOK_CT for o in overrides)
     else:
-        ok = any(d.attrib.get("Extension", "").lower() == "bin"
+        # LibreOffice's OOXML detector matches the Default extension case-sensitively.
+        ok = any(d.attrib.get("Extension", "") == "bin"
                  and d.attrib.get("ContentType", "") == _XLSB_WORKBOOK_CT
                  for d in ct.findall(f"{_CT_NS}Default"))
     if not ok:
@@ -520,7 +534,7 @@ def overlay_binary_records(path: Path, sheets: list[dict]) -> tuple[list[dict], 
 
 
 def overlay_binary_records_status(
-    path: Path, sheets: list[dict],
+    path: Path, sheets: list[dict], *, expect: str | None = None,
 ) -> tuple[tuple[list[dict], str] | None, str]:
     """Re-export inventory ``sheets`` with type/state taken from ``path``'s own records.
 
@@ -538,6 +552,10 @@ def overlay_binary_records_status(
     if got is None:
         return None, status
     source, records = got
+    # The detected label says which importer LibreOffice used; records from the other
+    # format (an xls-labelled zip, an xlsb-labelled CFB) are not what it rendered.
+    if expect is not None and source != {"xls": XLS_SOURCE, "xlsb": XLSB_SOURCE}.get(expect):
+        return None, "unreadable"
     if [r["name"] for r in records] != [s.get("name") for s in sheets]:
         return None, "unaligned"
     return ([{**s, "state": r["state"], "type": r["type"]}

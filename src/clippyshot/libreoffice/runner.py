@@ -110,19 +110,23 @@ class LibreOfficeRunner:
         self.last_run_sheets_source = (
             "libreoffice_xlsx_reexport" if self.last_run_sheets_from_reexport
             else "input_workbook")
-        if self.last_run_sheets_from_reexport and self._two_pass_input is not None:
+        if (self.last_run_sheets_from_reexport and self._two_pass_input is not None
+                and self._two_pass_label in ("xls", "xlsb")):
             # Recover type/state from the original xls/xlsb's own sheet records when they
-            # align with the re-export by name and order (sheet_records).
+            # align with the re-export by name and order (sheet_records). Only for inputs
+            # LibreOffice imported AS xls/xlsb: an ods/csv/... polyglot carrying xlsb parts
+            # must not have records LibreOffice never read laid over its inventory.
             try:
                 from clippyshot.libreoffice.sheet_records import (
                     overlay_binary_records_status,
                 )
 
                 overlaid, status = overlay_binary_records_status(
-                    self._two_pass_input, self.last_run_sheets)
+                    self._two_pass_input, self.last_run_sheets,
+                    expect=self._two_pass_label)
             except Exception:  # noqa: BLE001 - best effort; keep the re-export inventory
                 overlaid, status = None, "unreadable"
-            if status == "not_binary_workbook" and self._two_pass_label in ("xls", "xlsb"):
+            if status == "not_binary_workbook":
                 # Detected as xls/xlsb, yet no binary workbook this reader recognises
                 # (LibreOffice may still import it): a refusal, not an ods/csv.
                 status = "unreadable"

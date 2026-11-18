@@ -747,3 +747,57 @@ def test_xlsb_part_named_in_another_case_is_read(tmp_path):
                    f'Type="{_REL_MS}xlMacrosheet" Target="m.bin"/></Relationships>')
     assert sr.read_binary_sheet_records(p) == (
         sr.XLSB_SOURCE, [{"name": "S", "state": "veryHidden", "type": "macro"}])
+
+
+# ─── only what LibreOffice imported AS xls/xlsb ─────────────────────────────
+
+def test_overlay_requires_the_detected_format(tmp_path):
+    """An ods/csv polyglot carrying xlsb parts (LibreOffice imports the ODS) and an
+    xls-labelled zip must not get records LibreOffice never read (final lens on #68)."""
+    p = _xlsb(tmp_path, _book(_bundle_sh("Beta", 2, "rId1")),
+              {"rId1": _REL_MS + "xlMacrosheet"})
+    assert sr.overlay_binary_records_status(p, _reexport("Beta"), expect="xlsb")[1] == "ok"
+    assert sr.overlay_binary_records_status(p, _reexport("Beta"), expect="xls") == (
+        None, "unreadable")
+
+
+def test_runner_does_not_overlay_a_non_xls_label(tmp_path):
+    src = _xlsb(tmp_path, _book(_bundle_sh("fixture", 2, "rId1")),
+                {"rId1": _REL_MS + "xlMacrosheet"}, name="poly.ods")
+    runner = LibreOfficeRunner(sandbox=_TwoPassSandbox("fixture"), uno_server=None)
+    runner.convert_to_pdf(src, tmp_path / "out", Limits(), "ods")
+    assert runner.last_run_sheets_source == "libreoffice_xlsx_reexport"
+    assert runner.last_run_sheet_records_status == ""
+
+
+def test_xlsb_default_extension_is_matched_case_sensitively(tmp_path):
+    p = tmp_path / "upper.xlsb"
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("_rels/.rels", f'<Relationships xmlns="{_PKG_RELS}"><Relationship Id="r" '
+                                  f'Type="{_REL}officeDocument" Target="xl/workbook.bin"/>'
+                                  '</Relationships>')
+        z.writestr("[Content_Types].xml",
+                   '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                   f'<Default Extension="BIN" ContentType="{_XLSB_CT}"/></Types>')
+        z.writestr("xl/workbook.bin", _book(_bundle_sh("S", 0, "rId1")))
+        z.writestr("xl/_rels/workbook.bin.rels",
+                   f'<Relationships xmlns="{_PKG_RELS}"><Relationship Id="rId1" '
+                   f'Type="{_REL}worksheet" Target="s.bin"/></Relationships>')
+    assert sr.read_binary_sheet_records_status(p) == (None, "unreadable")
+
+
+@pytest.mark.parametrize("offset,value", [
+    (0x08, b"\x01" * 16),            # header CLSID (olefile: "incorrect CLSID")
+    (0x22, b"\x00\x00\x01\x00\x00\x00"),  # reserved header bytes
+    (0x34, b"\x01\x00\x00\x00"),          # transaction signature
+])
+def test_benign_header_quirks_do_not_refuse(tmp_path, offset, value):
+    """Header quirks LibreOffice ignores (common in dropper tooling) must not lose the
+    records; only directory-shape defects are refused."""
+    p = tmp_path / "quirk.xls"
+    raw = bytearray(FIXTURE_XLS.read_bytes())
+    raw[offset:offset + len(value)] = value
+    p.write_bytes(bytes(raw))
+    with olefile.OleFileIO(str(p)) as ole:
+        assert ole.parsing_issues  # olefile does flag it
+    assert sr.read_binary_sheet_records(p) is not None
