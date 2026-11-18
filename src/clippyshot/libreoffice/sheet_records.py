@@ -160,6 +160,45 @@ def _boundsheet(body: bytes) -> dict:
 # ─── xlsb ────────────────────────────────────────────────────────────────────
 
 
+_XLSB_WORKBOOK_CT = "application/vnd.ms-excel.sheet.binary.macroEnabled.main"
+
+
+def _xlsb_package_points_at_workbook_bin(zf: zipfile.ZipFile) -> bool:
+    """Is ``xl/workbook.bin`` the part LibreOffice imports as the workbook?
+
+    LO follows ``_rels/.rels``' officeDocument relationship (exact URI) and needs the
+    target's content type to be the xlsb main type; a package pointing elsewhere could
+    show this reader a decoy ``xl/workbook.bin`` with the same sheet names but different
+    states/types (codex on #68). Same rules as sheet_prep._package_anomalies for xlsx.
+    """
+    from clippyshot.libreoffice._safexml import safe_fromstring
+    from clippyshot.libreoffice._safezip import bounded_read
+    from clippyshot.libreoffice.sheet_prep import (
+        _CT_NS, _OFFICE_DOC_REL, _OFFICE_DOC_TYPES, _PKG_REL_NS,
+    )
+
+    try:
+        rels = safe_fromstring(bounded_read(zf, "_rels/.rels")).findall(
+            f"{_PKG_REL_NS}Relationship")
+        ct = safe_fromstring(bounded_read(zf, "[Content_Types].xml"))
+    except Exception:  # noqa: BLE001
+        return False
+    if any(r.attrib.get("Type", "").endswith(_OFFICE_DOC_REL)
+           and r.attrib.get("Type") not in _OFFICE_DOC_TYPES for r in rels):
+        return False
+    targets = [r.attrib.get("Target", "") for r in rels
+               if r.attrib.get("Type") in _OFFICE_DOC_TYPES]
+    if len(targets) != 1 or targets[0] not in ("xl/workbook.bin", "/xl/workbook.bin"):
+        return False
+    overrides = [o for o in ct.findall(f"{_CT_NS}Override")
+                 if o.attrib.get("PartName", "") == "/xl/workbook.bin"]
+    if overrides:
+        return all(o.attrib.get("ContentType", "") == _XLSB_WORKBOOK_CT for o in overrides)
+    return any(d.attrib.get("Extension", "").lower() == "bin"
+               and d.attrib.get("ContentType", "") == _XLSB_WORKBOOK_CT
+               for d in ct.findall(f"{_CT_NS}Default"))
+
+
 def _read_xlsb(path: Path) -> list[dict] | None:
     # Late import: sheet_prep imports this module.
     from clippyshot.libreoffice._safezip import ExtractionLimitExceeded, bounded_read
@@ -169,6 +208,8 @@ def _read_xlsb(path: Path) -> list[dict] | None:
         names = zf.namelist()
         # One unambiguous workbook part; a case-variant twin could be the one LO reads.
         if sum(1 for x in names if x.lower() == "xl/workbook.bin") != 1:
+            return None
+        if not _xlsb_package_points_at_workbook_bin(zf):
             return None
         try:
             data = bounded_read(zf, "xl/workbook.bin")

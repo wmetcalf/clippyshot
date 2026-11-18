@@ -171,14 +171,28 @@ _REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
 _REL_MS = "http://schemas.microsoft.com/office/2006/relationships/"
 
 
-def _xlsb(tmp_path: Path, records: bytes, rels: dict[str, str], name="book.xlsb") -> Path:
+_XLSB_CT = "application/vnd.ms-excel.sheet.binary.macroEnabled.main"
+_PKG_RELS = "http://schemas.openxmlformats.org/package/2006/relationships"
+
+
+def _package(z: zipfile.ZipFile, target: str = "xl/workbook.bin",
+             ct: str = _XLSB_CT, rel_type: str = _REL + "officeDocument") -> None:
+    z.writestr("_rels/.rels", f'<Relationships xmlns="{_PKG_RELS}"><Relationship Id="rId1" '
+                              f'Type="{rel_type}" Target="{target}"/></Relationships>')
+    z.writestr("[Content_Types].xml",
+               '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+               f'<Override PartName="/xl/workbook.bin" ContentType="{ct}"/></Types>')
+
+
+def _xlsb(tmp_path: Path, records: bytes, rels: dict[str, str], name="book.xlsb",
+          **package) -> Path:
     p = tmp_path / name
     rel_xml = "".join(f'<Relationship Id="{k}" Type="{v}" Target="x"/>' for k, v in rels.items())
     with zipfile.ZipFile(p, "w") as z:
+        _package(z, **package)
         z.writestr("xl/workbook.bin", records)
         z.writestr("xl/_rels/workbook.bin.rels",
-                   '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/'
-                   f'relationships">{rel_xml}</Relationships>')
+                   f'<Relationships xmlns="{_PKG_RELS}">{rel_xml}</Relationships>')
     return p
 
 
@@ -222,6 +236,7 @@ def test_xlsb_declines_what_it_cannot_read(tmp_path, records, rels):
 def test_xlsb_without_rels_is_declined(tmp_path):
     p = tmp_path / "b.xlsb"
     with zipfile.ZipFile(p, "w") as z:
+        _package(z)
         z.writestr("xl/workbook.bin", _book(_bundle_sh("S", 0, "rId1")))
     assert sr.read_binary_sheet_records(p) is None
 
@@ -229,6 +244,7 @@ def test_xlsb_without_rels_is_declined(tmp_path):
 def test_xlsb_duplicate_relationship_id_is_declined(tmp_path):
     p = tmp_path / "b.xlsb"
     with zipfile.ZipFile(p, "w") as z:
+        _package(z)
         z.writestr("xl/workbook.bin", _book(_bundle_sh("S", 0, "rId1")))
         z.writestr("xl/_rels/workbook.bin.rels",
                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/'
@@ -350,3 +366,21 @@ def test_converter_reports_the_runner_inventory_source(attr, expected):
         last_run_sheets_from_reexport = False
 
     assert _inventory_source(R()) == expected
+
+
+@pytest.mark.parametrize("package", [
+    {"target": "xl/decoy.bin"},                        # LO imports another part (codex on #68)
+    {"rel_type": "urn:decoy/officeDocument"},           # LO's detector wants the exact URI
+    {"ct": "application/vnd.ms-excel.sheet.macroEnabled.main+xml"},  # not the binary importer
+])
+def test_xlsb_records_only_from_the_part_libreoffice_imports(tmp_path, package):
+    p = _xlsb(tmp_path, _book(_bundle_sh("S", 2, "rId1")),
+              {"rId1": _REL_MS + "xlMacrosheet"}, **package)
+    assert sr.read_binary_sheet_records(p) is None
+
+
+def test_xlsb_absolute_package_target_is_accepted(tmp_path):
+    p = _xlsb(tmp_path, _book(_bundle_sh("S", 2, "rId1")),
+              {"rId1": _REL_MS + "xlMacrosheet"}, target="/xl/workbook.bin")
+    assert sr.read_binary_sheet_records(p) == (
+        sr.XLSB_SOURCE, [{"name": "S", "state": "veryHidden", "type": "macro"}])
