@@ -148,5 +148,9 @@ mapper = "backend/loadout/document_outputs.py:map_outputs"
 emits = ["file", "text_message", "screenshot", "qr_code", "url"]
 
 [[gaps]]
+id = "host-metadata-cap-qr-flood"
+description = "clippyshot_metadata (json.dumps of the converter metadata, nested as a JSON string) carries every decoded QR value and its raw_bytes_hex with no bound; quote-heavy payloads cost ~4 bytes per char there plus ~3 per raw byte. A QR-dense document can push the sealed metadata.json past the HOST's Limits.max_metadata_bytes (4 MiB default), and the host refuses the whole result (no renders kept; warm path blames the slot) before any consumer sees it. The typed copies (qr_values, qr_decoded) budget to zero in that case but cannot help. Producer-side fix (bound QR content in the converter metadata); owner decision. Related blastbox drift: the cold docker dispatcher does not forward BLASTBOX_MAX_METADATA to the worker (vm_dispatch does), so the engine's headroom is measured against the worker default while the host may validate against a lower cap."
+
+[[gaps]]
 id = "checker-scope"
 description = "The blastbox checker (engine_contract._check) enforces engine.name, statuses, artifact families (id/path/kind/max_count/max_bytes/required) and payload root/node_types/required_root_fields/schema_version. It does not check [[detections]] codes or caps against envelope warnings, engine.network/formats/max_input_bytes, the total artifact count, or [[consumers]] (mapper/emits). Those are documentation until the checker grows them; tests/unit/test_engine_mapping.py pins the warning codes and caps. Until a blastbox release ships the checker, CI skips every contract test (pytest.importorskip)."
