@@ -128,6 +128,10 @@ id = "loadout-drops-warning-findings"
 description = "Loadout maps clippyshot to dets=[] (engines.py, 'format/render success ... not phishing findings'), so altchunk_present/macro_enabled_format/extension_mismatch never become detections although the manifest lists emits=detection. The same applies to qr_decoded."
 
 [[gaps]]
+id = "loadout-ignores-sheet-provenance-flags"
+description = "clippyshot_metadata.sheets carries inventory_source ('libreoffice_xlsx_reexport' for xls/xlsb/ods/csv, whose per-sheet type/state are degraded: XLM macro sheets read as worksheets, veryHidden as hidden), inventory_truncated and reader_anomalies. Loadout's document_outputs.render_coverage reads inventory/export_mode/page_mapping_verified/non_rendered but none of these, so a re-exported inventory's type/state is presented as authoritative. Consumer-side."
+
+[[gaps]]
 id = "loadout-byte-and-count-limits"
 description = "document_outputs.map_outputs refuses the WHOLE ok envelope (EngineUnavailable) on: zero or more than 1000 artifact declarations, any artifact over 50 MiB, a combined output over 100 MiB, clippyshot_metadata over 5 MiB, a page with more than 256 QR codes, more than 10000 PDF-text/URL rows in total (one URL row per QR code on every page), or a QR value over 65536 chars; engines.py also caps clippyshot input at 50 MiB (engine default 100 MiB). The engine bounds none of these: in particular a page with 257 small QR codes is a valid ok result that Loadout discards wholesale, so an attacker can suppress the render evidence. An engine per-page QR cap alone would not close it (256 x 50 default pages > 10000 rows). Fix belongs consumer-side (degrade, not refuse); owner decision."
 
