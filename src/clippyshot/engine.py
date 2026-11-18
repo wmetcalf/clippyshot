@@ -180,6 +180,17 @@ _QR_WARNING_BUDGET_BYTES = 64 * 1024
 _QR_HEADROOM_MARGIN = 64 * 1024
 # Sealed size of one qr_decoded_truncated warning (its message is ~150 chars of ASCII).
 _QR_TRUNCATED_MARKER_BYTES = 320
+# clippyshot_metadata's own per-page ``qr`` entries (value + raw_bytes_hex + position ...) are
+# budgeted too: unbounded, a QR-dense document pushed the sealed metadata.json past the host's
+# max_metadata_bytes and the host refused the whole result. They get the headroom the rest of
+# the envelope leaves, minus a reserve for the typed copies above (at most their two ceilings,
+# at most half the headroom). Whole entries in page order; the rest are dropped and counted
+# (page ``qr_omitted``, root ``qr_truncated``, warning ``qr_metadata_truncated``).
+_QR_TYPED_RESERVE_BYTES = _QR_VALUES_BUDGET_BYTES + _QR_WARNING_BUDGET_BYTES
+# Charged up front for the truncation bookkeeping itself: ``"qr_omitted": N`` per page and the
+# root ``qr_truncated`` object, both doubly escaped inside the sealed string.
+_QR_OMITTED_PAGE_BYTES = 40
+_QR_TRUNCATED_ROOT_BYTES = 256
 
 
 def _json_bytes(text: str) -> int:
@@ -217,6 +228,63 @@ def _budgeted_qr_values(pages: list, budget_bytes: int = _QR_VALUES_BUDGET_BYTES
             remaining -= cost
         out[page_rec["index"]] = (kept, cut)
     return out
+
+
+def _meta_qr_entry_cost(entry: object) -> int:
+    """Sealed bytes one QR entry adds to clippyshot_metadata.
+
+    detonate() nests ``json.dumps(meta)`` (ASCII, \\uXXXX escapes) as a JSON string in the
+    envelope, so every quote/backslash is escaped twice; measure exactly that, plus the
+    ``", "`` list separator.
+    """
+    try:
+        inner = json.dumps(entry, default=str)
+    except (TypeError, ValueError):
+        inner = json.dumps(str(entry))
+    return len(json.dumps(inner)) - 2 + 2
+
+
+def _budget_metadata_qr(meta: dict, budget_bytes: int) -> tuple[dict, int]:
+    """A copy of ``meta`` whose pages' ``qr`` entries fit ``budget_bytes`` of sealed JSON.
+
+    Entries are kept whole, in page order; once one does not fit, every later one is dropped
+    (never a middle one). A page that lost any carries ``qr_omitted``; the root gets
+    ``qr_truncated: {omitted, budget_bytes}``. ``meta`` itself is not modified, and is
+    returned as-is when everything fits. Returns ``(meta, omitted_total)``.
+    """
+    pages = meta.get("pages")
+    if not isinstance(pages, list):
+        return meta, 0
+    remaining = (budget_bytes - _QR_TRUNCATED_ROOT_BYTES
+                 - _QR_OMITTED_PAGE_BYTES * len(pages))
+    exhausted = False
+    omitted_total = 0
+    pages_out: list = []
+    for page_rec in pages:
+        qr = page_rec.get("qr") if isinstance(page_rec, dict) else None
+        if not isinstance(qr, list):
+            pages_out.append(page_rec)
+            continue
+        kept: list = []
+        omitted = 0
+        for entry in qr:
+            if not exhausted:
+                cost = _meta_qr_entry_cost(entry)
+                if cost <= remaining:
+                    kept.append(entry)
+                    remaining -= cost
+                    continue
+                exhausted = True
+            omitted += 1
+        if omitted:
+            page_rec = {**page_rec, "qr": kept, "qr_omitted": omitted}
+            omitted_total += omitted
+        pages_out.append(page_rec)
+    if not omitted_total:
+        return meta, 0
+    return ({**meta, "pages": pages_out,
+             "qr_truncated": {"omitted": omitted_total, "budget_bytes": max(0, budget_bytes)}},
+            omitted_total)
 
 
 def _scanner_record(page_rec: dict, effective_dpi: int | None = None,
@@ -323,7 +391,7 @@ def _qr_warnings(pages: list, budget_bytes: int = _QR_WARNING_BUDGET_BYTES) -> l
                     code="qr_decoded_truncated",
                     message=f"qr_decoded findings capped at {_MAX_QR_WARNINGS} distinct values "
                             f"/ {budget_bytes} bytes; the rest are in clippyshot_metadata "
-                            "(and in qr_values, within its own budget)",
+                            "and qr_values, each within its own budget",
                 ))
                 return out
             seen.add(value)
@@ -844,24 +912,38 @@ class ClippyShotEngine:
 
         # ── Per-page nodes, artifacts, payload, warnings ─────────────────────
         clamped_dpi = _clamped_dpi_by_page(meta.get("warnings", []))
-        # Pass 1 builds the envelope without the typed QR copies to measure the headroom
-        # they may use; pass 2 builds it with them (see _QR_VALUES_BUDGET_BYTES).
+        # The host refuses a sealed metadata.json over max_metadata_bytes, so every QR copy is
+        # budgeted against the room the rest of the envelope leaves:
+        #   pass 1: no QR content anywhere -> headroom for clippyshot_metadata's QR entries
+        #           (less a reserve for the typed copies; _QR_TYPED_RESERVE_BYTES);
+        #   pass 2: budgeted metadata, no typed copies -> headroom for the typed copies;
+        #   pass 3: everything (see _QR_VALUES_BUDGET_BYTES).
+        max_meta = int(getattr(limits, "max_metadata_bytes", 4 << 20))
         no_qr: dict[int, tuple[list[str], bool]] = {
             p["index"]: ([], False) for p in meta.get("pages", [])
             if isinstance(p, dict) and type(p.get("index")) is int}
-        page_nodes, artifacts, payload, warnings = self._assemble(
-            meta, outdir, clamped_dpi, no_qr, [])
-        base = len(payload.model_dump_json(by_alias=True).encode())
-        base += sum(len(w.model_dump_json().encode()) for w in warnings)
-        base += 512 * len(artifacts) + 4096  # sealed artifact rows + envelope header
-        headroom = max(0, int(getattr(limits, "max_metadata_bytes", 4 << 20))
-                       - base - _QR_HEADROOM_MARGIN)
+        stripped_meta, _ = _budget_metadata_qr(meta, 0)
+        headroom = self._headroom(max_meta, self._assemble(
+            meta, outdir, clamped_dpi, no_qr, [], metadata_meta=stripped_meta))
+        meta_qr_budget = headroom - min(_QR_TYPED_RESERVE_BYTES, headroom // 2)
+        budgeted_meta, omitted = _budget_metadata_qr(meta, meta_qr_budget)
+        meta_qr_warnings: list[Warning] = []
+        if omitted:
+            meta_qr_warnings.append(Warning(
+                code="qr_metadata_truncated",
+                message=f"{omitted} decoded QR entries omitted from clippyshot_metadata to fit "
+                        f"{max(0, meta_qr_budget)} bytes under the host metadata cap (page "
+                        "qr_omitted / root qr_truncated); qr_count is exact",
+            ))
+        headroom = self._headroom(max_meta, self._assemble(
+            meta, outdir, clamped_dpi, no_qr, meta_qr_warnings, metadata_meta=budgeted_meta))
         values_budget = min(_QR_VALUES_BUDGET_BYTES, headroom * 3 // 4)
         warn_budget = min(_QR_WARNING_BUDGET_BYTES, headroom - values_budget)
         page_nodes, artifacts, payload, warnings = self._assemble(
             meta, outdir, clamped_dpi,
             _budgeted_qr_values(meta.get("pages", []), values_budget),
-            _qr_warnings(meta.get("pages", []), warn_budget))
+            meta_qr_warnings + _qr_warnings(meta.get("pages", []), warn_budget),
+            metadata_meta=budgeted_meta)
 
         return DetonationResult(
             payload=payload,
@@ -871,11 +953,26 @@ class ClippyShotEngine:
             status="ok",
         )
 
+    @staticmethod
+    def _headroom(max_meta: int, assembled: tuple[list[Page], list[DeclaredArtifact],
+                                                  EmbeddedResource, list[Warning]]) -> int:
+        """Sealed bytes left under ``max_meta`` by an assembled result (margin kept spare)."""
+        _, artifacts, payload, warnings = assembled
+        base = len(payload.model_dump_json(by_alias=True).encode())
+        base += sum(len(w.model_dump_json().encode()) for w in warnings)
+        base += 512 * len(artifacts) + 4096  # sealed artifact rows + envelope header
+        return max(0, max_meta - base - _QR_HEADROOM_MARGIN)
+
     def _assemble(self, meta: dict, outdir: Path, clamped_dpi: dict[int, int],
                   qr_budgeted: dict[int, tuple[list[str], bool]],
                   qr_warnings: list[Warning],
+                  metadata_meta: dict | None = None,
                   ) -> tuple[list[Page], list[DeclaredArtifact], EmbeddedResource, list[Warning]]:
-        """Page nodes, declared artifacts, payload root and warnings for one ok result."""
+        """Page nodes, declared artifacts, payload root and warnings for one ok result.
+
+        ``metadata_meta`` is what is serialized into clippyshot_metadata (``meta`` with its QR
+        entries budgeted); the typed tree is always built from the full ``meta``.
+        """
         det = meta.get("input", {}).get("detected", {})
         page_nodes: list[Page] = []
         artifacts: list[DeclaredArtifact] = []
@@ -950,7 +1047,8 @@ class ClippyShotEngine:
         # string adds no node-count/depth pressure (the depth guard is
         # string-aware). Fail-open: a serialization hiccup must never fail the job.
         try:
-            metadata_json = json.dumps(meta, default=str)
+            metadata_json = json.dumps(meta if metadata_meta is None else metadata_meta,
+                                       default=str)
         except (TypeError, ValueError):
             metadata_json = ""
         payload = EmbeddedResource(

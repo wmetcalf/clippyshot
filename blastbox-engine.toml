@@ -99,13 +99,23 @@ description = "Input extension disagrees with the detected type."
 code = "qr_decoded"
 severity = "info"
 source = "warnings[].code (one per DISTINCT decoded QR value, at its first page; at most 256 per document and at most 64 KiB of sealed JSON (less when the envelope has less headroom); message is the value cut at 2000 chars, context 'page N' plus ' (value truncated)' when cut)"
-description = "A QR code decoded from a rendered page (often a URL). Values are also on the page's scanner Record (qr_values, budgeted) and all of them in clippyshot_metadata."
+description = "A QR code decoded from a rendered page (often a URL). Values are also on the page's scanner Record (qr_values, budgeted) and in clippyshot_metadata (budgeted; see qr_metadata_truncated)."
+
+# The QR budgets are measured against the max_metadata_bytes the WORKER sees. blastbox's cold
+# docker dispatcher did not forward BLASTBOX_MAX_METADATA to the worker (vm_dispatch does), so
+# a host configured below the 4 MiB default could still refuse a result the engine sized for
+# 4 MiB; that is being fixed in blastbox, not here.
+[[detections]]
+code = "qr_metadata_truncated"
+severity = "info"
+source = "warnings[].code (once, when clippyshot_metadata's per-page qr entries did not all fit their budget: the headroom the rest of the envelope leaves under the host's max_metadata_bytes, less a reserve for qr_values/qr_decoded of at most 320 KiB and at most half that headroom)"
+description = "Decoded QR entries (value, raw_bytes_hex, position, ...) were dropped from clippyshot_metadata so the sealed result stays under the host cap instead of being refused whole. Entries are kept whole in page order; each affected page carries qr_omitted (count dropped) and the metadata root carries qr_truncated {omitted, budget_bytes}. qr_count on the typed scanner Record stays exact."
 
 [[detections]]
 code = "qr_decoded_truncated"
 severity = "info"
 source = "warnings[].code (once, when the next distinct value would exceed the 256-value cap or the sealed-byte budget, which shrinks to the envelope's remaining headroom; with no room even for this marker, no QR warnings are emitted)"
-description = "Not every distinct decoded QR value became a qr_decoded finding (possibly none, on a nearly full envelope); the rest are in qr_values (within its budget) and in clippyshot_metadata."
+description = "Not every distinct decoded QR value became a qr_decoded finding (possibly none, on a nearly full envelope); the rest are in qr_values and clippyshot_metadata, each within its own budget."
 
 [[gaps]]
 id = "root-fields-ok-only"
@@ -113,7 +123,7 @@ description = "required_root_fields are checked on ok results only. A rejected r
 
 [[gaps]]
 id = "evidence-in-opaque-json"
-description = "Full OCR text beyond 10000 chars, QR format/position/raw bytes (raw_bytes_hex; qr_values is ZXing's text rendering, so binary payloads are lossy there) and QR values past the qr_values budget, per-page derivative stats (trimmed/focused), render timings, blank_pages and the sheets block live only in metadata.fields.clippyshot_metadata, a JSON string (versioned by the root schema_version field, but with no JSON schema). Typing them is a payload-budget decision: OCR text as ExtractedText would duplicate the largest field already in that JSON."
+description = "Full OCR text beyond 10000 chars, QR format/position/raw bytes (raw_bytes_hex; qr_values is ZXing's text rendering, so binary payloads are lossy there) and QR values past the qr_values budget (themselves within clippyshot_metadata's own QR budget; see qr_metadata_truncated), per-page derivative stats (trimmed/focused), render timings, blank_pages and the sheets block live only in metadata.fields.clippyshot_metadata, a JSON string (versioned by the root schema_version field, but with no JSON schema). Typing them is a payload-budget decision: OCR text as ExtractedText would duplicate the largest field already in that JSON."
 
 [[gaps]]
 id = "no-artifact-byte-cap"
@@ -146,10 +156,6 @@ mapper = "backend/loadout/document_outputs.py:map_outputs"
 # What map_outputs actually builds. Loadout's manifest also lists 'detection', but engines.py
 # maps clippyshot to dets=[] (gap loadout-drops-warning-findings).
 emits = ["file", "text_message", "screenshot", "qr_code", "url"]
-
-[[gaps]]
-id = "host-metadata-cap-qr-flood"
-description = "clippyshot_metadata (json.dumps of the converter metadata, nested as a JSON string) carries every decoded QR value and its raw_bytes_hex with no bound; quote-heavy payloads cost ~4 bytes per char there plus ~3 per raw byte. A QR-dense document can push the sealed metadata.json past the HOST's Limits.max_metadata_bytes (4 MiB default), and the host refuses the whole result (no renders kept; warm path blames the slot) before any consumer sees it. The typed copies (qr_values, qr_decoded) budget to zero in that case but cannot help. Producer-side fix (bound QR content in the converter metadata); owner decision. Related blastbox drift: the cold docker dispatcher does not forward BLASTBOX_MAX_METADATA to the worker (vm_dispatch does), so the engine's headroom is measured against the worker default while the host may validate against a lower cap."
 
 [[gaps]]
 id = "checker-scope"
