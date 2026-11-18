@@ -3,22 +3,12 @@
 Wraps the ClippyShot conversion pipeline as a blastbox ``Engine``, mapping
 the per-page PNG output + metadata dict to the blastbox contract types.
 
-Design note — engine-typed node subclass
------------------------------------------
-``ClippyShotPage`` is registered via ``register_node_type`` so it can be used
-as a typed payload node.  However, pydantic's discriminated-union rebuild only
-updates the *top-level* ``Node`` alias; nested ``children`` fields on existing
-models (``EmbeddedResource.children``, ``Page.children``) keep the pre-rebuild
-concrete annotation because their forward-ref was already resolved at class
-creation time.  This means a ``ClippyShotPage`` that appears as a *child* of
-an ``EmbeddedResource`` cannot be round-tripped through ``envelope_from_json``
-on the host.
-
-The safe strategy: use the framework's plain ``Page`` node for the image slot
-and attach ClippyShot-specific data (QR / OCR) as ``Record`` children of that
-``Page``.  ``ClippyShotPage`` is retained as an exported symbol for callers who
-build in-process typed trees (e.g. tests that don't go through
-``seal_envelope`` / JSON round-trip).
+Design note — no engine-typed node subclass
+--------------------------------------------
+Pages are the framework's plain ``Page`` node with ClippyShot-specific data
+(QR / OCR / effective DPI) as a ``Record`` child. Consumers (Loadout's
+``document_outputs.map_outputs``) walk ``_type == "page"``, so an engine
+subtype would hide every page from them.
 
 Usage::
 
@@ -32,9 +22,7 @@ import os
 import re
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
-
-from pydantic import Field
+from typing import TYPE_CHECKING
 
 from blastbox.contract import (
     ArtifactRef,
@@ -46,7 +34,6 @@ from blastbox.contract import (
     Page,
     Record,
     Warning,
-    register_node_type,
 )
 from blastbox.limits import Limits as BlastboxLimits
 from blastbox.worker.engine import DetonationResult
@@ -54,29 +41,6 @@ from blastbox.worker.engine import DetonationResult
 if TYPE_CHECKING:
     from clippyshot.libreoffice.uno import WarmConverter
     from clippyshot.ocr_warm import WarmOCR
-
-# ─── ClippyShotPage: exported typed node (in-process use) ───────────────────
-# Registered so callers can walk typed in-process trees.  NOT used as a child
-# of EmbeddedResource in the wire format (pydantic rebuild limitation — see
-# module docstring).
-
-
-@register_node_type
-class ClippyShotPage(Page):
-    """A rendered document page produced by ClippyShot (in-process typed node).
-
-    Extends ``Page`` with ClippyShot scanner payloads.  Usable in typed
-    in-process trees; not used as the wire-format child node (see engine.py
-    module docstring).
-    """
-
-    type: Literal["clippyshot_page"] = Field(  # type: ignore[assignment]
-        default="clippyshot_page", alias="_type"
-    )
-    qr: list[dict] = Field(default_factory=list)
-    qr_skipped: str | None = None
-    ocr: dict = Field(default_factory=dict)
-
 
 # ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -196,26 +160,179 @@ def _build_converter(uno_server: WarmConverter | None = None, ocr_helper=None):
     )
 
 
-def _scanner_record(page_rec: dict) -> Record:
+# Version of the clippyshot_metadata JSON layout + the typed root fields beside it. Bump on a
+# breaking change to either; the engine contract pins it (payload.schema_version).
+METADATA_SCHEMA_VERSION = "1"
+
+# Decoded QR payloads surfaced as `qr_decoded` warnings, across the whole document. The typed
+# per-page `qr_values` list is not capped by this; it only bounds the warning list.
+_MAX_QR_WARNINGS = 256
+_MAX_WARNING_CONTEXT = 255
+# Ceilings, in sealed (UTF-8 JSON) bytes, for the two typed QR copies: per-page ``qr_values``
+# and the ``qr_decoded`` warning messages. Every value is already in clippyshot_metadata, and
+# the host refuses a sealed metadata.json over Limits.max_metadata_bytes (4 MiB by default),
+# so detonate() gives each copy at most its ceiling AND only the headroom the rest of the
+# envelope leaves (_QR_HEADROOM_MARGIN kept spare): a document that sealed without the copies
+# still seals with them. A page whose values did not fit carries ``qr_values_truncated: true``;
+# ``qr_count`` stays exact.
+_QR_VALUES_BUDGET_BYTES = 256 * 1024
+_QR_WARNING_BUDGET_BYTES = 64 * 1024
+_QR_HEADROOM_MARGIN = 64 * 1024
+# Sealed size of one qr_decoded_truncated warning (its message is ~150 chars of ASCII).
+_QR_TRUNCATED_MARKER_BYTES = 320
+
+
+def _json_bytes(text: str) -> int:
+    """Bytes ``text`` takes as a JSON string value in the sealed envelope (quotes excluded)."""
+    return len(json.dumps(text, ensure_ascii=False).encode("utf-8", "surrogatepass")) - 2
+
+
+def _qr_values(page_rec: dict) -> list[str]:
+    return [q["value"] for q in (page_rec.get("qr") or [])
+            if isinstance(q, dict) and isinstance(q.get("value"), str)]
+
+
+def _budgeted_qr_values(pages: list, budget_bytes: int = _QR_VALUES_BUDGET_BYTES,
+                        ) -> dict[int, tuple[list[str], bool]]:
+    """Per page index: the ``qr_values`` that fit the document budget, and whether any were cut.
+
+    Values are kept whole, in page order; once one does not fit, every later value is dropped
+    so the typed list never silently skips a middle value.
+    """
+    out: dict[int, tuple[list[str], bool]] = {}
+    remaining = budget_bytes
+    exhausted = False
+    for page_rec in pages:
+        if not isinstance(page_rec, dict) or type(page_rec.get("index")) is not int:
+            continue
+        kept: list[str] = []
+        cut = False
+        for value in _qr_values(page_rec):
+            cost = _json_bytes(value) + 3  # quotes + separator
+            if exhausted or cost > remaining:
+                exhausted = True
+                cut = True
+                continue
+            kept.append(value)
+            remaining -= cost
+        out[page_rec["index"]] = (kept, cut)
+    return out
+
+
+def _scanner_record(page_rec: dict, effective_dpi: int | None = None,
+                    qr_budgeted: tuple[list[str], bool] | None = None) -> Record:
     """Build a Record summarising QR and OCR scanner results for a page.
 
     This is a ``Record`` child of the ``Page`` node so that scanner data
     survives the JSON → Envelope round-trip through the standard types.
+    ``effective_dpi`` is set only on a page the rasterizer clamped below the
+    requested DPI (the per-page detail of the ``resolution_clamped`` warning).
     """
     qr_list = page_rec.get("qr") or []
     qr_skipped = page_rec.get("qr_skipped")
     ocr_obj = page_rec.get("ocr") or {}
+    values, qr_truncated = (qr_budgeted if qr_budgeted is not None
+                            else (_qr_values(page_rec), False))
+    qr_values: list[str | int | float | bool | None] = list(values)
 
     return Record(
         fields={
             "scanner": "clippyshot",
             "qr_count": len(qr_list),
+            "qr_values": qr_values,
+            "qr_values_truncated": qr_truncated,
             "qr_skipped": qr_skipped,
             "ocr_text": (ocr_obj.get("text") or "")[:10000],
             "ocr_char_count": ocr_obj.get("char_count", 0),
             "ocr_skipped": ocr_obj.get("skipped"),
+            "effective_dpi": effective_dpi,
         }
     )
+
+
+def _clamped_dpi_by_page(warnings: list) -> dict[int, int]:
+    """Per-page effective DPI from the converter's ``resolution_clamped`` warning."""
+    out: dict[int, int] = {}
+    for w in warnings:
+        if not isinstance(w, dict) or w.get("code") != "resolution_clamped":
+            continue
+        for p in w.get("pages") or []:
+            if (isinstance(p, dict) and type(p.get("index")) is int
+                    and isinstance(p.get("effective_dpi"), (int, float))):
+                out[p["index"]] = int(p["effective_dpi"])
+    return out
+
+
+def _warning_context(w: dict) -> str | None:
+    """Structured detail of a converter warning, as compact JSON within Warning.context.
+
+    Only ``altchunk_present`` carries scalar detail (part_name/content_type/size);
+    ``resolution_clamped``'s per-page list goes on each Page's scanner Record instead.
+    part_name is attacker-chosen and is shortened first; content_type (one of altchunk.py's
+    known types today) only if that is not enough.
+    """
+    if w.get("code") != "altchunk_present":
+        return None
+    def clean(v: object) -> str:
+        # Lone surrogates would survive ensure_ascii=False and break UTF-8 sealing later.
+        return str(v or "").encode("utf-8", "replace").decode("utf-8")
+
+    strings = {"part_name": clean(w.get("part_name")),
+               "content_type": clean(w.get("content_type"))[:64]}
+    size = w.get("size") if isinstance(w.get("size"), int) else None
+
+    # ensure_ascii=False: Warning.context is capped in characters, and \uXXXX escapes would
+    # inflate a non-ASCII value up to 12x past the cap.
+    def dump() -> str:
+        return json.dumps({**strings, "size": size}, separators=(",", ":"), ensure_ascii=False)
+
+    text = dump()
+    for key in ("part_name", "content_type"):
+        while len(text) > _MAX_WARNING_CONTEXT and strings[key]:
+            over = len(text) - _MAX_WARNING_CONTEXT
+            strings[key] = strings[key][: max(0, len(strings[key]) - over)]
+            text = dump()
+    return text if len(text) <= _MAX_WARNING_CONTEXT else None
+
+
+def _qr_warnings(pages: list, budget_bytes: int = _QR_WARNING_BUDGET_BYTES) -> list[Warning]:
+    """One ``qr_decoded`` finding per DISTINCT decoded QR payload (often a URL), capped.
+
+    A value repeated on many pages (or many times on one page) is reported once, at its first
+    page, so a flood of one benign code cannot spend the cap and hide a later distinct payload.
+    The cap bounds both the count and the total message characters.
+    """
+    out: list[Warning] = []
+    seen: set[str] = set()
+    # The truncation marker is paid for out of the same budget; with no room even for it,
+    # emit nothing (every value is still in clippyshot_metadata).
+    budget_bytes -= _QR_TRUNCATED_MARKER_BYTES
+    if budget_bytes < 0:
+        return out
+    used = 0
+    for page_rec in pages:
+        if not isinstance(page_rec, dict):
+            continue
+        for value in _qr_values(page_rec):
+            if value in seen:
+                continue
+            message = value[:2000]
+            cost = _json_bytes(message) + 64  # + code/context/keys
+            if len(out) >= _MAX_QR_WARNINGS or used + cost > budget_bytes:
+                out.append(Warning(
+                    code="qr_decoded_truncated",
+                    message=f"qr_decoded findings capped at {_MAX_QR_WARNINGS} distinct values "
+                            f"/ {budget_bytes} bytes; the rest are in clippyshot_metadata "
+                            "(and in qr_values, within its own budget)",
+                ))
+                return out
+            seen.add(value)
+            used += cost
+            ctx = f"page {page_rec.get('index')}"
+            if len(value) > 2000:
+                ctx += " (value truncated)"
+            out.append(Warning(code="qr_decoded", message=message, context=ctx))
+    return out
 
 
 # ─── Warm-tier priming ──────────────────────────────────────────────────────
@@ -669,9 +786,8 @@ class ClippyShotEngine:
         maps the resulting metadata dict to the blastbox contract:
 
         - Each page → ``Page`` node with ``hashes`` + a ``Record`` child for
-          scanner data (QR / OCR).  ``Page`` is used instead of
-          ``ClippyShotPage`` here so the typed tree survives the worker
-          ``seal_envelope`` → host ``envelope_from_json`` JSON round-trip.
+          scanner data (QR values / OCR / clamped effective DPI).
+        - Each decoded QR payload → a ``qr_decoded`` warning (capped).
         - Trimmed / focused derivative PNGs → additional ``DeclaredArtifact``
           entries (``id: p{n}-trimmed`` / ``p{n}-focused``).
         - ``document.pdf`` → artifact with ``kind="pdf"``.
@@ -711,6 +827,10 @@ class ClippyShotEngine:
                 status="rejected",
             )
         meta = result.metadata
+        # Converter.convert writes its own metadata.json (the CLI's output). In the engine it
+        # is undeclared and the harness overwrites it with the sealed envelope; remove it so
+        # every file left in outdir is a declared artifact.
+        (outdir / "metadata.json").unlink(missing_ok=True)
 
         # ── Detection ───────────────────────────────────────────────────────
         inp = meta.get("input", {})
@@ -722,10 +842,43 @@ class ClippyShotEngine:
             source="clippyshot",
         )
 
-        # ── Per-page nodes + artifacts ───────────────────────────────────────
+        # ── Per-page nodes, artifacts, payload, warnings ─────────────────────
+        clamped_dpi = _clamped_dpi_by_page(meta.get("warnings", []))
+        # Pass 1 builds the envelope without the typed QR copies to measure the headroom
+        # they may use; pass 2 builds it with them (see _QR_VALUES_BUDGET_BYTES).
+        no_qr: dict[int, tuple[list[str], bool]] = {
+            p["index"]: ([], False) for p in meta.get("pages", [])
+            if isinstance(p, dict) and type(p.get("index")) is int}
+        page_nodes, artifacts, payload, warnings = self._assemble(
+            meta, outdir, clamped_dpi, no_qr, [])
+        base = len(payload.model_dump_json(by_alias=True).encode())
+        base += sum(len(w.model_dump_json().encode()) for w in warnings)
+        base += 512 * len(artifacts) + 4096  # sealed artifact rows + envelope header
+        headroom = max(0, int(getattr(limits, "max_metadata_bytes", 4 << 20))
+                       - base - _QR_HEADROOM_MARGIN)
+        values_budget = min(_QR_VALUES_BUDGET_BYTES, headroom * 3 // 4)
+        warn_budget = min(_QR_WARNING_BUDGET_BYTES, headroom - values_budget)
+        page_nodes, artifacts, payload, warnings = self._assemble(
+            meta, outdir, clamped_dpi,
+            _budgeted_qr_values(meta.get("pages", []), values_budget),
+            _qr_warnings(meta.get("pages", []), warn_budget))
+
+        return DetonationResult(
+            payload=payload,
+            artifacts=artifacts,
+            detected=detected,
+            warnings=warnings,
+            status="ok",
+        )
+
+    def _assemble(self, meta: dict, outdir: Path, clamped_dpi: dict[int, int],
+                  qr_budgeted: dict[int, tuple[list[str], bool]],
+                  qr_warnings: list[Warning],
+                  ) -> tuple[list[Page], list[DeclaredArtifact], EmbeddedResource, list[Warning]]:
+        """Page nodes, declared artifacts, payload root and warnings for one ok result."""
+        det = meta.get("input", {}).get("detected", {})
         page_nodes: list[Page] = []
         artifacts: list[DeclaredArtifact] = []
-
         for page_rec in meta.get("pages", []):
             idx: int = page_rec["index"]
             page_file: str = page_rec["file"]
@@ -767,10 +920,8 @@ class ClippyShotEngine:
                     artifacts.append(DeclaredArtifact(id=fid, path=ff, kind="image"))
 
             # QR / OCR scanner data as a Record child so it survives JSON round-trip.
-            scanner_record = _scanner_record(page_rec)
+            scanner_record = _scanner_record(page_rec, clamped_dpi.get(idx), qr_budgeted.get(idx))
 
-            # Use the standard Page node (not ClippyShotPage) so that
-            # EmbeddedResource.children can deserialize this type on the host.
             page_node = Page(
                 index=idx,
                 dims=dims,
@@ -814,6 +965,7 @@ class ClippyShotEngine:
                     "truncated": bool(render.get("truncated", False)),
                     "clippyshot_version": meta.get("clippyshot_version", ""),
                     "clippyshot_metadata": metadata_json,
+                    "schema_version": METADATA_SCHEMA_VERSION,
                 }
             ),
             children=list(page_nodes),
@@ -828,12 +980,6 @@ class ClippyShotEngine:
             message = str(w.get("message") or "")[:2000]
             if not code:
                 code = "warning"
-            warnings.append(Warning(code=code, message=message))
-
-        return DetonationResult(
-            payload=payload,
-            artifacts=artifacts,
-            detected=detected,
-            warnings=warnings,
-            status="ok",
-        )
+            warnings.append(Warning(code=code, message=message, context=_warning_context(w)))
+        warnings.extend(qr_warnings)
+        return page_nodes, artifacts, payload, warnings

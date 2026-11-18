@@ -1,0 +1,156 @@
+# ClippyShot blastbox engine contract: what ClippyShotEngine.detonate() emits today.
+# Checked by tests/integration/test_blastbox_roundtrip.py and tests/unit/test_engine_contract.py.
+# Validate: python -m blastbox.contract.engine_contract validate blastbox-engine.toml
+schema = "blastbox-engine-contract/1"
+
+[engine]
+name = "clippyshot"
+formats = ["*"]
+network = ["none"]
+# clippyshot.limits.Limits.max_input_bytes default (CLIPPYSHOT_MAX_INPUT). Oversize -> status rejected.
+max_input_bytes = 104857600
+statuses = ["ok", "rejected", "engine_error"]
+
+# Families are disjoint: page paths are page-NNN.png (rasterizer/base.py pads to 3 digits,
+# so page 1000 at the max_pages ceiling is page-1000.png); derivatives add a suffix.
+# max_count is per family. The sum can exceed what the host seals: blastbox
+# Limits.max_artifacts (default 1000) caps the TOTAL, and Loadout refuses more than 1000
+# declarations (gap loadout-byte-and-count-limits). Page PNGs + derivatives + document.pdf
+# must stay <= 1000: with one derivative per page (every spreadsheet page gets a focused crop)
+# that fails from max_pages=500, with both from ~333, and at 1000 pages even with none.
+[[artifacts]]
+id = "p*-trimmed"
+path = "page-*-trimmed.png"
+kind = "image"
+max_count = 1000
+role = "page_render_trimmed"
+description = "Bottom-trimmed copy of page N (trimmer.trim_bottom_solid). Only when trimming removed something; never for a blank page."
+
+[[artifacts]]
+id = "p*-focused"
+path = "page-*-focused.png"
+kind = "image"
+max_count = 1000
+role = "page_render_focused"
+description = "Content-focused crop of page N, spreadsheet inputs only (trimmer.focus_content_solid_bg), when a solid background was found."
+
+[[artifacts]]
+id = "p[1-9]*"
+path = "page-[0-9][0-9][0-9].png"
+kind = "image"
+max_count = 999
+role = "page_render"
+description = "Rendered page N (id pN, 1-based). One per non-blank page, at most Limits.max_pages (default 50, ceiling 1000). Zero on an all-blank document."
+
+[[artifacts]]
+id = "p1000"
+path = "page-1000.png"
+kind = "image"
+role = "page_render"
+description = "Page 1000, only reachable at the CLIPPYSHOT_MAX_PAGES=1000 ceiling."
+
+[[artifacts]]
+id = "document-pdf"
+path = "document.pdf"
+kind = "pdf"
+role = "intermediate_pdf"
+description = "The LibreOffice PDF export the pages were rasterized from. Declared when the copy succeeded (fail-open copy, so not guaranteed)."
+
+[payload]
+root = "embedded_resource"
+node_types = ["embedded_resource", "page", "record"]
+# Checked on the EmbeddedResource root's metadata Record. engine.py detonate() sets all seven on
+# every ok result (defaults 0/False/""; clippyshot_metadata is "" if json.dumps fails).
+# schema_version (engine.METADATA_SCHEMA_VERSION) versions the clippyshot_metadata JSON layout
+# and the typed fields beside it.
+required_root_fields = ["label", "page_count_total", "page_count_rendered", "truncated", "clippyshot_version", "clippyshot_metadata", "schema_version"]
+schema_version = "1"
+
+# Findings are envelope warnings with stable codes. Per page, the scanner Record child of each
+# Page carries qr_count (symbols decoded), qr_values (decoded QR text, whole values in page
+# order within a document-wide budget of at most 256 KiB of sealed JSON and only the headroom
+# the rest of the envelope leaves under the host's max_metadata_bytes; qr_values_truncated is
+# true on a page where any were dropped), ocr_text (<= 10000 chars) and effective_dpi (set only
+# on a page clamped below the requested DPI). qr_values is ZXingReader's text rendering: with
+# the 2.2.x plain-text output it is '-mode escaped' (newlines and control bytes appear as
+# '<LF>', '<HT>', '<NUL>', ...; qr.py; the parser splits on "\n" only), so one symbol is
+# always one record; the raw bytes are only raw_bytes_hex inside clippyshot_metadata. A
+# consumer building URLs from the value (Loadout does) sees e.g. 'evil.exa<HT>mple' where a
+# browser would strip the tab; exact URLs need raw_bytes_hex.
+[[detections]]
+code = "altchunk_present"
+severity = "medium"
+source = "warnings[].code (one per <w:altChunk> part; context is compact JSON {part_name, content_type, size}, part_name shortened to fit 255 chars)"
+description = "DOCX-family input embeds an altChunk part, a common AV-evasion wrapper."
+
+[[detections]]
+code = "macro_enabled_format"
+severity = "low"
+source = "warnings[].code"
+description = "Input extension is macro-capable (.docm/.xlsm/...). Macros are not executed."
+
+[[detections]]
+code = "extension_mismatch"
+severity = "low"
+source = "warnings[].code"
+description = "Input extension disagrees with the detected type."
+
+[[detections]]
+code = "qr_decoded"
+severity = "info"
+source = "warnings[].code (one per DISTINCT decoded QR value, at its first page; at most 256 per document and at most 64 KiB of sealed JSON (less when the envelope has less headroom); message is the value cut at 2000 chars, context 'page N' plus ' (value truncated)' when cut)"
+description = "A QR code decoded from a rendered page (often a URL). Values are also on the page's scanner Record (qr_values, budgeted) and all of them in clippyshot_metadata."
+
+[[detections]]
+code = "qr_decoded_truncated"
+severity = "info"
+source = "warnings[].code (once, when the next distinct value would exceed the 256-value cap or the sealed-byte budget, which shrinks to the envelope's remaining headroom; with no room even for this marker, no QR warnings are emitted)"
+description = "Not every distinct decoded QR value became a qr_decoded finding (possibly none, on a nearly full envelope); the rest are in qr_values (within its budget) and in clippyshot_metadata."
+
+[[gaps]]
+id = "root-fields-ok-only"
+description = "required_root_fields are checked on ok results only. A rejected result's root metadata carries just label='rejected' and reason, which the contract cannot require. clippyshot_metadata is required present but may be the empty string when json.dumps fails (fail-open), and clippyshot_version may be empty. Left: the checker (blastbox engine_contract._check) applies required_root_fields to ok results only, so this is a blastbox checker scope, not engine output."
+
+[[gaps]]
+id = "evidence-in-opaque-json"
+description = "Full OCR text beyond 10000 chars, QR format/position/raw bytes (raw_bytes_hex; qr_values is ZXing's text rendering, so binary payloads are lossy there) and QR values past the qr_values budget, per-page derivative stats (trimmed/focused), render timings, blank_pages and the sheets block live only in metadata.fields.clippyshot_metadata, a JSON string (versioned by the root schema_version field, but with no JSON schema). Typing them is a payload-budget decision: OCR text as ExtractedText would duplicate the largest field already in that JSON."
+
+[[gaps]]
+id = "no-artifact-byte-cap"
+description = "Page PNGs and document.pdf have no byte cap in the engine (pages are capped by pixel budget, max_width/height_px). max_input_bytes is the default; CLIPPYSHOT_MAX_INPUT can raise it to 64 GiB. Left for an owner decision on per-artifact byte caps; Loadout's tighter caps are being fixed consumer-side."
+
+[[gaps]]
+id = "rejected-is-not-error"
+description = "Unsupported, oversized or structurally bad input is status rejected with warning code rejected and the reason in payload.metadata.fields.reason, not engine_error. Left: deliberate verdict semantics (the dispatcher keeps a rejected job DONE); the consumer-side mis-mapping is loadout-rejected-as-unavailable."
+
+[[gaps]]
+id = "loadout-drops-warning-findings"
+description = "Loadout maps clippyshot to dets=[] (engines.py, 'format/render success ... not phishing findings'), so altchunk_present/macro_enabled_format/extension_mismatch never become detections although the manifest lists emits=detection. The same applies to qr_decoded."
+
+[[gaps]]
+id = "loadout-reads-unemitted-sheet-fields"
+description = "document_outputs.render_coverage reads clippyshot_metadata.sheets.inventory, export_mode and page_mapping_verified. ClippyShot master emits only sheets.total/rendered/non_rendered, so those evidence fields are always null/empty. Engine fix (export-mode + per-sheet provenance) is https://github.com/wmetcalf/clippyshot/pull/61; drop this gap once it merges."
+
+[[gaps]]
+id = "loadout-byte-and-count-limits"
+description = "document_outputs.map_outputs refuses the WHOLE ok envelope (EngineUnavailable) on: zero or more than 1000 artifact declarations, any artifact over 50 MiB, a combined output over 100 MiB, clippyshot_metadata over 5 MiB, a page with more than 256 QR codes, more than 10000 PDF-text/URL rows in total (one URL row per QR code on every page), or a QR value over 65536 chars; engines.py also caps clippyshot input at 50 MiB (engine default 100 MiB). The engine bounds none of these: in particular a page with 257 small QR codes is a valid ok result that Loadout discards wholesale, so an attacker can suppress the render evidence. An engine per-page QR cap alone would not close it (256 x 50 default pages > 10000 rows). Fix belongs consumer-side (degrade, not refuse); owner decision."
+
+[[gaps]]
+id = "loadout-rejected-as-unavailable"
+description = "Loadout turns status rejected into EngineUnavailable (engines.py), so a legitimate 'input rejected' verdict is reported as an engine failure rather than a result."
+
+[[consumers]]
+name = "loadout"
+engine = "clippyshot"
+mapper = "backend/loadout/document_outputs.py:map_outputs"
+# What map_outputs actually builds. Loadout's manifest also lists 'detection', but engines.py
+# maps clippyshot to dets=[] (gap loadout-drops-warning-findings).
+emits = ["file", "text_message", "screenshot", "qr_code", "url"]
+
+[[gaps]]
+id = "host-metadata-cap-qr-flood"
+description = "clippyshot_metadata (json.dumps of the converter metadata, nested as a JSON string) carries every decoded QR value and its raw_bytes_hex with no bound; quote-heavy payloads cost ~4 bytes per char there plus ~3 per raw byte. A QR-dense document can push the sealed metadata.json past the HOST's Limits.max_metadata_bytes (4 MiB default), and the host refuses the whole result (no renders kept; warm path blames the slot) before any consumer sees it. The typed copies (qr_values, qr_decoded) budget to zero in that case but cannot help. Producer-side fix (bound QR content in the converter metadata); owner decision. Related blastbox drift: the cold docker dispatcher does not forward BLASTBOX_MAX_METADATA to the worker (vm_dispatch does), so the engine's headroom is measured against the worker default while the host may validate against a lower cap."
+
+[[gaps]]
+id = "checker-scope"
+description = "The blastbox checker (engine_contract._check) enforces engine.name, statuses, artifact families (id/path/kind/max_count/max_bytes/required) and payload root/node_types/required_root_fields/schema_version. It does not check [[detections]] codes or caps against envelope warnings, engine.network/formats/max_input_bytes, the total artifact count, or [[consumers]] (mapper/emits). Those are documentation until the checker grows them; tests/unit/test_engine_mapping.py pins the warning codes and caps. Until a blastbox release ships the checker, CI skips every contract test (pytest.importorskip)."

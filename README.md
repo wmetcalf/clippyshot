@@ -482,6 +482,23 @@ installs (`~/.local/bin/`) won't work because the sandboxes only
 bind-mount `/usr`. If you want OCR in other languages, install the
 corresponding `tesseract-ocr-<lang>` package.
 
+## Engine contract
+
+[`blastbox-engine.toml`](blastbox-engine.toml) states what the `clippyshot` blastbox engine
+emits: the artifact families (page PNGs `pN`, `pN-trimmed`, `pN-focused`, `document-pdf`),
+the payload tree (`embedded_resource` root with `page` and `record` nodes, root
+`schema_version`), the warning codes a consumer can treat as findings (including one
+`qr_decoded` per distinct decoded QR value, capped), the known gaps, and the Loadout mapper that consumes it.
+
+```bash
+python -m blastbox.contract.engine_contract validate blastbox-engine.toml
+python -m blastbox.contract.engine_contract check blastbox-engine.toml <outdir>/metadata.json
+```
+
+`tests/unit/test_engine_contract.py` validates the file, and
+`tests/integration/test_blastbox_roundtrip.py` checks every safe fixture's host-validated
+envelope against it. Both skip on a blastbox release without `blastbox.contract.engine_contract`.
+
 ## Project layout
 
 ```

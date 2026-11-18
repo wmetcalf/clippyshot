@@ -6,19 +6,8 @@ validate_worker_output → host-accepted Envelope with sha-verified artifacts.
 Marked ``integration`` — requires a working LibreOffice + sandbox on the host.
 Run with: .venv/bin/pytest tests/integration/test_blastbox_roundtrip.py -v -m integration
 
-Design note
------------
-``ClippyShotPage`` (a ``Page`` subclass) is exported from ``clippyshot.engine``
-and registered in the blastbox node-type union.  It is usable for in-process
-typed trees.  However, when the harness serialises the payload to JSON and the
-host re-parses it, pydantic's discriminated-union rebuild does not update the
-concrete ``EmbeddedResource.children`` annotation.  The engine therefore emits
-standard ``Page`` nodes (with scanner data as ``Record`` children) in the wire
-format, while ``ClippyShotPage`` is available for callers that build typed
-in-process trees.
-
-The tests below verify both the wire-format round-trip (``Page`` nodes survive
-host re-seal) and the ``ClippyShotPage`` API (in-process construction).
+The engine emits standard ``Page`` nodes (scanner data as ``Record`` children), so
+the typed tree survives the worker seal -> host re-parse round-trip unchanged.
 """
 from __future__ import annotations
 
@@ -27,9 +16,7 @@ from pathlib import Path
 
 import pytest
 
-# Import engine FIRST so ClippyShotPage is registered before any blastbox
-# type parsing happens in this process.
-from clippyshot.engine import ClippyShotEngine, ClippyShotPage
+from clippyshot.engine import ClippyShotEngine
 
 from blastbox.contract import Page, find_by_type
 from blastbox.errors import OutputTrustError
@@ -181,28 +168,46 @@ def test_roundtrip_wrong_sha256_raises(detonation_output):
         )
 
 
-def test_clippyshot_page_in_process():
-    """ClippyShotPage can be constructed and carries qr / ocr fields (in-process API).
+_SAFE_FIXTURES = sorted((_FIXTURE_DOCX.parent).iterdir())
 
-    This test does NOT go through the JSON wire-format round-trip — it verifies
-    that the registered subclass works correctly for callers that build typed
-    in-process trees.
-    """
-    from blastbox.contract import ArtifactRef, Dimensions, Hash
 
-    page = ClippyShotPage(
-        index=0,
-        dims=Dimensions(width=210.0, height=297.0, unit="mm"),
-        image=ArtifactRef(id="p0"),
-        hashes=[Hash(algo="sha256", value="a" * 64)],
-        qr=[{"format": "QR_CODE", "value": "hello"}],
-        qr_skipped=None,
-        ocr={"text": "hello world", "char_count": 11},
+def _assert_conforms(envelope) -> None:
+    """Check a host-validated envelope against ``blastbox-engine.toml``.
+
+    Skips on a released blastbox that predates ``blastbox.contract.engine_contract``."""
+    ec = pytest.importorskip("blastbox.contract.engine_contract")
+    ec.assert_conforms(ec.load_contract(ec.find_contract(__file__)), envelope)
+
+
+def test_roundtrip_conforms_to_engine_contract(detonation_output):
+    """The host-accepted envelope is what ``blastbox-engine.toml`` promises."""
+    out, input_sha256 = detonation_output
+    env = validate_worker_output(
+        output_dir=out,
+        input_sha256=input_sha256,
+        engine="clippyshot",
+        limits=Limits(),
     )
-    assert page.type == "clippyshot_page"
-    assert isinstance(page, Page)  # subclass check
-    assert len(page.qr) == 1
-    assert page.ocr["char_count"] == 11
-    # find_by_type with Page should find ClippyShotPage (subclass)
-    found = find_by_type(page, Page)
-    assert any(isinstance(n, ClippyShotPage) for n in found)
+    _assert_conforms(env)
+
+
+@pytest.mark.parametrize("fixture", _SAFE_FIXTURES, ids=lambda p: p.name)
+def test_every_safe_fixture_conforms_to_engine_contract(fixture, tmp_path):
+    """Every safe fixture, ok or rejected, yields a contract-conforming envelope.
+
+    Covers the spreadsheet, trimmed-derivative and rejected (PDF input) paths the
+    single-docx fixture above never reaches. No safe fixture yields a focused crop; that
+    family is checked by tests/unit/test_engine_mapping.py's stub instead."""
+    pytest.importorskip("blastbox.contract.engine_contract")
+    out = tmp_path / "out"
+    out.mkdir()
+    assert run_detonation(ClippyShotEngine(), input_path=fixture, output_dir=out,
+                          limits=Limits()) == 0
+    env = validate_worker_output(
+        output_dir=out,
+        input_sha256=_sha256_file(fixture),
+        engine="clippyshot",
+        limits=Limits(),
+    )
+    _assert_conforms(env)
+

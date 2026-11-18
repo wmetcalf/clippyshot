@@ -22,6 +22,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from clippyshot._argv import assert_positional as _assert_positional
+from clippyshot.observability import get_logger
+
+_log = get_logger("clippyshot.qr")
 
 # Internal zxing format tokens are lowercase snake_case (``qr_code``,
 # ``data_matrix``, ``ean_13``, ``pdf417``), separated by ``,`` and/or ``|``.
@@ -157,7 +160,9 @@ def parse_zxing_output(stdout: str) -> list[QRResult]:
     lines are dropped. Returns an empty list on empty input.
     """
     results: list[QRResult] = []
-    for raw_line in (stdout or "").splitlines():
+    # "\n" only: splitlines() would also break inside a JSON string at a raw U+2028/U+2029,
+    # and a fragment of an attacker's payload could then parse as its own record.
+    for raw_line in (stdout or "").split("\n"):
         line = raw_line.strip()
         if not line:
             continue
@@ -246,6 +251,49 @@ def _zxing_supports_json(bin_path: str, runner=None) -> bool:
     return result
 
 
+_zxing_escaped_mode_cache: dict[str, bool] = {}
+
+
+def _zxing_supports_escaped_mode(bin_path: str, runner=None) -> bool | None:
+    """True if this ZXingReader accepts ``-mode escaped`` (2.2.x plain-text output).
+
+    The plain-text output is line-structured, but ZXing prints the decoded text raw, so a
+    payload containing a newline would be cut at it, and one containing a blank line plus
+    ``Text:``/``Format:`` lines would forge extra records. ``-mode escaped`` renders
+    non-graphical characters as ``<LF>``, ``<NUL>`` ... so every payload stays on its line.
+    Probed like :func:`_zxing_supports_json` (through ``runner`` when given) and cached.
+    """
+    if bin_path in _zxing_escaped_mode_cache:
+        return _zxing_escaped_mode_cache[bin_path]
+    # Escaping is a security control here, so only a probe that ran to completion is
+    # cached; a failed one (spawn error, timeout) is logged and retried on the next scan.
+    try:
+        if runner is not None:
+            exit_code, stdout, stderr = runner([bin_path, "-help"], 5)
+            help_text = stdout + stderr
+        else:
+            proc = subprocess.run(
+                [bin_path, "-help"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            exit_code, help_text = proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    except Exception as e:  # noqa: BLE001
+        _log.warning("zxing_escaped_mode_probe_failed", error=str(e)[:200])
+        return None
+    if "escaped" in help_text:
+        _zxing_escaped_mode_cache[bin_path] = True
+        return True
+    if exit_code == 0 and "-format" in help_text:
+        # A real ZXingReader usage text without the option: an older build, for good.
+        _zxing_escaped_mode_cache[bin_path] = False
+        return False
+    # Anything else (e.g. the sandbox failed to start and wrote its own diagnostic) is a
+    # failed probe: never cached, so it cannot switch escaping off for the process.
+    _log.warning("zxing_escaped_mode_probe_failed", exit_code=exit_code,
+                 output=help_text[:200])
+    return None
+
+
 # Format name map: ZXingReader 2.2.x plain-text → normalized internal name
 _PLAINTEXT_FORMAT_MAP: dict[str, str] = {
     "qrcode": "qr_code",
@@ -310,7 +358,10 @@ def parse_zxing_plaintext_output(stdout: str) -> list[QRResult]:
             )
         )
 
-    for raw_line in (stdout or "").splitlines():
+    # Split on "\n" only: str.splitlines() also breaks on U+2028/U+2029/U+0085/\x1c-\x1e,
+    # which ZXing leaves literal inside a decoded Text even in escaped mode, so a payload could
+    # still start a forged "Text:"/"Format:" record.
+    for raw_line in (stdout or "").split("\n"):
         line = raw_line.strip()
         if not line:
             if current:
@@ -398,6 +449,11 @@ def scan_qr(
         # ZXingReader 2.2.x: uses -format (singular) with PascalCase names
         v2_formats = _translate_formats_for_v2(formats)
         argv = [bin_path, "-fast", "-norotate", "-noscale"]
+        # Fail closed: escape unless this build is KNOWN to lack the option. A probe that
+        # failed (None) still escapes; if the build really lacks it, the scan errors and the
+        # page is reported as a QR scan error rather than parsed unescaped.
+        if _zxing_supports_escaped_mode(bin_path, runner=runner) is not False:
+            argv += ["-mode", "escaped"]
         if v2_formats:
             argv += ["-format", v2_formats]
         argv.append(str(png_path))
@@ -419,7 +475,8 @@ def scan_qr(
         )
     if use_json:
         return parse_zxing_output(stdout)
-    # 2.2.x: "No barcode found" on stdout means empty result
-    if "No barcode found" in stdout:
-        return []
+    # 2.2.x prints "No barcode found" when nothing decodes; that line has no Format: and
+    # parses to no record. Do NOT short-circuit on the substring: decoded Text: lines are
+    # attacker-controlled, and a decoy QR reading "No barcode found" would erase every
+    # other code on the page.
     return parse_zxing_plaintext_output(stdout)
