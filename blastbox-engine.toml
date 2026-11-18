@@ -54,17 +54,20 @@ description = "The LibreOffice PDF export the pages were rasterized from. Declar
 [payload]
 root = "embedded_resource"
 node_types = ["embedded_resource", "page", "record"]
-# Checked on the EmbeddedResource root's metadata Record. engine.py detonate() sets all six on
+# Checked on the EmbeddedResource root's metadata Record. engine.py detonate() sets all seven on
 # every ok result (defaults 0/False/""; clippyshot_metadata is "" if json.dumps fails).
-# No schema_version: the metadata carries none (see evidence-in-opaque-json).
-required_root_fields = ["label", "page_count_total", "page_count_rendered", "truncated", "clippyshot_version", "clippyshot_metadata"]
+# schema_version (engine.METADATA_SCHEMA_VERSION) versions the clippyshot_metadata JSON layout
+# and the typed fields beside it.
+required_root_fields = ["label", "page_count_total", "page_count_rendered", "truncated", "clippyshot_version", "clippyshot_metadata", "schema_version"]
+schema_version = "1"
 
-# altchunk_present / macro_enabled_format / extension_mismatch are envelope warnings with
-# stable codes. They are the only findings the output carries in a stable form.
+# Findings are envelope warnings with stable codes. Per page, the scanner Record child of each
+# Page carries qr_values (every decoded QR payload, uncapped), ocr_text (<= 10000 chars) and
+# effective_dpi (set only on a page clamped below the requested DPI).
 [[detections]]
 code = "altchunk_present"
 severity = "medium"
-source = "warnings[].code (one per <w:altChunk> part; part_name/content_type/size only in clippyshot_metadata.warnings[])"
+source = "warnings[].code (one per <w:altChunk> part; context is compact JSON {part_name, content_type, size}, part_name shortened to fit 255 chars)"
 description = "DOCX-family input embeds an altChunk part, a common AV-evasion wrapper."
 
 [[detections]]
@@ -79,45 +82,41 @@ severity = "low"
 source = "warnings[].code"
 description = "Input extension disagrees with the detected type."
 
+[[detections]]
+code = "qr_decoded"
+severity = "info"
+source = "warnings[].code (one per decoded QR payload, at most 256 per document; message is the value cut at 2000 chars, context 'page N' plus ' (value truncated)' when cut)"
+description = "A QR code decoded from a rendered page (often a URL). Full values are on the page's scanner Record (qr_values)."
+
+[[detections]]
+code = "qr_decoded_truncated"
+severity = "info"
+source = "warnings[].code (once, after the 256th qr_decoded)"
+description = "More QR payloads were decoded than the warning cap; qr_values on each page still lists them all."
+
 [[gaps]]
 id = "root-fields-ok-only"
-description = "required_root_fields are checked on ok results only. A rejected result's root metadata carries just label='rejected' and reason, which the contract cannot require. clippyshot_metadata is required present but may be the empty string when json.dumps fails (fail-open), and clippyshot_version may be empty."
+description = "required_root_fields are checked on ok results only. A rejected result's root metadata carries just label='rejected' and reason, which the contract cannot require. clippyshot_metadata is required present but may be the empty string when json.dumps fails (fail-open), and clippyshot_version may be empty. Left: the checker (blastbox engine_contract._check) applies required_root_fields to ok results only, so this is a blastbox checker scope, not engine output."
 
 [[gaps]]
 id = "evidence-in-opaque-json"
-description = "QR decoded values, full OCR text, per-page derivative stats, render timings, blank_pages and the sheets block live only in metadata.fields.clippyshot_metadata, a JSON string with no schema version. The typed tree carries just qr_count, qr_skipped, ocr_text (cut at 10000 chars), ocr_char_count and ocr_skipped per page."
-
-[[gaps]]
-id = "qr-not-a-detection"
-description = "Decoded QR payloads (often URLs) are IOC-bearing findings but have no detection code or typed node; consumers must parse clippyshot_metadata.pages[].qr[].value."
-
-[[gaps]]
-id = "warning-detail-dropped"
-description = "Warnings are flattened to code+message (<=2000 chars). resolution_clamped pages[] and altchunk_present part_name/content_type/size survive only in clippyshot_metadata.warnings[]."
-
-[[gaps]]
-id = "clippyshot-page-unused"
-description = "ClippyShotPage (_type clippyshot_page) is registered with register_node_type but never emitted: detonate() uses plain Page + Record children because nested children do not round-trip a registered subtype."
+description = "Full OCR text beyond 10000 chars, QR format/position, per-page derivative stats (trimmed/focused), render timings, blank_pages and the sheets block live only in metadata.fields.clippyshot_metadata, a JSON string (versioned by the root schema_version field, but with no JSON schema). Typing them is a payload-budget decision: OCR text as ExtractedText would duplicate the largest field already in that JSON."
 
 [[gaps]]
 id = "no-artifact-byte-cap"
-description = "Page PNGs and document.pdf have no byte cap in the engine (pages are capped by pixel budget, max_width/height_px). max_input_bytes is the default; CLIPPYSHOT_MAX_INPUT can raise it to 64 GiB."
-
-[[gaps]]
-id = "undeclared-converter-metadata"
-description = "Converter.convert() writes its own metadata.json into outdir; it is undeclared and the harness overwrites it with the sealed envelope."
+description = "Page PNGs and document.pdf have no byte cap in the engine (pages are capped by pixel budget, max_width/height_px). max_input_bytes is the default; CLIPPYSHOT_MAX_INPUT can raise it to 64 GiB. Left for an owner decision on per-artifact byte caps; Loadout's tighter caps are being fixed consumer-side."
 
 [[gaps]]
 id = "rejected-is-not-error"
-description = "Unsupported, oversized or structurally bad input is status rejected with warning code rejected and the reason in payload.metadata.fields.reason, not engine_error."
+description = "Unsupported, oversized or structurally bad input is status rejected with warning code rejected and the reason in payload.metadata.fields.reason, not engine_error. Left: deliberate verdict semantics (the dispatcher keeps a rejected job DONE); the consumer-side mis-mapping is loadout-rejected-as-unavailable."
 
 [[gaps]]
 id = "loadout-drops-warning-findings"
-description = "Loadout maps clippyshot to dets=[] (engines.py, 'format/render success ... not phishing findings'), so altchunk_present/macro_enabled_format/extension_mismatch never become detections although the manifest lists emits=detection."
+description = "Loadout maps clippyshot to dets=[] (engines.py, 'format/render success ... not phishing findings'), so altchunk_present/macro_enabled_format/extension_mismatch never become detections although the manifest lists emits=detection. The same applies to qr_decoded."
 
 [[gaps]]
 id = "loadout-reads-unemitted-sheet-fields"
-description = "document_outputs.render_coverage reads clippyshot_metadata.sheets.inventory, export_mode and page_mapping_verified. ClippyShot master emits only sheets.total/rendered/non_rendered, so those evidence fields are always null/empty."
+description = "document_outputs.render_coverage reads clippyshot_metadata.sheets.inventory, export_mode and page_mapping_verified. ClippyShot master emits only sheets.total/rendered/non_rendered, so those evidence fields are always null/empty. Engine fix (export-mode + per-sheet provenance) is https://github.com/wmetcalf/clippyshot/pull/61; drop this gap once it merges."
 
 [[gaps]]
 id = "loadout-byte-and-count-limits"

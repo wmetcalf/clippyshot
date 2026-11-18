@@ -486,9 +486,9 @@ corresponding `tesseract-ocr-<lang>` package.
 
 [`blastbox-engine.toml`](blastbox-engine.toml) states what the `clippyshot` blastbox engine
 emits: the artifact families (page PNGs `pN`, `pN-trimmed`, `pN-focused`, `document-pdf`),
-the payload tree (`embedded_resource` root with `page` and `record` nodes), the warning codes a
-consumer can treat as findings, the known gaps, and the Loadout mapper that consumes it.
-It describes current output; it does not change engine behaviour.
+the payload tree (`embedded_resource` root with `page` and `record` nodes, root
+`schema_version`), the warning codes a consumer can treat as findings (including one
+`qr_decoded` per decoded QR payload), the known gaps, and the Loadout mapper that consumes it.
 
 ```bash
 python -m blastbox.contract.engine_contract validate blastbox-engine.toml
