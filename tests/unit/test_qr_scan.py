@@ -199,3 +199,14 @@ def test_a_failed_escaped_mode_probe_is_retried_not_cached(monkeypatch):
     assert qr_mod._zxing_supports_escaped_mode(bin_path, runner=flaky) is False
     assert bin_path not in qr_mod._zxing_escaped_mode_cache
     assert qr_mod._zxing_supports_escaped_mode(bin_path, runner=flaky) is True
+
+
+def test_a_sandbox_failure_during_the_probe_is_not_cached(monkeypatch):
+    bin_path = "/y/ZXingReader"
+    monkeypatch.delitem(qr_mod._zxing_escaped_mode_cache, bin_path, raising=False)
+    runner = lambda argv, t: (1, "", "bwrap: Creating new namespace failed: EAGAIN")  # noqa: E731
+    assert qr_mod._zxing_supports_escaped_mode(bin_path, runner=runner) is False
+    assert bin_path not in qr_mod._zxing_escaped_mode_cache
+    old = lambda argv, t: (0, "Usage: ZXingReader [options]\n    -format <FORMAT>\n", "")  # noqa: E731
+    assert qr_mod._zxing_supports_escaped_mode(bin_path, runner=old) is False
+    assert qr_mod._zxing_escaped_mode_cache[bin_path] is False

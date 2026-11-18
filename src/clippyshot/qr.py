@@ -280,12 +280,18 @@ def _zxing_supports_escaped_mode(bin_path: str, runner=None) -> bool:
     except Exception as e:  # noqa: BLE001
         _log.warning("zxing_escaped_mode_probe_failed", error=str(e)[:200])
         return False
-    if exit_code != 0 and not help_text:
-        _log.warning("zxing_escaped_mode_probe_failed", exit_code=exit_code)
+    if "escaped" in help_text:
+        _zxing_escaped_mode_cache[bin_path] = True
+        return True
+    if exit_code == 0 and "-format" in help_text:
+        # A real ZXingReader usage text without the option: an older build, for good.
+        _zxing_escaped_mode_cache[bin_path] = False
         return False
-    result = "escaped" in help_text
-    _zxing_escaped_mode_cache[bin_path] = result
-    return result
+    # Anything else (e.g. the sandbox failed to start and wrote its own diagnostic) is a
+    # failed probe: never cached, so it cannot switch escaping off for the process.
+    _log.warning("zxing_escaped_mode_probe_failed", exit_code=exit_code,
+                 output=help_text[:200])
+    return False
 
 
 # Format name map: ZXingReader 2.2.x plain-text → normalized internal name
