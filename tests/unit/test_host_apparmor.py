@@ -259,3 +259,12 @@ def test_any_failure_under_a_visible_stock_profile_names_the_disable_fix():
 def test_unknown_kernel_state_is_not_reported_as_absent():
     st = ha.StockBwrapProfileState(installed=False, disabled=False, loaded=None)
     assert st.describe() != "absent"
+
+
+def test_unrelated_failure_with_an_unloaded_stock_profile_is_not_blamed_on_it():
+    enabled_unloaded = ha.StockBwrapProfileState(installed=True, disabled=False, loaded=False)
+    p = ha.probe_aa_exec("/b", "/a", "clippyshot-soffice",
+                         runner=_Runner(1, "bwrap: No space left on device"),
+                         stock_state=enabled_unloaded)
+    assert p.cause == "failed"
+    assert "No space left on device" in p.message()
