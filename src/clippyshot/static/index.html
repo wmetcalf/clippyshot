@@ -519,20 +519,32 @@ async function loadResult(jobId, opts) {
     // Render card
     const rnd = meta.render || {};
     const dur = rnd.duration_ms || {};
-    // Sheet inventory (spreadsheets only). Format as "N/M (+K hidden/macro)"
-    // where N is the number of rendered sheets and K are those LO skipped.
+    // Sheet inventory (spreadsheets only): "N/M", then hidden/macro sheets (a malware
+    // signal whether or not LO rendered them), sheets not captured (page cap, or a
+    // paginated export that dropped hidden sheets), and an unverified page mapping.
+    // Older metadata has no inventory; its non_rendered list WAS the hidden/macro list.
     const sh = meta.sheets;
     let sheetsRow = null;
     if (sh && typeof sh === 'object') {
+      const fmt = s => escapeHtml(s.name) +
+        (s.state && s.state !== 'visible' ? ' [' + escapeHtml(s.state) + ']' : '') +
+        (s.type === 'macro' ? ' [macro]' : '');
+      const inv = Array.isArray(sh.inventory) ? sh.inventory : null;
       const nr = Array.isArray(sh.non_rendered) ? sh.non_rendered : [];
-      const nrLabel = nr.length
-        ? ' <span class="warn">(+' + nr.length + ' ' +
-          nr.map(s => escapeHtml(s.name) +
-            (s.state && s.state !== 'visible' ? ' [' + escapeHtml(s.state) + ']' : '') +
-            (s.type === 'macro' ? ' [macro]' : '')
-          ).join(', ') + ')</span>'
-        : '';
-      sheetsRow = ['Sheets', (sh.rendered ?? '?') + '/' + (sh.total ?? '?') + nrLabel];
+      const hidden = inv
+        ? inv.filter(s => (s.state && s.state !== 'visible') || s.type === 'macro')
+        : nr;
+      const notCaptured = inv ? nr : [];
+      let label = '';
+      if (hidden.length)
+        label += ' <span class="warn">(hidden/macro: ' + hidden.map(fmt).join(', ') + ')</span>';
+      if (notCaptured.length)
+        label += ' <span class="warn">(not captured: ' + notCaptured.map(fmt).join(', ') + ')</span>';
+      if (sh.page_mapping_verified === false)
+        label += ' <span class="warn">(page-to-sheet mapping unverified)</span>';
+      if (sh.inventory_truncated)
+        label += ' <span class="warn">(inventory truncated)</span>';
+      sheetsRow = ['Sheets', (sh.rendered ?? '?') + '/' + (sh.total ?? '?') + label];
     }
     setTable('render-table', [
       ['Pages', rnd.page_count_rendered+'/'+rnd.page_count_total

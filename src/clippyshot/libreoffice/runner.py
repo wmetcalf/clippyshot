@@ -69,11 +69,33 @@ class LibreOfficeRunner:
         # Each worker process handles one job sequentially, so a single
         # instance attribute is safe here.
         self.last_run_sheets: list[dict] = []
+        # Ways the workbook could make last_run_sheets differ from what LO imported
+        # (sheet_prep.read_sheet_inventory); non-empty => no positional page mapping.
+        self.last_run_sheet_anomalies: list[str] = []
+        self.last_run_sheets_from_reexport = False
+        self._two_pass_output: Path | None = None
+        self.last_run_single_page_sheets = False
+        # PDF export filter name the successful export used ("calc_pdf_Export",
+        # "writer_pdf_Export", ...), or "" before/without a successful export.
+        self.last_run_export_filter = ""
         # Populated when a docx-family input contains <w:altChunk>
         # references to embedded content (MHT / HTML / nested Word).
         # Entries are lightweight summaries (no raw bytes) for surfacing
         # as warnings in metadata.
         self.last_altchunks: list[dict] = []
+
+    def _capture_sheets(self, exported: Path) -> None:
+        """Record the sheet inventory of the workbook LO just exported (best effort)."""
+        try:
+            from clippyshot.libreoffice.sheet_prep import read_sheet_inventory
+
+            self.last_run_sheets, self.last_run_sheet_anomalies = read_sheet_inventory(exported)
+        except Exception:
+            self.last_run_sheets, self.last_run_sheet_anomalies = [], []
+        # xls/xlsb/ods/csv: the list was read from LO's own xlsx re-export, which keeps sheet
+        # order and count but writes XLM macro sheets as worksheets and veryHidden as hidden.
+        self.last_run_sheets_from_reexport = (
+            self._two_pass_output is not None and exported == self._two_pass_output)
 
     def convert_to_pdf(
         self,
@@ -173,6 +195,11 @@ class LibreOfficeRunner:
         # Reset per-call capture; populated by subsequent pre- or
         # post-processing steps.
         self.last_run_sheets = []
+        self.last_run_sheet_anomalies = []
+        self.last_run_sheets_from_reexport = False
+        self._two_pass_output = None
+        self.last_run_single_page_sheets = False
+        self.last_run_export_filter = ""
         self.last_altchunks = []
 
         # Stage input into a per-call dir so we can mount its parent
@@ -403,6 +430,7 @@ class LibreOfficeRunner:
                         shutil.move(str(converted), str(final))
                         staged_input = final
                         staged_name = final.name
+                        self._two_pass_output = final
                         _log.info(
                             "two_pass: patched %s, using for PDF export", staged_name
                         )
@@ -478,15 +506,11 @@ class LibreOfficeRunner:
                     )
                 else:
                     _warm_diag("WARM_OK\n")
-                    if staged_input.suffix.lower() in (".xlsx", ".xlsm"):
-                        try:
-                            from clippyshot.libreoffice.sheet_prep import (
-                                read_sheet_list,
-                            )
-
-                            self.last_run_sheets = read_sheet_list(staged_input)
-                        except Exception:
-                            self.last_run_sheets = []
+                    from clippyshot.libreoffice.uno import pdf_filter_for_label
+                    filter_name, export_options = pdf_filter_for_label(label)
+                    self.last_run_single_page_sheets = export_options.get('SinglePageSheets') == 'true'
+                    self.last_run_export_filter = filter_name
+                    self._capture_sheets(staged_input)
                     return warm_pdf
 
             last_error = None
@@ -584,21 +608,19 @@ class LibreOfficeRunner:
                             last_error = "soffice produced no PDF"
                             break
 
+                    self.last_run_single_page_sheets = filt == _CALC_FILTER
+                    self.last_run_export_filter = filt.split(":", 1)[0]
                     # Capture sheet names from the staged xlsx (the final
                     # form LO just exported from). For xlsx/xlsm inputs
                     # this is the original file patched in place; for
                     # xls/xlsb/ods/csv it's the intermediate xlsx the
                     # two-pass produced. Either way it's what LO actually
                     # saw, so the visible-sheet order aligns with the PDF.
-                    if staged_input.suffix.lower() in (".xlsx", ".xlsm"):
-                        try:
-                            from clippyshot.libreoffice.sheet_prep import (
-                                read_sheet_list,
-                            )
-
-                            self.last_run_sheets = read_sheet_list(staged_input)
-                        except Exception:
-                            self.last_run_sheets = []
+                    # Not gated on the suffix or the filter: the original-name retry exports
+                    # an OOXML workbook under e.g. a .xls name, the writer fallback still
+                    # exports a workbook, and the reader returns [] for anything that is not
+                    # an OOXML workbook zip.
+                    self._capture_sheets(attempt_input)
 
                     return expected_pdf
 

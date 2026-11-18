@@ -23,6 +23,7 @@ from clippyshot.errors import (
     RasterizeError,
 )
 from clippyshot.hasher import hash_png_bytes
+from clippyshot.libreoffice.sheet_prep import MAX_SHEETS
 from clippyshot.limits import Limits
 from clippyshot.observability import (
     JOBS_IN_FLIGHT,
@@ -59,6 +60,28 @@ _MIN_OCR_CALL_S = 30
 
 
 
+_MAX_SHEET_ATTR_CHARS = 32
+
+
+def _json_bounded(text: str, max_json_chars: int) -> str:
+    """Longest prefix of ``text`` whose JSON encoding (ASCII-escaped, as json.dumps writes
+    metadata.json) is at most ``max_json_chars``. Bounds the sealed size, which a code-point
+    cap does not: one astral character escapes to 12 bytes."""
+    used = 2  # the quotes
+    for i, ch in enumerate(text):
+        used += len(json.dumps(ch)) - 2
+        if used > max_json_chars:
+            return text[:i]
+    return text
+
+
+def _sheet_anomalies_from_runner(runner) -> list[str]:
+    raw = getattr(runner, "last_run_sheet_anomalies", None)
+    if not isinstance(raw, list):
+        return []
+    return sorted({a[:64] for a in raw if isinstance(a, str) and a})[:32]
+
+
 def _sheets_from_runner(runner) -> list[dict]:
     """Read captured sheet inventory off the runner.
 
@@ -80,49 +103,78 @@ def _sheets_from_runner(runner) -> list[dict]:
             continue
         if len(name) > _MAX_SHEET_NAME_CHARS:
             name = name[:_MAX_SHEET_NAME_CHARS]
+        name = _json_bounded(name, _MAX_SHEET_NAME_CHARS + 2) or "?"
         state = s.get("state", "visible")
         sheet_type = s.get("type", "worksheet")
         if not isinstance(state, str):
             state = "visible"
         if not isinstance(sheet_type, str):
             sheet_type = "worksheet"
-        cleaned.append({"name": name, "state": state, "type": sheet_type})
+        # Attacker-written attributes: bound them like the name.
+        cleaned.append({"name": name,
+                        "state": _json_bounded(state, _MAX_SHEET_ATTR_CHARS),
+                        "type": _json_bounded(sheet_type, _MAX_SHEET_ATTR_CHARS),
+                        "active": s.get("active") is True})
+        if len(cleaned) > MAX_SHEETS:
+            break  # one past the cap: _sheet_provenance reports the inventory truncated
     return cleaned
 
 
-def _page_sheet_names(sheets: list[dict], page_count: int) -> list[str | None]:
-    """Map rasterized page index → source sheet name (or ``None``).
+def _page_sheet_names(sheets: list[dict], page_count: int, *,
+                      total_pages: int | None = None,
+                      single_page_sheets: bool = False,
+                      anomalies: list[str] | None = None) -> list[str | None]:
+    """SinglePageSheets exports hidden sheets too; paginated fallback is not positional.
 
-    ``SinglePageSheets=true`` lays down exactly one PDF page per sheet LO
-    chose to export, in workbook order. We reproduce the same filter so
-    position i of the filtered list corresponds to PDF page i+1. Any tail
-    mismatch falls through to ``None`` on the unaligned entries.
+    Bind names only when the actual export mode and full PDF count agree with the
+    workbook inventory. A capped rasterization may safely use the matching prefix.
     """
-    from clippyshot.libreoffice.sheet_prep import visible_sheet_names
-    if not sheets:
+    if (not single_page_sheets or anomalies or len(sheets) > MAX_SHEETS
+            or total_pages != len(sheets)):
         return [None] * page_count
-    visible = visible_sheet_names(sheets)
-    return [visible[i] if i < len(visible) else None for i in range(page_count)]
+    return [sheets[i]['name'] if i < len(sheets) else None for i in range(page_count)]
 
 
-def _non_rendered_sheets(sheets: list[dict]) -> list[dict]:
-    """Return sheet entries LO is expected to skip (hidden / macro).
+def _sheet_provenance(sheets: list[dict], total_pages: int, single_page_sheets: bool,
+                      pages: list[dict], blank_pages: list[int], *,
+                      paginated_calc: bool = False,
+                      anomalies: list[str] | None = None) -> dict:
+    """Per-sheet capture status for ``metadata.sheets``.
 
-    Useful malware-analysis signal: a hidden or Excel 4 macro sheet is
-    present in the workbook but never rasterized, so the usual per-page
-    scanners can't see it.
+    ``sheets`` may carry one entry past MAX_SHEETS (the reader's truncation signal); the
+    inventory then keeps MAX_SHEETS entries, ``inventory_truncated`` is true and the mapping
+    is unverified. ``paginated_calc``: the export was plain ``calc_pdf_Export``, which never
+    emits a non-visible sheet (other than the active tab, which LO forces visible), so those
+    are ``not_captured`` even without a mapping. ``anomalies`` (sheet_prep.read_sheet_inventory)
+    non-empty means the reader's list may not be LO's: nothing is claimed positionally, and
+    they are reported as ``reader_anomalies``.
     """
-    out: list[dict] = []
-    for s in sheets:
-        state = s.get("state", "visible")
-        sheet_type = s.get("type", "worksheet")
-        if state != "visible" or sheet_type == "macro":
-            name = s.get("name")
-            if isinstance(name, str) and name:
-                if len(name) > _MAX_SHEET_NAME_CHARS:
-                    name = name[:_MAX_SHEET_NAME_CHARS]
-                out.append({"name": name, "state": state, "type": sheet_type})
-    return out
+    anomalies = list(anomalies or [])
+    truncated = len(sheets) > MAX_SHEETS
+    if truncated:
+        sheets = sheets[:MAX_SHEETS]
+    mapped = (single_page_sheets and not truncated and not anomalies
+              and total_pages == len(sheets))
+    captured = {p['index'] for p in pages}
+    blanks = set(blank_pages)
+    inventory = []
+    for index, sheet in enumerate(sheets, 1):
+        if mapped:
+            status = ('captured' if index in captured else
+                      'blank_skipped' if index in blanks else 'not_captured')
+        elif (paginated_calc and not single_page_sheets and not anomalies
+              and not sheet.get('active') and sheet.get('state') != 'visible'):
+            status = 'not_captured'
+        else:
+            status = 'unverified'
+        inventory.append({**sheet, 'page_number': index if mapped else None, 'capture_status': status})
+    return {'total': len(sheets), 'rendered': len(captured) if mapped else None,
+            'exported': total_pages if mapped else None,
+            'export_mode': 'single_page_sheets' if single_page_sheets else 'paginated_or_unknown',
+            'page_mapping_verified': mapped, 'inventory_truncated': truncated,
+            'reader_anomalies': anomalies,
+            'inventory': inventory,
+            'non_rendered': [s for s in inventory if s['capture_status'] == 'not_captured']}
 
 
 def _mediabox_mm(page) -> tuple[float, float]:
@@ -635,12 +687,11 @@ class Converter:
                         _sheets_discovered = _sheets_from_runner(self._runner)
                     else:
                         _sheets_discovered = []
-                    page_sheet_names = _page_sheet_names(_sheets_discovered, pages_to_render)
-                    # Sheets that LO skips (hidden / veryHidden / macro)
-                    # never appear in the PDF so they don't get a page —
-                    # but their presence is still useful malware-analysis
-                    # signal, so surface them on the metadata below.
-                    non_rendered_sheets = _non_rendered_sheets(_sheets_discovered)
+                    single_page_sheets = getattr(self._runner, 'last_run_single_page_sheets', False) is True
+                    _sheet_anomalies = _sheet_anomalies_from_runner(self._runner)
+                    page_sheet_names = _page_sheet_names(_sheets_discovered, pages_to_render,
+                        total_pages=total_pages, single_page_sheets=single_page_sheets,
+                        anomalies=_sheet_anomalies)
                     # Detect which PDF pages are OCR-worthy. We run OCR on a
                     # page when ANY of:
                     #   (a) the page carries raster images (pypdf reports
@@ -1047,16 +1098,22 @@ class Converter:
                 # Sheet sidecar is spreadsheet-only; keep the top-level
                 # metadata lean and only attach the block when at least
                 # one sheet (rendered or not) was discovered.
-                if detected.label in _SPREADSHEET_LABELS and _sheets_discovered:
-                    metadata["sheets"] = {
-                        "total": len(_sheets_discovered),
-                        "rendered": sum(
-                            1 for s in _sheets_discovered
-                            if s.get("state") == "visible"
-                            and s.get("type") != "macro"
-                        ),
-                        "non_rendered": non_rendered_sheets,
-                    }
+                # Also when the reader found no usable sheet but reported why (unreadable
+                # workbook, all sheets unnamed, ...): an unverified block, not silence.
+                if detected.label in _SPREADSHEET_LABELS and (
+                        _sheets_discovered or _sheet_anomalies):
+                    metadata["sheets"] = {**_sheet_provenance(
+                        _sheets_discovered, total_pages, single_page_sheets, page_records,
+                        blank_indices if options.limits.skip_blanks else [],
+                        paginated_calc=getattr(self._runner, 'last_run_export_filter', '')
+                        == 'calc_pdf_Export',
+                        anomalies=_sheet_anomalies),
+                        # Where type/state came from: a re-export (xls/xlsb/ods/csv two-pass)
+                        # loses XLM 'macro' and 'veryHidden' (see runner._capture_sheets).
+                        "inventory_source": (
+                            "libreoffice_xlsx_reexport"
+                            if getattr(self._runner, "last_run_sheets_from_reexport", False)
+                            is True else "input_workbook")}
                 (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
             finally:
                 # 7. Copy the intermediate PDF to the output dir as
