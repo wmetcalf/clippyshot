@@ -372,7 +372,9 @@ def _check_ole_workbook_size(path: Path) -> bool:
         import olefile
         if not olefile.isOleFile(str(path)):
             return False
-        ole = olefile.OleFileIO(str(path))
+        from clippyshot.ole_guard import open_ole
+
+        ole = open_ole(path)  # bounded CFB pre-check; a refusal falls to the except
         for stream_name in ("Workbook", "Book"):
             if ole.exists(stream_name):
                 size = ole.get_size(stream_name)

@@ -143,30 +143,20 @@ _BENIGN_OLE_ISSUES = (
 
 
 def _check_cfb_header(path: Path) -> None:
-    """Refuse a CFB header whose counts olefile would act on before any cap of ours runs
-    (the DIFAT/FAT loops in its constructor, copied quadratically), or whose mini-stream
-    cutoff olefile silently normalises to 4096 while LibreOffice honours it (the two would
-    then read different bytes for the same stream)."""
-    size = path.stat().st_size
+    """Refuse a CFB olefile would do unbounded work on (ole_guard: header counts absurd for
+    the file, a directory chain past MAX_OLE_DIR_ENTRIES, looping or leaving the file), or
+    whose mini-stream cutoff olefile silently normalises to 4096 while LibreOffice honours
+    it (the two would then read different bytes for the same stream)."""
+    from clippyshot.ole_guard import OleGuardError, check_cfb
+
+    try:
+        check_cfb(path)
+    except OleGuardError as exc:
+        raise _Declined(exc.reason) from None
     with open(path, "rb") as fh:
         h = fh.read(512)
-    if len(h) < 512:
-        raise _Declined("unreadable")
-    shift, mini_shift = struct.unpack_from("<HH", h, 0x1E)
-    if shift not in (9, 12) or mini_shift != 6:
-        raise _Declined("unreadable")
-    sector = 1 << shift
-    n_fat, _first_dir, _txn, cutoff, _first_mini, n_mini, _first_difat, n_difat = (
-        struct.unpack_from("<IIIIIIII", h, 0x2C))
+    (cutoff,) = struct.unpack_from("<I", h, 0x38)
     if cutoff != 4096:
-        raise _Declined("unreadable")
-    sectors = -(-max(0, size - sector) // sector)  # sectors after the header
-    per_fat = sector // 4
-    # Spare FAT sectors are legal, so allow generous slack over what the file needs; the
-    # bound only has to stop counts that are absurd for the file's size.
-    needed_fat = sectors // per_fat + 1
-    if (n_fat > 2 * needed_fat + 16 or n_mini > sectors
-            or n_difat > n_fat // (per_fat - 1) + 2):
         raise _Declined("unreadable")
 
 

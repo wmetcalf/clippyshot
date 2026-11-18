@@ -440,10 +440,20 @@ def _check_ole_content(path: Path) -> list[str]:
     try:
         import olefile
 
+        from clippyshot.ole_guard import OleGuardError, open_ole
+
         if not olefile.isOleFile(str(path)):
             return warnings
-        ole = olefile.OleFileIO(str(path))
-        dirs = ["/".join(d) for d in ole.listdir()]
+        try:
+            # Bounded pre-check first: olefile's constructor is quadratic in directory
+            # entries. A refusal is reported, not swallowed with the parse errors below.
+            ole = open_ole(path)
+        except OleGuardError as exc:
+            warnings.append("ole_limit_exceeded" if exc.reason == "too_large"
+                            else "ole_unreadable")
+            return warnings
+        with ole:
+            dirs = ["/".join(d) for d in ole.listdir()]
         has_vba = any("VBA" in d or "Macros" in d for d in dirs)
         has_ppt = any(s in dirs for s in ["PowerPoint Document", "PP97_DUALSTORAGE"])
         has_doc = any(s in dirs for s in ["WordDocument", "1Table", "0Table"])
@@ -454,7 +464,6 @@ def _check_ole_content(path: Path) -> list[str]:
             warnings.append("ole_macro_only_payload")
         if has_encrypted:
             warnings.append("ole_encrypted")
-        ole.close()
     except Exception:
         pass
     return warnings

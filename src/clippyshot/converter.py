@@ -1092,6 +1092,9 @@ class Converter:
                             "magika_label": detected.magika_label,
                             "magika_mime": detected.magika_mime,
                             "libmagic_mime": detected.libmagic_mime,
+                            # Structural checks (ole_*/ooxml_*), incl. the CFB pre-check's
+                            # ole_limit_exceeded / ole_unreadable refusals.
+                            "warnings": list(detected.warnings or []),
                         },
                     },
                     "render": {
