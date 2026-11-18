@@ -62,6 +62,19 @@ jobs:
       # cannot run, so the bwrap tests can never pass by skipping here.
       - name: Load AppArmor profiles
         run: |
+          set +e
+          echo "== diag"; uname -r; sysctl kernel.apparmor_restrict_unprivileged_userns
+          ls -l /etc/apparmor.d | grep -i -E "bwrap|unpriv|userns"; sudo aa-status | grep -i -E "bwrap|unpriv"
+          which -a bwrap aa-exec; bwrap --version
+          bwrap --unshare-user --die-with-parent --ro-bind / / -- /bin/true; echo "plain=$?"
+          bwrap --unshare-user --die-with-parent --ro-bind / / -- cat /proc/self/attr/current; echo
+          sudo cp deploy/apparmor/clippyshot-bwrap /etc/apparmor.d/ && sudo apparmor_parser -r -W /etc/apparmor.d/clippyshot-bwrap; echo "loadbwrap=$?"
+          sudo apparmor_parser -r -W deploy/apparmor/clippyshot-soffice; echo "loadsoffice=$?"
+          bwrap --unshare-user --die-with-parent --ro-bind / / -- /bin/true; echo "withprof=$?"
+          bwrap --unshare-user --die-with-parent --ro-bind / / -- cat /proc/self/attr/current; echo
+          bwrap --unshare-user --die-with-parent --ro-bind / / -- aa-exec -p clippyshot-soffice -- /bin/true; echo "aaexec=$?"
+          sudo dmesg | grep -i apparmor | tail -15
+          exit 1
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo cp deploy/apparmor/clippyshot-soffice deploy/apparmor/clippyshot-runtime /etc/apparmor.d/
           for p in clippyshot-soffice clippyshot-runtime; do
