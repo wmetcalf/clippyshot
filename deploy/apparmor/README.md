@@ -51,8 +51,9 @@ hole Ubuntu's unprivileged-userns restriction closes. That is true on a stock 24
 with section 1's profiles loaded, not only after the step below. `bwrap-userns-restrict`,
 where shipped, is the distro's own mitigation for it: it lets bwrap create a user namespace
 but stacks every bwrap child into `unpriv_bwrap`, which denies capabilities; unloading it
-removes that. ClippyShot attaches `clippyshot-soffice` only to soffice (the pdfium rasterizer
-and the warm OCR helper run under bwrap without a profile). Load the bwrap profiles only on a
+removes that. ClippyShot attaches `clippyshot-soffice` to its sandboxed children by default
+(soffice, the cold QR/OCR scanners, pdftoppm); the pdfium rasterizer and the warm OCR helper
+opt out and run under bwrap without a profile. Load the bwrap profiles only on a
 host (or VM) dedicated to ClippyShot, with no untrusted local users; on a shared host, run
 ClippyShot in its own VM instead.
 
