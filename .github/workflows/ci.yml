@@ -50,13 +50,19 @@ jobs:
       # The runner image ships apparmor-utils, so BwrapSandbox finds `aa-exec` and attaches
       # the clippyshot-soffice profile to every sandboxed child -- by design it fails closed
       # ("aa-exec: ERROR: profile 'clippyshot-soffice' does not exist") rather than run
-      # unconfined. Load that profile as deploy/apparmor/README.md tells an operator to, so CI
-      # exercises the confined path production runs. clippyshot-bwrap is NOT loaded: the
-      # runner already lets bwrap create user namespaces, and replacing its bwrap attachment
-      # takes that away (every bwrap test then skips). The final probe fails the step if
-      # sandboxed bwrap + aa-exec cannot run, so the bwrap tests can never skip silently here.
+      # unconfined. Load that profile (deploy/apparmor/README.md) so CI exercises the confined
+      # path production runs.
+      #
+      # Ubuntu 24.04's kernel.apparmor_restrict_unprivileged_userns=1 puts the children of an
+      # unconfined process's user namespace in the `unprivileged_userns` profile, which may not
+      # change profile ("aa-exec: ERROR: insufficient permissions to change to the profile").
+      # Production grants bwrap userns through deploy/apparmor/clippyshot-bwrap; on this
+      # throwaway runner that profile collides with the image's own bwrap attachment, so lift
+      # the restriction instead. The final probe fails the step if sandboxed bwrap + aa-exec
+      # cannot run, so the bwrap tests can never pass by skipping here.
       - name: Load AppArmor profiles
         run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo cp deploy/apparmor/clippyshot-soffice deploy/apparmor/clippyshot-runtime /etc/apparmor.d/
           for p in clippyshot-soffice clippyshot-runtime; do
             sudo apparmor_parser -r -W "/etc/apparmor.d/$p"
