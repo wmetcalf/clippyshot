@@ -4,10 +4,11 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
-from clippyshot.errors import SandboxUnavailable
+from clippyshot.errors import InnerSandboxLayerUnavailable, SandboxUnavailable
 from clippyshot.sandbox.base import Sandbox
 from clippyshot.sandbox.bwrap import BwrapSandbox
 from clippyshot.sandbox.container import ContainerSandbox
@@ -37,6 +38,45 @@ def _keep_existing_error(current: Exception | None) -> bool:
     return current is not None and "insecure" in str(current)
 
 
+def inner_wrap_from_env() -> NonoWrap | None:
+    """The NonoWrap ``CLIPPYSHOT_INNER_NONO`` requests, or None when it is off."""
+    if not _env_truthy("CLIPPYSHOT_INNER_NONO"):
+        return None
+    profile = os.environ.get("CLIPPYSHOT_INNER_NONO_PROFILE", "").strip()
+    state = os.environ.get("CLIPPYSHOT_INNER_NONO_STATE_DIR", "").strip()
+    wrap = NonoWrap(profile=Path(profile) if profile else None)
+    return replace(wrap, state_dir=Path(state)) if state else wrap
+
+
+def inner_layer_problem(inner_wrap: NonoWrap) -> str | None:
+    """Why the requested inner nono layer cannot run on this host, or None.
+
+    Every base backend is constructed + smoketested before it is accepted; the nono layer
+    must be checked up front the same way, or selection "succeeds" (and the selection's
+    name advertises a Landlock layer) while every conversion then fails in
+    ``NonoWrap.apply``/``build_argv``. Checks each precondition ``apply`` needs.
+    """
+    # gVisor's Sentry returns ENOSYS for the landlock_* syscalls; runc + the FC guest
+    # support Landlock — don't enable the inner layer on a tier without it.
+    if not landlock_available():
+        return ("inner nono layer requested (CLIPPYSHOT_INNER_NONO / inner_wrap) but Landlock "
+                "is unavailable on this kernel/runtime (the gVisor Sentry does not implement "
+                "it); disable inner-nono on this tier — runc and the Firecracker guest "
+                "support it")
+    if inner_wrap.resolve_bin() is None:
+        return ("inner nono layer requested (CLIPPYSHOT_INNER_NONO / inner_wrap) but the nono "
+                "binary was not found or is not an absolute, executable path (install nono "
+                "or set CLIPPYSHOT_NONO_BIN to an absolute path); refusing to select a "
+                "sandbox without the requested layer")
+    try:
+        inner_wrap.state_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return (f"inner nono layer requested but its state dir {inner_wrap.state_dir} "
+                f"cannot be created ({exc}); refusing to select a sandbox without the "
+                "requested layer")
+    return None
+
+
 def select_sandbox(
     *,
     inner_wrap: NonoWrap | None = None,
@@ -59,29 +99,12 @@ def select_sandbox(
     as-is (zero cost). It decorates whichever backend is chosen, so it composes with
     nsjail/bwrap/container alike.
     """
-    if inner_wrap is None and _env_truthy("CLIPPYSHOT_INNER_NONO"):
-        profile = os.environ.get("CLIPPYSHOT_INNER_NONO_PROFILE", "").strip()
-        inner_wrap = NonoWrap(profile=Path(profile) if profile else None)
-
-    # Fail fast on a tier that can't enforce Landlock (e.g. the gVisor Sentry returns
-    # ENOSYS) rather than letting nono error mid-conversion. runc + the FC guest support
-    # Landlock; gVisor C/R does not — don't enable the inner layer there.
-    if inner_wrap is not None and not landlock_available():
-        raise SandboxUnavailable(
-            "inner nono layer requested (CLIPPYSHOT_INNER_NONO / inner_wrap) but Landlock "
-            "is unavailable on this kernel/runtime (the gVisor Sentry does not implement it); "
-            "disable inner-nono on this tier — runc and the Firecracker guest support it"
-        )
-    # Fail closed on a missing/non-executable nono binary too. Every base backend is
-    # constructed + smoketested before it is accepted; without this the wrapper was
-    # returned unverified, so selection "succeeded" (and the selection's name claimed a
-    # Landlock layer) while every conversion then failed in build_argv.
-    if inner_wrap is not None and inner_wrap.resolve_bin() is None:
-        raise SandboxUnavailable(
-            "inner nono layer requested (CLIPPYSHOT_INNER_NONO / inner_wrap) but the nono "
-            "binary was not found or is not executable (install nono or set "
-            "CLIPPYSHOT_NONO_BIN); refusing to select a sandbox without the requested layer"
-        )
+    if inner_wrap is None:
+        inner_wrap = inner_wrap_from_env()
+    if inner_wrap is not None:
+        problem = inner_layer_problem(inner_wrap)
+        if problem is not None:
+            raise InnerSandboxLayerUnavailable(problem)
 
     def _wrap(sb: Sandbox) -> Sandbox:
         return NonoWrappedSandbox(sb, inner_wrap) if inner_wrap is not None else sb

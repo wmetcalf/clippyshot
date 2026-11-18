@@ -129,13 +129,15 @@ def test_select_sandbox_wraps_only_when_requested(monkeypatch: pytest.MonkeyPatc
     assert plain is fake  # default: untouched, zero cost
 
     wrapped = select_sandbox(
-        inner_wrap=NonoWrap(bin=_BIN), _container_factory=lambda: _FakeSandbox()
+        inner_wrap=NonoWrap(bin=_BIN, state_dir=Path("/tmp/cs-nono-test")),
+        _container_factory=lambda: _FakeSandbox(),
     )
     assert isinstance(wrapped, NonoWrappedSandbox)
 
 
-def test_select_sandbox_env_trigger(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_select_sandbox_env_trigger(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "container")
+    monkeypatch.setenv("CLIPPYSHOT_INNER_NONO_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("CLIPPYSHOT_INNER_NONO", "1")
     monkeypatch.setenv("CLIPPYSHOT_NONO_BIN", _BIN)
     monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: True)
@@ -143,8 +145,11 @@ def test_select_sandbox_env_trigger(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(wrapped, NonoWrappedSandbox)
 
 
-def test_select_sandbox_inner_nono_profile_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_select_sandbox_inner_nono_profile_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "container")
+    monkeypatch.setenv("CLIPPYSHOT_INNER_NONO_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("CLIPPYSHOT_INNER_NONO", "1")
     monkeypatch.setenv("CLIPPYSHOT_INNER_NONO_PROFILE", "/etc/clippyshot/soffice.nono.json")
     monkeypatch.setenv("CLIPPYSHOT_NONO_BIN", _BIN)
@@ -206,6 +211,7 @@ def test_select_sandbox_env_trigger_fails_closed_without_nono_on_path(
         select_sandbox(
             _nsjail_factory=_factory, _bwrap_factory=_factory, _container_factory=_factory
         )
+    assert built == []  # refused before any backend is constructed or smoketested
 
 
 def test_select_sandbox_rejects_non_executable_nono(
@@ -222,3 +228,87 @@ def test_select_sandbox_rejects_non_executable_nono(
         select_sandbox(
             inner_wrap=NonoWrap(bin=str(fake)), _container_factory=lambda: _FakeSandbox()
         )
+
+
+def test_relative_nono_bin_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every request runs with workdir "/", so a CWD-relative nono passes a bare
+    existence check and then fails every conversion."""
+    from clippyshot.errors import InnerSandboxLayerUnavailable
+
+    (tmp_path / "bin").mkdir()
+    nono = tmp_path / "bin" / "nono"
+    nono.write_text("#!/bin/sh\n")
+    nono.chmod(0o755)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "container")
+    monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: True)
+    assert NonoWrap(bin="bin/nono").resolve_bin() is None
+    monkeypatch.setenv("PATH", "bin")  # relative PATH entry: which() returns bin/nono
+    assert NonoWrap().resolve_bin() is None
+    with pytest.raises(InnerSandboxLayerUnavailable):
+        select_sandbox(inner_wrap=NonoWrap(bin="bin/nono"),
+                       _container_factory=lambda: _FakeSandbox())
+
+
+def test_uncreatable_state_dir_is_refused_at_selection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from clippyshot.errors import InnerSandboxLayerUnavailable
+
+    blocker = tmp_path / "file"
+    blocker.write_text("x")  # a FILE where the state dir's parent must be
+    monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "container")
+    monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: True)
+    with pytest.raises(InnerSandboxLayerUnavailable, match="state dir"):
+        select_sandbox(inner_wrap=NonoWrap(bin=_BIN, state_dir=blocker / "state"),
+                       _container_factory=lambda: _FakeSandbox())
+
+
+def test_env_state_dir_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from clippyshot.sandbox.detect import inner_wrap_from_env
+
+    monkeypatch.setenv("CLIPPYSHOT_INNER_NONO", "1")
+    monkeypatch.setenv("CLIPPYSHOT_INNER_NONO_STATE_DIR", str(tmp_path / "s"))
+    wrap = inner_wrap_from_env()
+    assert wrap is not None and wrap.state_dir == tmp_path / "s"
+    monkeypatch.delenv("CLIPPYSHOT_INNER_NONO")
+    assert inner_wrap_from_env() is None
+
+
+def test_selftest_does_not_blame_bwrap_hardening_for_missing_nono(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The nono check raises before any backend is tried, so the 'disable the stock bwrap
+    profile' remedy cannot fix it and must not be offered."""
+    import clippyshot.selftest as st
+    from clippyshot.errors import InnerSandboxLayerUnavailable
+    from clippyshot.sandbox import host_apparmor as ha
+
+    def boom():
+        raise InnerSandboxLayerUnavailable("nono binary was not found")
+
+    logged: list[dict] = []
+
+    class _Log:
+        def error(self, event, **kw):
+            logged.append({"event": event, **kw})
+
+        def info(self, *a, **k):
+            pass
+
+        warning = info
+
+    monkeypatch.delenv("CLIPPYSHOT_SANDBOX", raising=False)
+    monkeypatch.setattr(st, "select_sandbox", boom)
+    monkeypatch.setattr(st, "Detector", lambda: object())
+    monkeypatch.setattr(st, "stock_bwrap_profile_state",
+                        lambda: ha.StockBwrapProfileState(True, False, True))
+    monkeypatch.setattr(st.shutil, "which", lambda n, *a, **k: "/usr/bin/" + n)
+    monkeypatch.setattr(st.subprocess, "run",
+                        lambda *a, **k: st.subprocess.CompletedProcess(a, 0, "LO", ""))
+    monkeypatch.setattr(st, "get_logger", lambda *a, **k: _Log(), raising=False)
+    assert st.run_selftest() == 1
+    (ev,) = [e for e in logged if e["event"] == "sandbox_unavailable"]
+    assert "fix" not in ev and ev["inner_layer"] == "nono"

@@ -79,14 +79,17 @@ def landlock_available() -> bool:
 def _resolve_bin(raw: str | None) -> str | None:
     """Resolve a nono spec to an absolute existing file, or ``None``.
 
-    Accepts a path (``/opt/nono`` — must be an executable file) or a bare name
-    (``nono`` — via PATH, which already requires the executable bit).
+    Accepts an absolute path (``/opt/nono``) or a bare name (``nono`` — via PATH); either
+    way the result must be an absolute path to an executable file.
     """
     cand = (raw or "").strip() or "nono"
-    if os.sep in cand:
-        p = Path(cand)
-        return str(p) if p.is_file() and os.access(p, os.X_OK) else None
-    return shutil.which(cand)
+    found = cand if os.sep in cand else shutil.which(cand)
+    # Absolute only: every request runs with workdir "/" (and nsjail/bwrap identity-mount
+    # the binary's dir), so a relative path that resolves here fails at run time.
+    if found is None or not os.path.isabs(found):
+        return None
+    p = Path(found)
+    return found if p.is_file() and os.access(p, os.X_OK) else None
 
 
 @dataclass(frozen=True)

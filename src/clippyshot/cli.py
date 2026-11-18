@@ -122,6 +122,14 @@ def _runtime_backend() -> str | None:
     return str(getattr(sb, "name", "unknown"))
 
 
+def _inner_layer_problem() -> str | None:
+    """Why the env-requested inner nono layer cannot run, or None (also None when off)."""
+    from clippyshot.sandbox.detect import inner_layer_problem, inner_wrap_from_env
+
+    wrap = inner_wrap_from_env()
+    return inner_layer_problem(wrap) if wrap is not None else None
+
+
 def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
     from clippyshot import setup_sandbox as ss
     from clippyshot.sandbox import host_apparmor as ha
@@ -177,6 +185,10 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
                           "hardening kept. Only the bwrap backend still needs "
                           f"`{ha.FIX_COMMAND}` (dedicated hosts only).")
                     return 0
+                if args.apply and _inner_layer_problem() is not None:
+                    print("\nNo backend is selectable: the requested inner nono layer cannot "
+                          "run (see above); the bwrap hardening is not the cause.")
+                    return 1
                 if args.apply:
                     print("\nNo backend is selectable yet; bwrap still needs "
                           f"`{ha.FIX_COMMAND}` (dedicated hosts only), or make nsjail usable.")

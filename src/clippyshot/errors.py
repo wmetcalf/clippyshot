@@ -45,6 +45,14 @@ class SandboxUnavailable(SandboxError):
     """No usable sandbox backend on this host."""
 
 
+class InnerSandboxLayerUnavailable(SandboxUnavailable):
+    """The opt-in inner nono (Landlock) layer was requested but cannot run here.
+
+    Raised before any base backend is tried, so no backend change (e.g. relaxing the
+    host's bwrap hardening) can fix it: install/fix nono or stop requesting the layer.
+    """
+
+
 class LibreOfficeError(ClippyShotError):
     """soffice failed or produced no output."""
 
