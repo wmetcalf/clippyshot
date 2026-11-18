@@ -128,8 +128,8 @@ id = "loadout-drops-warning-findings"
 description = "Loadout maps clippyshot to dets=[] (engines.py, 'format/render success ... not phishing findings'), so altchunk_present/macro_enabled_format/extension_mismatch never become detections although the manifest lists emits=detection. The same applies to qr_decoded."
 
 [[gaps]]
-id = "loadout-reads-unemitted-sheet-fields"
-description = "document_outputs.render_coverage reads clippyshot_metadata.sheets.inventory, export_mode and page_mapping_verified. ClippyShot master emits only sheets.total/rendered/non_rendered, so those evidence fields are always null/empty. Engine fix (export-mode + per-sheet provenance) is https://github.com/wmetcalf/clippyshot/pull/61; drop this gap once it merges."
+id = "loadout-ignores-sheet-provenance-flags"
+description = "clippyshot_metadata.sheets carries inventory_source ('libreoffice_xlsx_reexport' for xls/xlsb/ods/csv, whose per-sheet type/state are degraded: XLM macro sheets read as worksheets, veryHidden as hidden), inventory_truncated and reader_anomalies. Loadout's document_outputs.render_coverage reads inventory/export_mode/page_mapping_verified/non_rendered but none of these, so a re-exported inventory's type/state is presented as authoritative. Consumer-side."
 
 [[gaps]]
 id = "loadout-byte-and-count-limits"
