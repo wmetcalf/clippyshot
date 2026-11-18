@@ -73,7 +73,18 @@ class LibreOfficeRunner:
         # (sheet_prep.read_sheet_inventory); non-empty => no positional page mapping.
         self.last_run_sheet_anomalies: list[str] = []
         self.last_run_sheets_from_reexport = False
+        # Where last_run_sheets' type/state came from (metadata sheets.inventory_source):
+        # "input_workbook", "libreoffice_xlsx_reexport", or the binary original's own
+        # records (sheet_records.XLS_SOURCE / XLSB_SOURCE). "" before a capture.
+        self.last_run_sheets_source = ""
+        # Why the binary original's records were not used (sheet_records.RECORD_STATUSES),
+        # "ok", "not_binary_workbook", or "" when no overlay was attempted.
+        self.last_run_sheet_records_status = ""
         self._two_pass_output: Path | None = None
+        # The staged file the two-pass re-exported (the original xls/xlsb bytes), and its
+        # detected label.
+        self._two_pass_input: Path | None = None
+        self._two_pass_label = ""
         self.last_run_single_page_sheets = False
         # PDF export filter name the successful export used ("calc_pdf_Export",
         # "writer_pdf_Export", ...), or "" before/without a successful export.
@@ -96,6 +107,32 @@ class LibreOfficeRunner:
         # order and count but writes XLM macro sheets as worksheets and veryHidden as hidden.
         self.last_run_sheets_from_reexport = (
             self._two_pass_output is not None and exported == self._two_pass_output)
+        self.last_run_sheets_source = (
+            "libreoffice_xlsx_reexport" if self.last_run_sheets_from_reexport
+            else "input_workbook")
+        if (self.last_run_sheets_from_reexport and self._two_pass_input is not None
+                and self._two_pass_label in ("xls", "xlsb")):
+            # Recover type/state from the original xls/xlsb's own sheet records when they
+            # align with the re-export by name and order (sheet_records). Only for inputs
+            # LibreOffice imported AS xls/xlsb: an ods/csv/... polyglot carrying xlsb parts
+            # must not have records LibreOffice never read laid over its inventory.
+            try:
+                from clippyshot.libreoffice.sheet_records import (
+                    overlay_binary_records_status,
+                )
+
+                overlaid, status = overlay_binary_records_status(
+                    self._two_pass_input, self.last_run_sheets,
+                    expect=self._two_pass_label)
+            except Exception:  # noqa: BLE001 - best effort; keep the re-export inventory
+                overlaid, status = None, "unreadable"
+            if status == "not_binary_workbook":
+                # Detected as xls/xlsb, yet no binary workbook this reader recognises
+                # (LibreOffice may still import it): a refusal, not an ods/csv.
+                status = "unreadable"
+            self.last_run_sheet_records_status = status
+            if overlaid is not None:
+                self.last_run_sheets, self.last_run_sheets_source = overlaid
 
     def convert_to_pdf(
         self,
@@ -197,7 +234,11 @@ class LibreOfficeRunner:
         self.last_run_sheets = []
         self.last_run_sheet_anomalies = []
         self.last_run_sheets_from_reexport = False
+        self.last_run_sheets_source = ""
+        self.last_run_sheet_records_status = ""
         self._two_pass_output = None
+        self._two_pass_input = None
+        self._two_pass_label = ""
         self.last_run_single_page_sheets = False
         self.last_run_export_filter = ""
         self.last_altchunks = []
@@ -423,6 +464,7 @@ class LibreOfficeRunner:
                     )
                     if conv_result.exit_code == 0 and xlsx_files:
                         converted = xlsx_files[0]
+                        two_pass_input = staged_input
                         patch_ooxml_for_print(converted)
                         # Move the patched xlsx to the stage root so the
                         # sandbox can reach it via /sandbox/in/
@@ -431,6 +473,8 @@ class LibreOfficeRunner:
                         staged_input = final
                         staged_name = final.name
                         self._two_pass_output = final
+                        self._two_pass_input = two_pass_input
+                        self._two_pass_label = label
                         _log.info(
                             "two_pass: patched %s, using for PDF export", staged_name
                         )

@@ -68,14 +68,18 @@ def _local(tag: str) -> str:
 _PKG_REL_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
 
 
-def _sheet_types_by_rid(zf: zipfile.ZipFile) -> dict[str, str] | None:
-    """Map workbook relationship id -> sheet kind, from xl/_rels/workbook.xml.rels.
+def _sheet_types_by_rid(zf: zipfile.ZipFile,
+                        rels_part: str = "xl/_rels/workbook.xml.rels",
+                        max_bytes: int | None = None) -> dict[str, str] | None:
+    """Map workbook relationship id -> sheet kind, from the workbook's rels part.
 
     An Excel 4 macro sheet is identified by its relationship type (xlMacrosheet), not by
-    any attribute on <sheet>. None when the rels part is missing or unparseable.
+    any attribute on <sheet>. None when the rels part is missing or unparseable. xlsb
+    passes ``xl/_rels/workbook.bin.rels``.
     """
     try:
-        data = bounded_read(zf, "xl/_rels/workbook.xml.rels")
+        data = (bounded_read(zf, rels_part) if max_bytes is None
+                else bounded_read(zf, rels_part, max_bytes))
         root = safe_fromstring(data)
     except (KeyError, ExtractionLimitExceeded, ET.ParseError):
         return None

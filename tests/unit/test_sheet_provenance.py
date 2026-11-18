@@ -440,3 +440,22 @@ def test_a_workbook_typed_by_the_xml_default_is_not_an_anomaly(tmp_path):
         for n, b in items.items():
             z.writestr(n, b)
     assert read_sheet_inventory(p)[1] == []
+
+
+def test_refused_binary_records_reach_metadata_json(tmp_path):
+    """The runner's refusal status is written into metadata.sheets.input_records (and only
+    a reportable status is)."""
+    runner = _SheetRunner(3, SHEETS)
+    orig = runner.convert_to_pdf
+
+    def convert(*a, **k):
+        r = orig(*a, **k)
+        runner.last_run_sheets_from_reexport = True
+        runner.last_run_sheets_source = "libreoffice_xlsx_reexport"
+        runner.last_run_sheet_records_status = "encrypted"
+        return r
+
+    runner.convert_to_pdf = convert
+    meta = _convert(tmp_path, runner, Limits())
+    assert meta["sheets"]["input_records"] == "encrypted"
+    assert meta["sheets"]["inventory_source"] == "libreoffice_xlsx_reexport"
