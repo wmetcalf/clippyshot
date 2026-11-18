@@ -192,6 +192,9 @@ _QR_TRUNCATED_MARKER_BYTES = 320
 # The metadata entries' headroom uses the tight sealed-size estimate (_sealed_estimate) and
 # a small margin instead of _QR_HEADROOM_MARGIN.
 _QR_META_MARGIN = 2048
+# Envelope fields outside payload/warnings/artifacts (~180 B measured) + a worst-case
+# Detection JSON (~400 B at the schema's string caps), rounded up.
+_TIGHT_HEADER_BYTES = 640
 
 
 def _json_bytes(text: str) -> int:
@@ -301,32 +304,35 @@ def _budget_metadata_qr(meta: dict, budget_bytes: int) -> tuple[dict, int]:
         added += len(_meta_qr_warning(omitted, budget_bytes).model_dump_json()) + 1
         return added, omitted, per_page
 
-    def fill(remaining: int) -> bool:
-        """Greedy, each pass in page order; a misfit is skipped, not a stop, so one large
-        early value cannot push every later (small) one out. True if anything was added."""
+    def fill(remaining: int, repeats: bool) -> bool:
+        """Greedy in page order; a misfit is skipped, not a stop, so one large early value
+        cannot push every later (small) one out. Distinct pass: the first FITTING entry per
+        distinct payload; repeats pass: further copies of kept payloads. True if any added."""
         grew = False
-        for pi, ei, cost, key in entries:   # pass 1: first FITTING entry per distinct value
-            if key in kept_keys or cost > remaining:
+        for pi, ei, cost, key in entries:
+            if cost > remaining or (pi, ei) in kept:
+                continue
+            if (key in kept_keys) != repeats:
                 continue
             kept.add((pi, ei))
             kept_keys.add(key)
             remaining -= cost
             grew = True
-        for pi, ei, cost, key in entries:   # pass 2: repeats of kept values
-            if (pi, ei) in kept or key not in kept_keys or cost > remaining:
-                continue
-            kept.add((pi, ei))
-            remaining -= cost
-            grew = True
         return grew
 
-    # Select against the worst-case bookkeeping, then hand back what the real bookkeeping
-    # did not use (a page that keeps everything needs no qr_omitted, ...) and fill again.
-    fill(budget_bytes - overhead)
-    for _ in range(16):
+    def slack() -> int:
         added, _, _ = bookkeeping()
-        kept_cost = sum(c for pi, ei, c, _ in entries if (pi, ei) in kept)
-        if not fill(budget_bytes - kept_cost - added):
+        return budget_bytes - sum(c for pi, ei, c, _ in entries if (pi, ei) in kept) - added
+
+    # Distinct payloads first, to a fixpoint: select against the worst-case bookkeeping,
+    # then hand back what the real bookkeeping did not use (a page that keeps everything
+    # needs no qr_omitted, ...). Only then do repeats get what is left.
+    fill(budget_bytes - overhead, repeats=False)
+    for _ in range(16):
+        if not fill(slack(), repeats=False):
+            break
+    for _ in range(16):
+        if not fill(slack(), repeats=True):
             break
     added, omitted_total, per_page = bookkeeping()
     kept_cost = sum(c for pi, ei, c, _ in entries if (pi, ei) in kept)
@@ -1059,11 +1065,14 @@ class ClippyShotEngine:
 
         Generous (default): 512 B per row (~140 B measured) + 4 KiB. ``tight``: each row as
         it will serialize (id/path/kind as given, a 64-hex sha256, the file's size from
-        ``outdir``, else 20 digits) plus a 320 B header (~260 B measured).
+        ``outdir``, else 20 digits), list separators, and the envelope header: ~180 B of
+        fixed fields plus the Detection, which the harness may take from its own
+        pre-detection, so it is counted at the schema's worst case (label 64, mime 255,
+        source 32 chars, a long float).
         """
         _, artifacts, payload, warnings = assembled
         base = len(payload.model_dump_json(by_alias=True).encode())
-        base += sum(len(w.model_dump_json().encode()) for w in warnings)
+        base += sum(len(w.model_dump_json().encode()) + 1 for w in warnings)  # + ","
         if not tight:
             return base + 512 * len(artifacts) + 4096
 
@@ -1077,7 +1086,7 @@ class ClippyShotEngine:
                                    "sha256": "0" * 64, "bytes": size(a)},
                                   separators=(",", ":")).encode()) + 1
                    for a in artifacts)
-        return base + rows + 320
+        return base + rows + _TIGHT_HEADER_BYTES
 
     @classmethod
     def _headroom(cls, max_meta: int, assembled: tuple[list[Page], list[DeclaredArtifact],

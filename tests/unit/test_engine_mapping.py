@@ -420,7 +420,9 @@ def test_truncation_never_grows_a_result_with_no_room(tmp_path):
     page = {"index": 1, "file": "page-001.png", "width_mm": 210.0, "height_mm": 297.0,
             "qr": [], "ocr": {"text": "o" * 150_000, "char_count": 150_000}}
     res0, out0 = _detonate_capped(tmp_path / "a", _meta(pages=[page]), 4 << 20)
-    cap = _sealed_size(res0, out0) + 200  # the QR-free result fits with 200 B to spare
+    # The QR-free result fits with ~1 KB to spare: too little for the bookkeeping+warning
+    # a drop would add, enough (by the tight estimate's worst-case header) for the entry.
+    cap = _sealed_size(res0, out0) + 1200
     page = {**page, "qr": [{"format": "qr_code", "value": "https://e.example/",
                             "position": [], "raw_bytes_hex": "68"}]}
     res, out = _detonate_capped(tmp_path / "b", _meta(pages=[page]), cap)
@@ -537,7 +539,7 @@ def test_bookkeeping_alone_never_pushes_a_fitting_result_over_the_cap(tmp_path):
     base = _sealed_size(res0, out0)
     for i, p in enumerate(pages):
         p["qr"] = [{"format": "qr_code", "value": f"{i}" + "q" * 2000, "position": []}]
-    for spare in (500, 2_000, 5_000):
+    for spare in (0, 100, 200, 500, 2_000, 5_000):  # 0-200: the last-resort branches
         res, out = _detonate_capped(tmp_path / f"s{spare}", _meta(pages=pages), base + spare)
         assert _sealed_size(res, out) <= base + spare, spare
         # Whatever was dropped, no typed copy may claim to be complete (codex on #67).
@@ -545,3 +547,38 @@ def test_bookkeeping_alone_never_pushes_a_fitting_result_over_the_cap(tmp_path):
             rec = _scanner(page)
             if rec["qr_count"] and len(rec["qr_values"]) < rec["qr_count"]:
                 assert rec["qr_values_truncated"] is True, spare
+
+
+def test_reclaimed_reserve_goes_to_distinct_payloads_before_repeats():
+    """A benign flood on one page must not take the bookkeeping reserve handed back after
+    selection while a later distinct payload still fits (round-4 lens on #67)."""
+    from clippyshot.engine import _budget_metadata_qr, _meta_qr_entry_cost
+
+    pages = [{"index": i, "qr": [{"value": f"https://u{i}.example/a"}]} for i in range(1, 51)]
+    pages.append({"index": 51, "qr": [{"value": "https://benign.example/"}] * 101})
+    evil = {"value": "https://evil.example/" + "e" * 1400}
+    pages.append({"index": 52, "qr": [evil]})
+    distinct = sum(_meta_qr_entry_cost(p["qr"][0]) for p in pages)
+    for budget in range(distinct + 400, distinct + 1200, 50):
+        out, _ = _budget_metadata_qr({"pages": pages}, budget)
+        assert out["pages"][-1]["qr"] == [evil], budget
+
+
+def test_tight_estimate_counts_a_worst_case_detection_and_separators():
+    from blastbox.contract import Detection
+
+    from clippyshot.engine import ClippyShotEngine, _TIGHT_HEADER_BYTES
+
+    big = Detection(label="l" * 64, mime="m" * 255, confidence=0.9998764991760254,
+                    source="s" * 32)
+    assert len(big.model_dump_json()) + 180 <= _TIGHT_HEADER_BYTES
+    from blastbox.contract import EmbeddedResource, Record
+    from blastbox.contract import Warning as W
+
+    payload = EmbeddedResource(embedded_path="/", content_type="x", depth=0,
+                               metadata=Record(fields={}), children=[])
+    ws = [W(code="c", message="m")] * 10
+    est = ClippyShotEngine._sealed_estimate(([], [], payload, ws), tight=True)
+    serialized = len(payload.model_dump_json(by_alias=True)) + len(
+        "[" + ",".join(w.model_dump_json() for w in ws) + "]")
+    assert est >= serialized + _TIGHT_HEADER_BYTES - 2
