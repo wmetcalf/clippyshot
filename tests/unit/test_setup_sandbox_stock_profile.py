@@ -292,3 +292,21 @@ def test_apply_on_a_conflicted_host_loads_the_soffice_profile_too(monkeypatch, c
     cli.main(["setup-sandbox", "--apply"])
     assert "clippyshot-soffice" in [a.profile_name for a in applied]
     assert host.commands == [] and "clippyshot-bwrap" not in [a.profile_name for a in applied]
+
+
+def test_disable_flag_refuses_before_any_change_without_aa_exec(monkeypatch, capsys):
+    host = Host(monkeypatch, [LOADED, FIXED])
+    monkeypatch.setattr(cli.shutil, "which", lambda b: None if b == "aa-exec" else f"/usr/bin/{b}")
+    assert cli.main(["setup-sandbox", "--disable-stock-bwrap-profile"]) == 2
+    assert host.commands == []
+
+
+def test_apply_rechecks_a_failed_attach_probe(monkeypatch, capsys):
+    host = Host(monkeypatch, [ABSENT])
+    monkeypatch.setattr(ha, "probe_aa_exec", lambda *a, stock_state=None, **k: _probe(
+        ABSENT, False, "profile_not_loaded", "profile 'clippyshot-soffice' does not exist"))
+    monkeypatch.setattr(ss, "apply", lambda actions, d: 0)
+    monkeypatch.setattr(ss, "verify_attach", lambda: (False, ["still failing"]))
+    assert cli.main(["setup-sandbox", "--apply"]) == 1
+    assert "still failing" in capsys.readouterr().out
+    assert host.commands == []

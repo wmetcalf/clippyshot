@@ -5,6 +5,7 @@ import argparse
 import dataclasses
 import json
 import shlex
+import shutil
 import sys
 from pathlib import Path
 
@@ -164,6 +165,12 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
             print(f"\nprofile file(s) missing in {profile_dir}: {', '.join(missing)} "
                   "(pass --profile-dir); nothing changed", file=sys.stderr)
             return 2
+        if shutil.which("aa-exec") is None:
+            # Without aa-exec ClippyShot can't attach clippyshot-soffice anyway: don't trade
+            # away the distro hardening for a backend that still won't work.
+            print("\naa-exec is not installed (package apparmor); install it first. "
+                  "Nothing changed.", file=sys.stderr)
+            return 2
         print(f"\nDisabling {stock} and loading the ClippyShot profiles via sudo "
               "(you'll be prompted for your password):")
         rc = ss.apply_plan(plan)
@@ -184,6 +191,10 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
             print(f"\nNo profile to load, but bwrap cannot attach {ss.SOFFICE_PROFILE}:\n"
                   f"  {probe.message()}", file=sys.stderr)
             return 1
+        if shutil.which("bwrap") and not shutil.which("aa-exec"):
+            print("\nWARNING: bwrap is installed but aa-exec is not, so the bwrap backend "
+                  f"cannot attach {ss.SOFFICE_PROFILE} (it is refused unless "
+                  "CLIPPYSHOT_WARN_ON_INSECURE=1). Install the apparmor package.")
         print("\nNothing to do — the namespace backends are usable (or unaffected).")
         return 0
     if not profile_dir.is_dir():
@@ -192,7 +203,15 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
     if args.apply or disable_stock:
         print(f"\nLoading {len(rep.actions)} scoped profile(s) via sudo "
               "(you'll be prompted for your password):")
-        return ss.apply(rep.actions, profile_dir)
+        rc = ss.apply(rep.actions, profile_dir)
+        if rc != 0 or rep.aa_probe is None or rep.aa_probe.ok:
+            return rc
+        # The attach probe had failed: report whether loading fixed it.
+        ok, lines = ss.verify_attach()
+        print("\nAfter:")
+        for line in lines:
+            print(f"  {line}")
+        return 0 if ok else 1
     print(f"\n{len(rep.actions)} scoped AppArmor profile(s) to load. Re-run with --apply to "
           "load them (sudo), or run:\n")
     for cmd in ss.commands_for(rep.actions, profile_dir):
