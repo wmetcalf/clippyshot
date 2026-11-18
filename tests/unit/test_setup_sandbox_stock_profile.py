@@ -44,6 +44,7 @@ class Host:
         monkeypatch.setattr(ss, "_userns_ok", lambda b, p: True)
         monkeypatch.setattr(ss, "default_profile_dir", lambda: PROFILE_DIR)
         self._mp = monkeypatch
+        self.nsjail_secure = True
 
         def state():
             return self.states.pop(0) if len(self.states) > 1 else self.states[0]
@@ -78,6 +79,7 @@ class Host:
             return any(a.profile_name == "clippyshot-nsjail" for a in self.applied)
 
         self._mp.setattr(ss, "_userns_ok", ok)
+        self._mp.setattr(cli, "_nsjail_selectable", lambda: self.nsjail_secure)
         return self
 
 
@@ -355,3 +357,9 @@ def test_conflicted_host_with_a_working_nsjail_is_success(monkeypatch, capsys):
     monkeypatch.setattr(ha, "probe_aa_exec", lambda *a, stock_state=None, **k: _probe(
         ENABLED_UNLOADED, True))
     assert cli.main(["setup-sandbox"]) == 0
+
+
+def test_an_insecure_nsjail_is_not_reported_as_a_usable_backend(monkeypatch, capsys):
+    host = Host(monkeypatch, [LOADED]).with_nsjail(blocked_until_loaded=True)
+    host.nsjail_secure = False
+    assert cli.main(["setup-sandbox", "--apply"]) == 1

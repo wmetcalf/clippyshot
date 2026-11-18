@@ -102,6 +102,28 @@ def _version_cmd(_: argparse.Namespace) -> int:
     return 0
 
 
+def _nsjail_selectable() -> bool:
+    """Would select_sandbox accept nsjail? An insecure one (e.g. no seccomp policy) is
+    refused unless CLIPPYSHOT_WARN_ON_INSECURE is set."""
+    import os
+
+    try:
+        from clippyshot.sandbox.nsjail import NsjailSandbox
+
+        sb = NsjailSandbox()
+    except Exception as e:  # noqa: BLE001
+        print(f"  nsjail backend unavailable: {e}")
+        return False
+    if sb.secure:
+        return True
+    allow = os.environ.get("CLIPPYSHOT_WARN_ON_INSECURE", "").strip().lower() not in (
+        "", "0", "false", "no")
+    print(f"  nsjail is insecure here ({', '.join(sb.insecurity_reasons)})"
+          + ("; accepted because CLIPPYSHOT_WARN_ON_INSECURE is set" if allow else
+             "; select_sandbox will refuse it"))
+    return allow
+
+
 def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
     from clippyshot import setup_sandbox as ss
     from clippyshot.sandbox import host_apparmor as ha
@@ -152,7 +174,7 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
                 # Success is a working backend, not what this run happened to load: re-check
                 # nsjail itself (it is unaffected by the stock profile).
                 nsjail = shutil.which("nsjail")
-                if nsjail and ss._userns_ok("nsjail", nsjail):
+                if nsjail and ss._userns_ok("nsjail", nsjail) and _nsjail_selectable():
                     print("\nThe nsjail backend is usable, with the distro's bwrap hardening "
                           "kept. Only the bwrap backend still needs "
                           f"`{ha.FIX_COMMAND}` (dedicated hosts only).")
