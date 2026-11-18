@@ -48,6 +48,13 @@ def inner_wrap_from_env() -> NonoWrap | None:
     return replace(wrap, state_dir=Path(state)) if state else wrap
 
 
+def _readable_file(path: Path) -> bool:
+    try:
+        return path.is_file() and os.access(path, os.R_OK)
+    except OSError:  # e.g. a parent directory this worker cannot traverse
+        return False
+
+
 def inner_layer_problem(inner_wrap: NonoWrap) -> str | None:
     """Why the requested inner nono layer cannot run on this host, or None.
 
@@ -68,7 +75,7 @@ def inner_layer_problem(inner_wrap: NonoWrap) -> str | None:
                 "binary was not found or is not an absolute, executable path (install nono "
                 "or set CLIPPYSHOT_NONO_BIN to an absolute path); refusing to select a "
                 "sandbox without the requested layer")
-    if inner_wrap.profile is not None and not inner_wrap.profile.is_file():
+    if inner_wrap.profile is not None and not _readable_file(inner_wrap.profile):
         return (f"inner nono layer requested with profile {inner_wrap.profile} "
                 "(CLIPPYSHOT_INNER_NONO_PROFILE), which is not a readable file; refusing to "
                 "select a sandbox without the requested layer")
@@ -117,7 +124,22 @@ def select_sandbox(
             raise InnerSandboxLayerUnavailable(problem)
 
     def _wrap(sb: Sandbox) -> Sandbox:
-        return NonoWrappedSandbox(sb, inner_wrap) if inner_wrap is not None else sb
+        if inner_wrap is None:
+            return sb
+        wrapped = NonoWrappedSandbox(sb, inner_wrap)
+        # The base passed its own smoketest; now prove the requested layer end to end
+        # (binary runs, profile loads, the grants suffice under this base).
+        try:
+            smoke = wrapped.smoketest()
+        except Exception as exc:  # noqa: BLE001
+            raise InnerSandboxLayerUnavailable(
+                f"inner nono layer smoketest under {sb.name} raised: {exc}") from exc
+        if smoke.exit_code != 0 or smoke.killed:
+            raise InnerSandboxLayerUnavailable(
+                f"inner nono layer smoketest under {sb.name} failed "
+                f"(exit={smoke.exit_code}, killed={smoke.killed}): "
+                f"{smoke.stderr.decode(errors='replace')[:200]}")
+        return wrapped
 
     factories: dict[str, Callable[[], Sandbox]] = {
         "nsjail": _nsjail_factory,

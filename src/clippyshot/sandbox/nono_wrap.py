@@ -184,6 +184,9 @@ class NonoWrap:
         extra_ro = (
             [Mount(bin_dir, bin_dir, read_only=True)] if bin_dir is not None else []
         )
+        if self.profile is not None:
+            # nono reads -p inside a namespacing base sandbox too.
+            extra_ro.append(Mount(self.profile, self.profile, read_only=True))
         extra_rw = [Mount(self.state_dir, self.state_dir, read_only=False)]
         # nono PROCESS env (separate from the child's env above): relocate state HOME
         # off the grants + silence prompts. Merged onto the existing request env.
@@ -207,8 +210,8 @@ class NonoWrappedSandbox:
     """Decorator that nono-wraps every :meth:`run` then delegates to the base sandbox.
 
     Satisfies the :class:`~clippyshot.sandbox.base.Sandbox` protocol, so it drops in
-    anywhere a ``Sandbox`` is taken. ``smoketest`` delegates unwrapped — it probes the
-    base backend's liveness, not the (optional) nono layer.
+    anywhere a ``Sandbox`` is taken. ``smoketest`` runs ``/bin/true`` THROUGH the nono
+    layer, so it proves the layer as well as the base backend.
     """
 
     inner: Sandbox
@@ -233,4 +236,7 @@ class NonoWrappedSandbox:
         return self.inner.run(self.wrap.apply(request))
 
     def smoketest(self) -> SandboxResult:
-        return self.inner.smoketest()
+        # Through the wrapper, not just the base: the nono layer is what selection must
+        # prove (binary runs, profile loads, grants/mounts suffice), or "+nono" is
+        # advertised for a layer that fails every conversion.
+        return self.run(SandboxRequest(argv=["/bin/true"]))

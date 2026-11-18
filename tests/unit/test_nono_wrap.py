@@ -115,8 +115,11 @@ def test_decorator_delegates_transformed_request() -> None:
     deco.run(_req())
     assert inner.last is not None
     assert inner.last.argv[0] == _BIN and inner.last.argv[1] == "wrap"
-    # smoketest probes the BASE only (no nono prefix)
+    # smoketest goes THROUGH the nono layer (it is what selection must prove)
+    inner.last = None
     assert isinstance(deco.smoketest(), SandboxResult)
+    assert inner.last is not None and inner.last.argv[1] == "wrap"
+    assert inner.last.argv[-1] == "/bin/true"
 
 
 def test_select_sandbox_wraps_only_when_requested(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -352,3 +355,51 @@ def test_existing_but_unwritable_state_dir_is_refused(
                            _container_factory=lambda: _FakeSandbox())
     finally:
         state.chmod(0o755)
+
+
+def test_unreadable_profile_is_refused(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import os
+
+    from clippyshot.errors import InnerSandboxLayerUnavailable
+
+    prof = tmp_path / "p.json"
+    prof.write_text("{}")
+    prof.chmod(0o000)
+    if os.access(prof, os.R_OK):
+        pytest.skip("running as root")
+    monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "container")
+    monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: True)
+    try:
+        with pytest.raises(InnerSandboxLayerUnavailable, match="profile"):
+            select_sandbox(inner_wrap=NonoWrap(bin=_BIN, state_dir=tmp_path / "s", profile=prof),
+                           _container_factory=lambda: _FakeSandbox())
+    finally:
+        prof.chmod(0o644)
+
+
+def test_profile_is_mounted_for_namespacing_bases(tmp_path: Path) -> None:
+    prof = tmp_path / "p.json"
+    prof.write_text("{}")
+    out = NonoWrap(bin=_BIN, profile=prof, state_dir=tmp_path / "s").apply(_req())
+    assert any(m.host_path == prof and m.sandbox_path == prof and m.read_only
+               for m in out.ro_mounts)
+
+
+def test_selection_fails_closed_when_the_wrapped_smoketest_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A nono that runs but cannot wrap (bad profile, missing grants, ...) only shows up
+    when a command goes through it: selection must run one."""
+    from clippyshot.errors import InnerSandboxLayerUnavailable
+
+    class _NonoFails(_FakeSandbox):
+        def run(self, request):
+            self.last = request
+            failed = request.argv[1:2] == ["wrap"]
+            return SandboxResult(1 if failed else 0, b"", b"nono: bad profile", 1, False)
+
+    monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "container")
+    monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: True)
+    with pytest.raises(InnerSandboxLayerUnavailable, match="smoketest"):
+        select_sandbox(inner_wrap=NonoWrap(bin=_BIN, state_dir=tmp_path / "s"),
+                       _container_factory=lambda: _NonoFails())
