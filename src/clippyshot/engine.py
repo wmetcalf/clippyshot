@@ -169,12 +169,12 @@ METADATA_SCHEMA_VERSION = "1"
 _MAX_QR_WARNINGS = 256
 _MAX_WARNING_CONTEXT = 255
 # Ceilings, in sealed (UTF-8 JSON) bytes, for the two typed QR copies: per-page ``qr_values``
-# and the ``qr_decoded`` warning messages. Every value is already in clippyshot_metadata, and
-# the host refuses a sealed metadata.json over Limits.max_metadata_bytes (4 MiB by default),
-# so detonate() gives each copy at most its ceiling AND only the headroom the rest of the
-# envelope leaves (_QR_HEADROOM_MARGIN kept spare): a document that sealed without the copies
-# still seals with them. A page whose values did not fit carries ``qr_values_truncated: true``;
-# ``qr_count`` stays exact.
+# and the ``qr_decoded`` warning messages. They duplicate clippyshot_metadata's QR entries (when
+# those fit, see below), and the host refuses a sealed metadata.json over
+# Limits.max_metadata_bytes (4 MiB by default), so detonate() gives each copy at most its
+# ceiling AND only the headroom the rest of the envelope leaves (_QR_HEADROOM_MARGIN kept
+# spare): a document that sealed without the copies still seals with them. A page whose values
+# did not fit carries ``qr_values_truncated: true``; ``qr_count`` stays exact.
 _QR_VALUES_BUDGET_BYTES = 256 * 1024
 _QR_WARNING_BUDGET_BYTES = 64 * 1024
 _QR_HEADROOM_MARGIN = 64 * 1024
@@ -182,15 +182,16 @@ _QR_HEADROOM_MARGIN = 64 * 1024
 _QR_TRUNCATED_MARKER_BYTES = 320
 # clippyshot_metadata's own per-page ``qr`` entries (value + raw_bytes_hex + position ...) are
 # budgeted too: unbounded, a QR-dense document pushed the sealed metadata.json past the host's
-# max_metadata_bytes and the host refused the whole result. They get the headroom the rest of
-# the envelope leaves, minus a reserve for the typed copies above (at most their two ceilings,
-# at most half the headroom). Whole entries in page order; the rest are dropped and counted
-# (page ``qr_omitted``, root ``qr_truncated``, warning ``qr_metadata_truncated``).
-_QR_TYPED_RESERVE_BYTES = _QR_VALUES_BUDGET_BYTES + _QR_WARNING_BUDGET_BYTES
-# Charged up front for the truncation bookkeeping itself: ``"qr_omitted": N`` per page and the
-# root ``qr_truncated`` object, both doubly escaped inside the sealed string.
-_QR_OMITTED_PAGE_BYTES = 40
-_QR_TRUNCATED_ROOT_BYTES = 256
+# max_metadata_bytes and the host refused the whole result. They are the copy consumers read
+# (Loadout builds its qr_code/url artifacts from them), so they get FIRST claim on the headroom
+# the rest of the envelope leaves; the typed copies get what remains. When they do not all fit,
+# the first entry of each DISTINCT value is kept before any repeat (so a flood of one benign code
+# cannot push a later distinct payload out), each pass in page order; the rest are dropped and
+# counted (page ``qr_omitted``, root ``qr_truncated``, warning ``qr_metadata_truncated``).
+# Charged up front for that bookkeeping, all doubly escaped inside the sealed string:
+_QR_OMITTED_PAGE_BYTES = 40      # "qr_omitted": N, per page
+_QR_TRUNCATED_ROOT_BYTES = 256   # root "qr_truncated": {...}
+_QR_META_WARNING_BYTES = 512     # the qr_metadata_truncated warning
 
 
 def _json_bytes(text: str) -> int:
@@ -247,41 +248,68 @@ def _meta_qr_entry_cost(entry: object) -> int:
 def _budget_metadata_qr(meta: dict, budget_bytes: int) -> tuple[dict, int]:
     """A copy of ``meta`` whose pages' ``qr`` entries fit ``budget_bytes`` of sealed JSON.
 
-    Entries are kept whole, in page order; once one does not fit, every later one is dropped
-    (never a middle one). A page that lost any carries ``qr_omitted``; the root gets
-    ``qr_truncated: {omitted, budget_bytes}``. ``meta`` itself is not modified, and is
-    returned as-is when everything fits. Returns ``(meta, omitted_total)``.
+    Everything fits -> ``meta`` itself, untouched. Otherwise entries are kept whole: pass 1
+    takes the first entry of each distinct value in page order until one does not fit, pass 2
+    then adds repeats of kept values in page order until one does not fit. Kept entries stay in
+    their original order. A page that lost any carries ``qr_omitted``; the root gets
+    ``qr_truncated: {omitted, budget_bytes}``. Truncating never grows the result: when the
+    bookkeeping would cost more than it saves, nothing is dropped. ``meta`` is never modified.
+    Returns ``(meta, omitted_total)``.
     """
     pages = meta.get("pages")
     if not isinstance(pages, list):
         return meta, 0
-    remaining = (budget_bytes - _QR_TRUNCATED_ROOT_BYTES
-                 - _QR_OMITTED_PAGE_BYTES * len(pages))
-    exhausted = False
+    entries: list[tuple[int, int, int, str]] = []  # (page pos, entry pos, cost, value key)
+    for pi, page_rec in enumerate(pages):
+        qr = page_rec.get("qr") if isinstance(page_rec, dict) else None
+        if not isinstance(qr, list):
+            continue
+        for ei, entry in enumerate(qr):
+            value = entry.get("value") if isinstance(entry, dict) else None
+            key = value if isinstance(value, str) else repr(entry)
+            entries.append((pi, ei, _meta_qr_entry_cost(entry), key))
+    total = sum(c for _, _, c, _ in entries)
+    if total <= budget_bytes:
+        return meta, 0
+    qr_pages = len({pi for pi, _, _, _ in entries})
+    overhead = (_QR_TRUNCATED_ROOT_BYTES + _QR_META_WARNING_BYTES
+                + _QR_OMITTED_PAGE_BYTES * qr_pages)
+    remaining = budget_bytes - overhead
+    kept: set[tuple[int, int]] = set()
+    kept_keys: set[str] = set()
+    seen: set[str] = set()
+    for pi, ei, cost, key in entries:       # pass 1: one entry per distinct value
+        if key in seen:
+            continue
+        seen.add(key)
+        if cost > remaining:
+            break
+        kept.add((pi, ei))
+        kept_keys.add(key)
+        remaining -= cost
+    for pi, ei, cost, key in entries:       # pass 2: repeats of kept values
+        if (pi, ei) in kept or key not in kept_keys:
+            continue
+        if cost > remaining:
+            break
+        kept.add((pi, ei))
+        remaining -= cost
+    kept_cost = sum(c for pi, ei, c, _ in entries if (pi, ei) in kept)
+    if total - kept_cost <= overhead:
+        return meta, 0  # dropping would add more bookkeeping than it removes
     omitted_total = 0
     pages_out: list = []
-    for page_rec in pages:
+    for pi, page_rec in enumerate(pages):
         qr = page_rec.get("qr") if isinstance(page_rec, dict) else None
         if not isinstance(qr, list):
             pages_out.append(page_rec)
             continue
-        kept: list = []
-        omitted = 0
-        for entry in qr:
-            if not exhausted:
-                cost = _meta_qr_entry_cost(entry)
-                if cost <= remaining:
-                    kept.append(entry)
-                    remaining -= cost
-                    continue
-                exhausted = True
-            omitted += 1
+        keep = [e for ei, e in enumerate(qr) if (pi, ei) in kept]
+        omitted = len(qr) - len(keep)
         if omitted:
-            page_rec = {**page_rec, "qr": kept, "qr_omitted": omitted}
+            page_rec = {**page_rec, "qr": keep, "qr_omitted": omitted}
             omitted_total += omitted
         pages_out.append(page_rec)
-    if not omitted_total:
-        return meta, 0
     return ({**meta, "pages": pages_out,
              "qr_truncated": {"omitted": omitted_total, "budget_bytes": max(0, budget_bytes)}},
             omitted_total)
@@ -373,7 +401,8 @@ def _qr_warnings(pages: list, budget_bytes: int = _QR_WARNING_BUDGET_BYTES) -> l
     out: list[Warning] = []
     seen: set[str] = set()
     # The truncation marker is paid for out of the same budget; with no room even for it,
-    # emit nothing (every value is still in clippyshot_metadata).
+    # emit nothing (the values are in clippyshot_metadata, unless qr_metadata_truncated says
+    # some were dropped there too).
     budget_bytes -= _QR_TRUNCATED_MARKER_BYTES
     if budget_bytes < 0:
         return out
@@ -915,24 +944,25 @@ class ClippyShotEngine:
         # The host refuses a sealed metadata.json over max_metadata_bytes, so every QR copy is
         # budgeted against the room the rest of the envelope leaves:
         #   pass 1: no QR content anywhere -> headroom for clippyshot_metadata's QR entries
-        #           (less a reserve for the typed copies; _QR_TYPED_RESERVE_BYTES);
+        #           (the copy consumers read: first claim on the room);
         #   pass 2: budgeted metadata, no typed copies -> headroom for the typed copies;
         #   pass 3: everything (see _QR_VALUES_BUDGET_BYTES).
         max_meta = int(getattr(limits, "max_metadata_bytes", 4 << 20))
         no_qr: dict[int, tuple[list[str], bool]] = {
             p["index"]: ([], False) for p in meta.get("pages", [])
             if isinstance(p, dict) and type(p.get("index")) is int}
-        stripped_meta, _ = _budget_metadata_qr(meta, 0)
-        headroom = self._headroom(max_meta, self._assemble(
+        stripped_meta = {**meta, "pages": [
+            {**p, "qr": []} if isinstance(p, dict) and isinstance(p.get("qr"), list) else p
+            for p in meta.get("pages", [])]} if isinstance(meta.get("pages"), list) else meta
+        meta_qr_budget = self._headroom(max_meta, self._assemble(
             meta, outdir, clamped_dpi, no_qr, [], metadata_meta=stripped_meta))
-        meta_qr_budget = headroom - min(_QR_TYPED_RESERVE_BYTES, headroom // 2)
         budgeted_meta, omitted = _budget_metadata_qr(meta, meta_qr_budget)
         meta_qr_warnings: list[Warning] = []
         if omitted:
             meta_qr_warnings.append(Warning(
                 code="qr_metadata_truncated",
                 message=f"{omitted} decoded QR entries omitted from clippyshot_metadata to fit "
-                        f"{max(0, meta_qr_budget)} bytes under the host metadata cap (page "
+                        f"{max(0, meta_qr_budget)} bytes under the metadata cap (page "
                         "qr_omitted / root qr_truncated); qr_count is exact",
             ))
         headroom = self._headroom(max_meta, self._assemble(

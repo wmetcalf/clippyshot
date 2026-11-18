@@ -147,10 +147,7 @@ def test_qr_copies_only_use_the_headroom_the_envelope_leaves(tmp_path):
         len(w.model_dump_json().encode()) for w in res.warnings) + 512 * len(res.artifacts)
     assert sealed < cap
     records = [_scanner(p) for p in res.payload.children]
-    # Something had to give: since clippyshot_metadata's own QR entries are budgeted (and
-    # the typed copies keep a reserve), the cut can land in either place.
-    inner = json.loads(res.payload.metadata.fields["clippyshot_metadata"])
-    assert any(r["qr_values_truncated"] for r in records) or "qr_truncated" in inner
+    assert any(r["qr_values_truncated"] for r in records)
 
 
 def test_qr_value_budget_never_skips_a_middle_value():
@@ -388,3 +385,57 @@ def test_the_qr_flood_gap_is_closed_in_the_contract():
     text = (Path(__file__).resolve().parents[2] / "blastbox-engine.toml").read_text()
     assert 'id = "host-metadata-cap-qr-flood"' not in text
     assert 'code = "qr_metadata_truncated"' in text
+    # The blastbox-side half (cold dispatcher not forwarding the cap) is still open.
+    assert 'id = "blastbox-cold-max-metadata-not-forwarded"' in text
+
+
+def test_a_repeated_benign_code_cannot_push_a_later_distinct_one_out_of_metadata(tmp_path):
+    """Loadout reads QR codes only from clippyshot_metadata; a flood of ONE benign code must
+    not spend the budget a later distinct payload needs (the qr_decoded findings already
+    de-duplicate for the same reason)."""
+    junk = "https://benign.example/?" + '"' * 2870
+    pages = [
+        {"index": i, "file": f"page-{i:03d}.png", "width_mm": 210.0, "height_mm": 297.0,
+         "qr": [{"format": "qr_code", "value": junk, "position": [],
+                 "raw_bytes_hex": "22" * 2900} for _ in range(12)],
+         "ocr": {}}
+        for i in range(1, 22)
+    ]
+    pages.append({"index": 22, "file": "page-022.png", "width_mm": 210.0, "height_mm": 297.0,
+                  "qr": [{"format": "qr_code", "value": "https://evil.example/login",
+                          "position": [], "raw_bytes_hex": "00"}], "ocr": {}})
+    res, out = _detonate_capped(tmp_path, _meta(pages=pages), 4 << 20)
+    assert _sealed_size(res, out) < 4 << 20
+    inner = json.loads(res.payload.metadata.fields["clippyshot_metadata"])
+    assert inner["qr_truncated"]["omitted"] > 0
+    assert [q["value"] for q in inner["pages"][-1]["qr"]] == ["https://evil.example/login"]
+    assert inner["pages"][0]["qr"][0]["value"] == junk  # the first copy is kept
+
+
+def test_truncation_never_grows_a_result_with_no_room(tmp_path):
+    """With the envelope already at the cap, dropping one small entry would add more
+    bookkeeping (qr_omitted, qr_truncated, the warning) than it saves: keep it instead."""
+    page = {"index": 1, "file": "page-001.png", "width_mm": 210.0, "height_mm": 297.0,
+            "qr": [{"format": "qr_code", "value": "https://e.example/", "position": [],
+                    "raw_bytes_hex": "68"}],
+            "ocr": {"text": "o" * 150_000, "char_count": 150_000}}
+    res, _ = _detonate_capped(tmp_path, _meta(pages=[page]), 161_800)
+    inner = json.loads(res.payload.metadata.fields["clippyshot_metadata"])
+    assert "qr_truncated" not in inner
+    assert [q["value"] for q in inner["pages"][0]["qr"]] == ["https://e.example/"]
+    assert "qr_metadata_truncated" not in [w.code for w in res.warnings]
+
+
+def test_typed_copies_fit_the_headroom_at_a_low_cap(tmp_path):
+    """The typed qr_values / qr_decoded copies get only what the metadata leaves: at a cap
+    where their full ceilings would overshoot, the sealed result still fits."""
+    pages = [
+        {"index": i, "file": f"page-{i:03d}.png", "width_mm": 210.0, "height_mm": 297.0,
+         "qr": [{"format": "qr_code", "value": f"{i}-{j}-" + "v" * 2000, "position": []}
+                for j in range(16)],
+         "ocr": {}}
+        for i in range(1, 21)
+    ]
+    cap = 250_000
+    res, out = _detonate_capped(tmp_path, _meta(pages=pages), cap)
+    assert _sealed_size(res, out) < cap
