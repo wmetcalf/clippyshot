@@ -62,6 +62,30 @@ def _events(err: str) -> dict[str, dict]:
     return out
 
 
+@pytest.fixture(autouse=True)
+def _restore_logging(monkeypatch):
+    """run_selftest() calls configure_logging(), which binds structlog (cached on first use)
+    and a stdlib handler to the capsys stream pytest closes after the test. Reset both so a
+    later test's first log line does not hit a closed file."""
+    import logging
+
+    import structlog
+
+    root_handlers = list(logging.getLogger().handlers)
+    real = st.configure_logging
+
+    def configure_uncached(*a, **k):
+        real(*a, **k)
+        # Module-level loggers (e.g. converter._log) used inside run_selftest must not
+        # cache a logger bound to this test's capture stream.
+        structlog.configure(cache_logger_on_first_use=False)
+
+    monkeypatch.setattr(st, "configure_logging", configure_uncached)
+    yield
+    structlog.reset_defaults()
+    logging.getLogger().handlers[:] = root_handlers
+
+
 @pytest.fixture
 def host(monkeypatch):
     monkeypatch.setattr(st, "Detector", lambda: object())

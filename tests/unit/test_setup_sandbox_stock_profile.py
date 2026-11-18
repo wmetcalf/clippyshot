@@ -9,9 +9,20 @@ from pathlib import Path
 
 import pytest
 
+
 import clippyshot.setup_sandbox as ss
 from clippyshot import cli
 from clippyshot.sandbox import host_apparmor as ha
+
+
+@pytest.fixture(autouse=True)
+def _reset_structlog():
+    """cli.main() calls configure_logging(), binding structlog to this test's capture
+    stream; reset it so a later test's first (cached) logger isn't bound to a closed file."""
+    yield
+    import structlog
+
+    structlog.reset_defaults()
 
 LOADED = ha.StockBwrapProfileState(installed=True, disabled=False, loaded=True)
 ENABLED_UNLOADED = ha.StockBwrapProfileState(installed=True, disabled=False, loaded=False)
