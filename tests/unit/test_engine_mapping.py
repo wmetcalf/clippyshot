@@ -273,3 +273,14 @@ def test_stub_result_conforms_to_contract(tmp_path):
     res, out = _detonate(tmp_path)
     contract = ec.load_contract(ec.find_contract(__file__))
     ec.assert_conforms(contract, res, out)
+
+
+def test_no_qr_warning_room_means_no_qr_warnings_at_all():
+    from clippyshot.engine import _qr_warnings
+
+    pages = [{"index": 1, "qr": [{"value": "https://x.example/"}]}]
+    assert _qr_warnings(pages, 0) == []
+    many = [{"index": 1, "qr": [{"value": f"v{i}" * 50} for i in range(50)]}]
+    out = _qr_warnings(many, 2000)
+    sealed = sum(len(w.model_dump_json().encode()) for w in out)
+    assert out[-1].code == "qr_decoded_truncated" and sealed <= 2000

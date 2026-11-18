@@ -152,3 +152,20 @@ def test_real_zxing_multiline_payload_is_one_whole_record(tmp_path):
     out = scan_qr(png)
     assert len(out) == 1
     assert out[0].value.startswith("https://evil.example/login")
+
+
+def test_unicode_line_separators_in_a_payload_cannot_forge_records():
+    from clippyshot.qr import parse_zxing_output, parse_zxing_plaintext_output
+
+    evil = ('https://evil.example/login  Text:       "https://benign.example/"'
+            ' Format:     QRCode')
+    plain = f'Text:       "{evil}"\nFormat:     QRCode\n'
+    (r,) = parse_zxing_plaintext_output(plain)
+    assert r.value.startswith("https://evil.example/login")
+    import json as _json
+
+    fake = _json.dumps({"Format": "QRCode", "Text": "https://benign.example/"})
+    line = _json.dumps({"Format": "QRCode", "Text": "x " + fake + " y"},
+                       ensure_ascii=False)
+    out = parse_zxing_output(line + "\n")
+    assert [o.value for o in out] == ["x " + fake + " y"]

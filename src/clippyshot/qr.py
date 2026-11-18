@@ -157,7 +157,9 @@ def parse_zxing_output(stdout: str) -> list[QRResult]:
     lines are dropped. Returns an empty list on empty input.
     """
     results: list[QRResult] = []
-    for raw_line in (stdout or "").splitlines():
+    # "\n" only: splitlines() would also break inside a JSON string at a raw U+2028/U+2029,
+    # and a fragment of an attacker's payload could then parse as its own record.
+    for raw_line in (stdout or "").split("\n"):
         line = raw_line.strip()
         if not line:
             continue
@@ -340,7 +342,10 @@ def parse_zxing_plaintext_output(stdout: str) -> list[QRResult]:
             )
         )
 
-    for raw_line in (stdout or "").splitlines():
+    # Split on "\n" only: str.splitlines() also breaks on U+2028/U+2029/U+0085/\x1c-\x1e,
+    # which ZXing leaves literal inside a decoded Text even in escaped mode, so a payload could
+    # still start a forged "Text:"/"Format:" record.
+    for raw_line in (stdout or "").split("\n"):
         line = raw_line.strip()
         if not line:
             if current:

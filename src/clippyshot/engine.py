@@ -178,6 +178,8 @@ _MAX_WARNING_CONTEXT = 255
 _QR_VALUES_BUDGET_BYTES = 256 * 1024
 _QR_WARNING_BUDGET_BYTES = 64 * 1024
 _QR_HEADROOM_MARGIN = 64 * 1024
+# Sealed size of one qr_decoded_truncated warning (its message is ~150 chars of ASCII).
+_QR_TRUNCATED_MARKER_BYTES = 320
 
 
 def _json_bytes(text: str) -> int:
@@ -302,6 +304,11 @@ def _qr_warnings(pages: list, budget_bytes: int = _QR_WARNING_BUDGET_BYTES) -> l
     """
     out: list[Warning] = []
     seen: set[str] = set()
+    # The truncation marker is paid for out of the same budget; with no room even for it,
+    # emit nothing (every value is still in clippyshot_metadata).
+    budget_bytes -= _QR_TRUNCATED_MARKER_BYTES
+    if budget_bytes < 0:
+        return out
     used = 0
     for page_rec in pages:
         if not isinstance(page_rec, dict):
