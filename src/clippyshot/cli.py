@@ -147,9 +147,15 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
                 if rc != 0:
                     return rc
                 print(f"\nLoaded {', '.join(a.profile_name for a in other)}; the distro's "
-                      "bwrap hardening is untouched. The nsjail backend (if installed) is "
-                      "ready; only the bwrap backend still needs the step below.")
-                return 0
+                      "bwrap hardening is untouched.")
+                if any(a.binary == "nsjail" for a in other):
+                    # nsjail was blocked only by the userns restriction, now lifted for it.
+                    print("The nsjail backend is ready; only the bwrap backend still needs "
+                          f"`{ha.FIX_COMMAND}` (dedicated hosts only).")
+                    return 0
+                print("No backend is usable yet: bwrap still needs "
+                      f"`{ha.FIX_COMMAND}` (dedicated hosts only), or install nsjail.")
+                return 1
             if other:
                 print(f"\nTo load only what does not need this ({', '.join(a.profile_name for a in other)}),"
                       " keeping the distro's bwrap hardening, run:\n\n  "

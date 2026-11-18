@@ -324,3 +324,13 @@ def test_plain_run_on_a_conflicted_host_offers_the_non_destructive_apply(monkeyp
     assert cli.main(["setup-sandbox"]) == 1
     out = capsys.readouterr().out
     assert "clippyshot setup-sandbox --apply" in out and "clippyshot-nsjail" in out
+
+
+def test_conflicted_apply_that_only_loads_soffice_is_not_success(monkeypatch, capsys):
+    host = Host(monkeypatch, [ENABLED_UNLOADED])
+    monkeypatch.setattr(ss.shutil, "which", lambda b: None if b == "nsjail" else f"/usr/bin/{b}")
+    monkeypatch.setattr(ha, "probe_aa_exec", lambda *a, stock_state=None, **k: _probe(
+        ENABLED_UNLOADED, False, "profile_not_loaded", "profile 'clippyshot-soffice' does not exist"))
+    assert cli.main(["setup-sandbox", "--apply"]) == 1
+    assert [a.profile_name for a in host.applied] == ["clippyshot-soffice"]
+    assert "No backend is usable yet" in capsys.readouterr().out
