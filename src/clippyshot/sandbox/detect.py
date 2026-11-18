@@ -190,6 +190,7 @@ def select_sandbox(
     # exception then named only the LAST backend's reason, hiding that the other
     # two had failed for entirely different ones.
     skipped: list[str] = []
+    inner_failures = 0
     for name in ("nsjail", "bwrap", "container"):
         factory = factories[name]
         try:
@@ -246,6 +247,15 @@ def select_sandbox(
                 "sandbox backend selected in insecure mode",
                 extra={"backend": name, "reasons": reasons},
             )
+        try:
+            wrapped = _wrap(sb)
+        except InnerSandboxLayerUnavailable as e:
+            # The nono layer may run under one base and not another (e.g. a policy that
+            # confines nsjail's children): try the next backend, as for a base failure.
+            last_error = e
+            inner_failures += 1
+            skipped.append(f"{name}: {e}")
+            continue
         if skipped:
             _log.info(
                 "sandbox backend selected: %s (passed over %s)",
@@ -254,12 +264,14 @@ def select_sandbox(
             )
         else:
             _log.info("sandbox backend selected", extra={"backend": name})
-        return _wrap(sb)
+        return wrapped
 
-    raise SandboxUnavailable(
-        "no sandbox backend available; "
-        + ("; ".join(skipped) if skipped else f"last error: {last_error}")
-    )
+    detail = "; ".join(skipped) if skipped else f"last error: {last_error}"
+    if inner_failures:
+        # At least one base worked and only the requested nono layer failed on it: no
+        # backend change (e.g. relaxing the bwrap hardening) is the fix.
+        raise InnerSandboxLayerUnavailable(f"no sandbox backend available; {detail}")
+    raise SandboxUnavailable("no sandbox backend available; " + detail)
 
 
 # Layers applied to EVERY command, as opposed to a tier where the boundary is the

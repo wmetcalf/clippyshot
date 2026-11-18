@@ -449,3 +449,33 @@ def test_relative_state_dir_or_profile_is_refused(
     with pytest.raises(InnerSandboxLayerUnavailable, match="absolute"):
         select_sandbox(inner_wrap=NonoWrap(bin=_BIN, **kw),
                        _container_factory=lambda: _FakeSandbox())
+
+
+def test_auto_selection_tries_the_next_base_when_nono_fails_under_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """codex on #66: nono blocked under nsjail (base smoketest fine) must not stop the
+    fallback to a bwrap under which it works."""
+    from clippyshot.errors import InnerSandboxLayerUnavailable
+
+    class _Base(_FakeSandbox):
+        def __init__(self, name: str, nono_ok: bool) -> None:
+            super().__init__()
+            self.name = name
+            self.nono_ok = nono_ok
+
+        def run(self, request):
+            wrapped = request.argv[1:2] == ["wrap"]
+            return SandboxResult(0 if (self.nono_ok or not wrapped) else 1, b"", b"", 1, False)
+
+    monkeypatch.delenv("CLIPPYSHOT_SANDBOX", raising=False)
+    monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: True)
+    wrap = NonoWrap(bin=_BIN, state_dir=tmp_path / "s")
+    sb = select_sandbox(inner_wrap=wrap, _nsjail_factory=lambda: _Base("nsjail", False),
+                        _bwrap_factory=lambda: _Base("bwrap", True),
+                        _container_factory=lambda: _Base("container", True))
+    assert sb.name == "bwrap+nono"
+    with pytest.raises(InnerSandboxLayerUnavailable):
+        select_sandbox(inner_wrap=wrap, _nsjail_factory=lambda: _Base("nsjail", False),
+                       _bwrap_factory=lambda: _Base("bwrap", False),
+                       _container_factory=lambda: _Base("container", False))
