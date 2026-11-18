@@ -96,14 +96,15 @@ def _write(tmp_path: Path, name: str, data: bytes) -> Path:
 
 @pytest.fixture
 def no_olefile_open(monkeypatch):
+    """Records every OleFileIO construction (the plain class or the guard's subclass)."""
     calls: list[str] = []
-    real = olefile.OleFileIO
+    real = olefile.OleFileIO.__init__
 
-    def spy(*a, **k):
-        calls.append(str(a[0]))
-        return real(*a, **k)
+    def spy(self, *a, **k):
+        calls.append(str(a[0]) if a else "")
+        return real(self, *a, **k)
 
-    monkeypatch.setattr(olefile, "OleFileIO", spy)
+    monkeypatch.setattr(olefile.OleFileIO, "__init__", spy)
     return calls
 
 
@@ -131,9 +132,36 @@ def test_many_entries_are_refused_before_olefile(tmp_path, no_olefile_open):
 def test_walk_cost_is_bounded_by_the_cap_not_the_file(tmp_path, monkeypatch):
     """Reads stop at the cap: the chain past MAX_OLE_DIR_ENTRIES is never walked."""
     monkeypatch.setattr(ole_guard, "MAX_OLE_DIR_ENTRIES", 64)
-    p = _write(tmp_path, "cap.xls", _cfb(4000))
+    p = _write(tmp_path, "cap.xls", _cfb(40_000))
+    reads: list[int] = []
+    real_open = open
+
+    class Counting:
+        def __init__(self, fh):
+            self._fh = fh
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._fh.close()
+
+        def seek(self, *a):
+            return self._fh.seek(*a)
+
+        def read(self, n=-1):
+            reads.append(n)
+            return self._fh.read(n)
+
+    monkeypatch.setattr(ole_guard, "open", lambda *a, **k: Counting(real_open(*a, **k)),
+                        raising=False)
     with pytest.raises(ole_guard.OleGuardError, match="too_large"):
         ole_guard.check_cfb(p)
+    # header + 16 directory sectors' FAT lookups (one FAT sector, cached); nowhere near the
+    # 10,000 directory sectors of the file.
+    assert len(reads) <= 4, reads
+    monkeypatch.undo()
+    monkeypatch.setattr(ole_guard, "MAX_OLE_DIR_ENTRIES", 64)
     assert ole_guard.check_cfb(_write(tmp_path, "ok.xls", _cfb(64))) == 64
 
 
@@ -187,3 +215,102 @@ def test_malformed_headers_are_unreadable(tmp_path, mutate):
     p = _write(tmp_path, "bad.xls", mutate(_cfb(10)))
     with pytest.raises(ole_guard.OleGuardError, match="unreadable"):
         ole_guard.check_cfb(p)
+
+
+# ─── the guard must read the FAT olefile reads (lens on #69) ─────────────────
+
+def _decoy_difat_cfb(n_entries: int) -> bytes:
+    """Header DIFAT = [FAT0, FREESECT, DECOY, ...], n_fat=110, one DIFAT sector.
+
+    olefile stops reading the header DIFAT at the first FREESECT and takes FAT sector 1..
+    from the DIFAT sector; read positionally, FAT sector 2 would be DECOY, which ends the
+    directory after one sector while olefile's real FAT chains ``n_entries`` entries.
+    """
+    S, per_fat, per_dir = 512, 128, 4
+    n_dir = -(-n_entries // per_dir)
+    dir0 = 256
+    last = dir0 + n_dir - 1
+    n_real_fat = last // per_fat + 1
+    assert n_real_fat - 1 <= 127
+    fat_loc = {0: 0, **{k: 2 + k for k in range(1, n_real_fat)}}
+    DIFAT0, DECOY = 1, 2
+    fat = [_FREE] * (n_real_fat * per_fat)
+    fat[0], fat[DIFAT0] = _FATSECT, _DIFSECT
+    for k in range(1, n_real_fat):
+        fat[fat_loc[k]] = _FATSECT
+    for i in range(n_dir):
+        fat[dir0 + i] = dir0 + i + 1 if i < n_dir - 1 else _EOC
+    decoy = [_FREE] * per_fat
+    decoy[dir0 - 2 * per_fat] = _EOC
+    hdr = bytearray(_cfb(2)[:512])
+    struct.pack_into("<IIIIIIII", hdr, 0x2C, 110, dir0, 0, 4096, _EOC, 0, DIFAT0, 1)
+    struct.pack_into("<109I", hdr, 0x4C, 0, _FREE, DECOY, *([_FREE] * 106))
+    difat0 = [fat_loc[k] for k in range(1, n_real_fat)]
+    difat0 += [_FREE] * (per_fat - 1 - len(difat0)) + [_EOC]
+    secs = {0: fat[:per_fat], DIFAT0: difat0, DECOY: decoy}
+    for k in range(1, n_real_fat):
+        secs[fat_loc[k]] = fat[k * per_fat:(k + 1) * per_fat]
+    directory = _cfb(n_entries)[-(n_dir * S):]  # the same balanced directory, n_dir sectors
+    body = bytearray()
+    for i in range(last + 1):
+        if dir0 <= i:
+            body += directory[(i - dir0) * S:(i - dir0 + 1) * S]
+        else:
+            body += struct.pack(f"<{per_fat}I", *secs[i]) if i in secs else b"\0" * S
+    return bytes(hdr) + bytes(body)
+
+
+def test_decoy_difat_does_not_hide_the_real_directory(tmp_path, no_olefile_open):
+    small = _write(tmp_path, "decoy-small.xls", _decoy_difat_cfb(400))
+    with olefile.OleFileIO(str(small)) as ole:  # the shape olefile really parses
+        assert len(ole.listdir()) == 399
+    # (a file this small also trips the header-count bound: 110 FAT sectors for 0.6 MB)
+    with pytest.raises(ole_guard.OleGuardError, match="unreadable"):
+        ole_guard.check_cfb(small)
+    no_olefile_open.clear()
+    p = _write(tmp_path, "decoy.xls", _decoy_difat_cfb(40_000))
+    t = time.process_time()
+    with pytest.raises(ole_guard.OleGuardError, match="too_large"):
+        ole_guard.check_cfb(p)
+    assert _check_ole_content(p) == ["ole_limit_exceeded"]
+    assert sr.read_binary_sheet_records_status(p) == (None, "too_large")
+    assert time.process_time() - t < 1.0
+    assert no_olefile_open == []
+
+
+def test_difat_count_olefile_rejects_is_refused(tmp_path):
+    b = bytearray(_cfb(10))
+    struct.pack_into("<II", b, 0x44, 0, 1)  # first_difat=0, n_difat=1 with n_fat=1
+    p = _write(tmp_path, "difat.xls", bytes(b))
+    with pytest.raises(OSError):
+        olefile.OleFileIO(str(p))
+    with pytest.raises(ole_guard.OleGuardError, match="unreadable"):
+        ole_guard.check_cfb(p)
+
+
+def test_olefile_failure_after_the_guard_is_reported(tmp_path, monkeypatch):
+    p = _write(tmp_path, "ok.xls", _cfb(10))
+
+    def boom(self, *a, **k):
+        self._we_opened_fp = False  # what olefile's __del__ looks at
+        raise OSError("olefile could not parse it")
+
+    monkeypatch.setattr(olefile.OleFileIO, "__init__", boom)
+    assert _check_ole_content(p) == ["ole_unreadable"]
+
+
+def test_opened_olefile_has_a_linear_duplicate_stream_check(tmp_path):
+    """Second line of defence: even a directory the guard passes is parsed in linear time,
+    and a stream referenced twice is still flagged."""
+    p = _write(tmp_path, "edge.xls", _cfb(ole_guard.MAX_OLE_DIR_ENTRIES))
+    t = time.process_time()
+    with ole_guard.open_ole(p) as ole:
+        assert len(ole.listdir()) == ole_guard.MAX_OLE_DIR_ENTRIES - 1
+    assert time.process_time() - t < 0.25
+    raw = bytearray(_cfb(4))
+    # Entry 2's start minisector := entry 1's: the same stream referenced twice.
+    dir_off = len(raw) - 512
+    struct.pack_into("<I", raw, dir_off + 2 * 128 + 116, 0)
+    dup = _write(tmp_path, "dup.xls", bytes(raw))
+    with ole_guard.open_ole(dup) as ole:
+        assert any("referenced twice" in str(m) for _k, m in ole.parsing_issues)

@@ -18,6 +18,7 @@ Refusals raise :class:`OleGuardError` with ``reason`` ``"too_large"`` (a limit) 
 """
 from __future__ import annotations
 
+import functools
 import struct
 from pathlib import Path
 
@@ -29,10 +30,21 @@ MAX_OLE_DIR_ENTRIES = 8192
 
 _MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 _ENDOFCHAIN = 0xFFFFFFFE
+_FREESECT = 0xFFFFFFFF
 _MAXREGSECT = 0xFFFFFFFA
 _HEADER_DIFAT = 109
 
 REASONS = frozenset({"too_large", "unreadable"})
+
+
+def _until_terminator(entries) -> list[int]:
+    """olefile.loadfat_sect: FAT sector numbers up to the first ENDOFCHAIN / FREESECT."""
+    out: list[int] = []
+    for e in entries:
+        if e in (_ENDOFCHAIN, _FREESECT):
+            break
+        out.append(e)
+    return out
 
 
 class OleGuardError(Exception):
@@ -85,31 +97,33 @@ def check_cfb(path: Path, *, max_entries: int | None = None) -> int:
                 raise OleGuardError("unreadable", f"sector {idx} truncated")
             return data
 
-        difat_cache: list[int] = list(struct.unpack_from(f"<{_HEADER_DIFAT}I", h, 0x4C))
-        difat_next = first_difat
-        difat_hops = 0
+        # The FAT-sector list exactly as olefile's loadfat builds it: the header's 109 slots
+        # and then each DIFAT sector's entries, each list cut at its first ENDOFCHAIN /
+        # FREESECT and the remainder appended straight after. Indexing the slots by position
+        # instead would follow a different FAT than olefile whenever a terminator sits
+        # before a later entry -- and validate a decoy directory chain.
+        fat_secs = _until_terminator(struct.unpack_from(f"<{_HEADER_DIFAT}I", h, 0x4C))
+        if n_difat:
+            # olefile derives the DIFAT sector count from n_fat and raises unless the
+            # header's count matches; n_difat is already bounded by the file size above.
+            nb_difat = (n_fat - _HEADER_DIFAT + per_fat - 2) // (per_fat - 1)
+            if n_difat != nb_difat:
+                raise OleGuardError("unreadable", "DIFAT count disagrees with the FAT count")
+            isect = first_difat
+            for _ in range(nb_difat):
+                entries = struct.unpack(f"<{per_fat}I", read_sector(isect))
+                fat_secs += _until_terminator(entries[:-1])
+                isect = entries[-1]
+            if isect not in (_ENDOFCHAIN, _FREESECT):
+                raise OleGuardError("unreadable", "DIFAT chain does not end")
         fat_cache: dict[int, tuple[int, ...]] = {}
-
-        def fat_sector_location(k: int) -> int:
-            nonlocal difat_next, difat_hops
-            if k >= n_fat:
-                raise OleGuardError("unreadable", "FAT index beyond the FAT")
-            while k >= len(difat_cache):
-                if difat_next > _MAXREGSECT or difat_hops >= n_difat:
-                    raise OleGuardError("unreadable", "DIFAT chain ends early")
-                difat_hops += 1
-                entries = struct.unpack(f"<{per_fat}I", read_sector(difat_next))
-                difat_cache.extend(entries[:-1])
-                difat_next = entries[-1]
-            return difat_cache[k]
 
         def fat_entry(sect: int) -> int:
             k, off = divmod(sect, per_fat)
             if k not in fat_cache:
-                loc = fat_sector_location(k)
-                if loc > _MAXREGSECT:
-                    raise OleGuardError("unreadable", "FAT sector unallocated")
-                fat_cache[k] = struct.unpack(f"<{per_fat}I", read_sector(loc))
+                if k >= len(fat_secs):
+                    raise OleGuardError("unreadable", "sector beyond the FAT")
+                fat_cache[k] = struct.unpack(f"<{per_fat}I", read_sector(fat_secs[k]))
             return fat_cache[k][off]
 
         per_dir = sector // 128
@@ -134,9 +148,34 @@ def check_cfb(path: Path, *, max_entries: int | None = None) -> int:
     return walked * per_dir
 
 
-def open_ole(path: Path):
-    """``olefile.OleFileIO`` for ``path`` after :func:`check_cfb` passed (raises otherwise)."""
+@functools.cache
+def _bounded_olefile_class():
+    """``OleFileIO`` with a set-based duplicate-stream check.
+
+    olefile keeps the first sectors of the streams it has seen in a *list*, so its
+    constructor is O(n^2) in directory entries. Same check, same defect, O(1) per entry:
+    a second line of defence should the pre-check and olefile ever read a directory
+    differently.
+    """
     import olefile
 
+    class _OleFileIO(olefile.OleFileIO):
+        def _check_duplicate_stream(self, first_sect, minifat=False):
+            if not minifat and first_sect in (olefile.DIFSECT, olefile.FATSECT,
+                                              olefile.ENDOFCHAIN, olefile.FREESECT):
+                return
+            attr = "_cs_seen_minifat" if minifat else "_cs_seen_fat"
+            seen = self.__dict__.setdefault(attr, set())
+            if first_sect in seen:
+                self._raise_defect(olefile.DEFECT_INCORRECT, "Stream referenced twice")
+            else:
+                seen.add(first_sect)
+
+    return _OleFileIO
+
+
+def open_ole(path: Path):
+    """An olefile ``OleFileIO`` for ``path`` after :func:`check_cfb` passed (raises
+    otherwise), with olefile's quadratic duplicate-stream check made linear."""
     check_cfb(path)
-    return olefile.OleFileIO(str(path))
+    return _bounded_olefile_class()(str(path))

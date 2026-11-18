@@ -200,7 +200,9 @@ def _read_xls(path: Path) -> list[dict] | None:
     if not olefile.isOleFile(str(path)):
         raise _Declined("unreadable")
     _check_cfb_header(path)
-    with olefile.OleFileIO(str(path)) as ole:
+    from clippyshot.ole_guard import _bounded_olefile_class
+
+    with _bounded_olefile_class()(str(path)) as ole:
         # A directory olefile had to repair (an entry linked twice, a sibling link to the
         # root, ...) is one LibreOffice may build differently: not ours to interpret.
         if any(not any(q in str(msg) for q in _BENIGN_OLE_ISSUES)

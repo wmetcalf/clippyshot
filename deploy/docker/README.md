@@ -269,7 +269,8 @@ PDF has been swept out by retention.
       "agreed_with_extension": false,
       "magika_label": "docx",
       "magika_mime": "application/…",
-      "libmagic_mime": "application/…"
+      "libmagic_mime": "application/…",
+      "warnings": []
     }
   },
   "render": {

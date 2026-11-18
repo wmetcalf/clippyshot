@@ -437,6 +437,7 @@ def _check_ole_content(path: Path) -> list[str]:
     is almost certainly a macro-only payload — there's nothing to render.
     """
     warnings: list[str] = []
+    is_ole = False
     try:
         import olefile
 
@@ -444,6 +445,7 @@ def _check_ole_content(path: Path) -> list[str]:
 
         if not olefile.isOleFile(str(path)):
             return warnings
+        is_ole = True
         try:
             # Bounded pre-check first: olefile's constructor is quadratic in directory
             # entries. A refusal is reported, not swallowed with the parse errors below.
@@ -465,7 +467,11 @@ def _check_ole_content(path: Path) -> list[str]:
         if has_encrypted:
             warnings.append("ole_encrypted")
     except Exception:
-        pass
+        # An OLE container olefile could not parse after the pre-check passed is still
+        # reported, the same verdict sheet_records gives it -- not an empty, clean-looking
+        # structural check.
+        if is_ole and not warnings:
+            warnings.append("ole_unreadable")
     return warnings
 
 
