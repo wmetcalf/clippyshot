@@ -42,16 +42,19 @@ only the stock one, bwrap's children are stacked into `unpriv_bwrap`, so attachi
 `clippyshot-soffice` fails with `aa-exec: ERROR: insufficient permissions to change to the
 profile`.
 
-**Know what unloading it costs before you do it.** `bwrap-userns-restrict` is host-wide
-hardening: it lets bwrap create a user namespace but stacks every bwrap child into
-`unpriv_bwrap`, which denies capabilities, so bwrap cannot be used to bypass Ubuntu's
-unprivileged-userns restriction. `clippyshot-bwrap` is `flags=(unconfined) { userns, }` and
-attaches by path to every `/usr/bin/bwrap` on the host (and in containers on it). With the stock
-profile unloaded, ANY local user or bwrap consumer can get a capability-bearing user namespace
-through `/usr/bin/bwrap` (e.g. `bwrap --unshare-user --uid 0 --cap-add ALL ... mount ...`
-succeeds). ClippyShot still confines its own children with `clippyshot-soffice`, but the
-host-wide control is gone. Only do this on a host (or VM) dedicated to ClippyShot, with no
-untrusted local users; on a shared host, run ClippyShot in its own VM instead.
+**Know what `clippyshot-bwrap` costs, on any host.** `clippyshot-bwrap` is
+`flags=(unconfined) { userns, }` and attaches by path to every `/usr/bin/bwrap` on the host
+(and in containers on it). Wherever it is loaded, ANY local user or bwrap consumer can get a
+capability-bearing user namespace through `/usr/bin/bwrap` (e.g.
+`bwrap --unshare-user --uid 0 --cap-add ALL ... mount ...` succeeds), which is exactly the
+hole Ubuntu's unprivileged-userns restriction closes. That is true on a stock 24.04 host
+with section 1's profiles loaded, not only after the step below. `bwrap-userns-restrict`,
+where shipped, is the distro's own mitigation for it: it lets bwrap create a user namespace
+but stacks every bwrap child into `unpriv_bwrap`, which denies capabilities; unloading it
+removes that. ClippyShot attaches `clippyshot-soffice` only to soffice (the pdfium rasterizer
+and the warm OCR helper run under bwrap without a profile). Load the bwrap profiles only on a
+host (or VM) dedicated to ClippyShot, with no untrusted local users; on a shared host, run
+ClippyShot in its own VM instead.
 
 On such a dedicated host, unload it before loading the ClippyShot profiles:
 
@@ -182,13 +185,13 @@ the sandboxed namespace. Setting NPROC on a shared uid causes all bwrap
 invocations to fail with "Resource temporarily unavailable" once the host's
 existing process count approaches the limit.
 
-Instead, the bwrap backend probes for `--cgroup-pids` at construction time
-(requires bubblewrap >= 0.5.0 and a cgroup v2 host). If the flag is available,
-`--cgroup-pids 256` is added to every bwrap invocation, giving per-sandbox PIDs
-enforcement equivalent to nsjail's.
+Instead, the bwrap backend probes `bwrap --help` for `--cgroup-pids` at construction
+time and, if present, adds `--cgroup-pids 256` to every invocation. No released
+bubblewrap has that option (checked through 0.11), so in practice the probe fails, the
+backend reports `pid_limit_missing`, and `select_sandbox` treats bwrap as insecure unless
+`CLIPPYSHOT_WARN_ON_INSECURE=1`.
 
-If `--cgroup-pids` is not available (older bwrap, cgroup v1 host, or inside a
-Docker container that doesn't expose a writable cgroup subtree), ClippyShot logs
+When `--cgroup-pids` is not available, ClippyShot logs
 a `WARN` and **falls back to relying on the container runtime's PIDs limit**.
 Configure this at the deployment layer:
 

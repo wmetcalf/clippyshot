@@ -55,6 +55,8 @@ def test_cli_convert_unknown_input_returns_exit_2(tmp_path: Path):
         capture_output=True, text=True, env=env,
     )
     assert r.returncode == 2, r.stderr
+    # Exit 2 is also argparse's usage error and the missing-input code: pin the reason.
+    assert "rejected" in r.stderr, r.stderr
 
 
 def test_cli_convert_missing_input_returns_nonzero(tmp_path: Path):
