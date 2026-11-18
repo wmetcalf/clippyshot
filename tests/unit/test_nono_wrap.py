@@ -151,12 +151,14 @@ def test_select_sandbox_inner_nono_profile_env(
     monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "container")
     monkeypatch.setenv("CLIPPYSHOT_INNER_NONO_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("CLIPPYSHOT_INNER_NONO", "1")
-    monkeypatch.setenv("CLIPPYSHOT_INNER_NONO_PROFILE", "/etc/clippyshot/soffice.nono.json")
+    profile = tmp_path / "soffice.nono.json"
+    profile.write_text("{}")
+    monkeypatch.setenv("CLIPPYSHOT_INNER_NONO_PROFILE", str(profile))
     monkeypatch.setenv("CLIPPYSHOT_NONO_BIN", _BIN)
     monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: True)
     wrapped = select_sandbox(_container_factory=lambda: _FakeSandbox())
     assert isinstance(wrapped, NonoWrappedSandbox)
-    assert wrapped.wrap.profile == Path("/etc/clippyshot/soffice.nono.json")
+    assert wrapped.wrap.profile == profile
 
 
 def test_select_sandbox_fails_fast_without_landlock(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -312,3 +314,41 @@ def test_selftest_does_not_blame_bwrap_hardening_for_missing_nono(
     assert st.run_selftest() == 1
     (ev,) = [e for e in logged if e["event"] == "sandbox_unavailable"]
     assert "fix" not in ev and ev["inner_layer"] == "nono"
+
+
+def test_missing_profile_is_refused_at_selection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from clippyshot.errors import InnerSandboxLayerUnavailable
+
+    monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "container")
+    monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: True)
+    with pytest.raises(InnerSandboxLayerUnavailable, match="profile"):
+        select_sandbox(
+            inner_wrap=NonoWrap(bin=_BIN, state_dir=tmp_path / "s",
+                                profile=tmp_path / "missing.json"),
+            _container_factory=lambda: _FakeSandbox())
+
+
+def test_existing_but_unwritable_state_dir_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """mkdir(exist_ok=True) succeeds on a dir the worker cannot write (e.g. created by root
+    during setup); nono still cannot use it."""
+    import os
+
+    from clippyshot.errors import InnerSandboxLayerUnavailable
+
+    state = tmp_path / "state"
+    state.mkdir()
+    state.chmod(0o555)
+    if os.access(state, os.W_OK):
+        pytest.skip("running as root: mode bits do not restrict")
+    monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "container")
+    monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: True)
+    try:
+        with pytest.raises(InnerSandboxLayerUnavailable, match="state dir"):
+            select_sandbox(inner_wrap=NonoWrap(bin=_BIN, state_dir=state),
+                           _container_factory=lambda: _FakeSandbox())
+    finally:
+        state.chmod(0o755)

@@ -68,11 +68,21 @@ def inner_layer_problem(inner_wrap: NonoWrap) -> str | None:
                 "binary was not found or is not an absolute, executable path (install nono "
                 "or set CLIPPYSHOT_NONO_BIN to an absolute path); refusing to select a "
                 "sandbox without the requested layer")
+    if inner_wrap.profile is not None and not inner_wrap.profile.is_file():
+        return (f"inner nono layer requested with profile {inner_wrap.profile} "
+                "(CLIPPYSHOT_INNER_NONO_PROFILE), which is not a readable file; refusing to "
+                "select a sandbox without the requested layer")
     try:
         inner_wrap.state_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         return (f"inner nono layer requested but its state dir {inner_wrap.state_dir} "
                 f"cannot be created ({exc}); refusing to select a sandbox without the "
+                "requested layer")
+    # exist_ok: an existing dir (e.g. created by root during setup) may not be the
+    # worker's to write.
+    if not os.access(inner_wrap.state_dir, os.W_OK | os.X_OK):
+        return (f"inner nono layer requested but its state dir {inner_wrap.state_dir} "
+                "is not writable by this worker; refusing to select a sandbox without the "
                 "requested layer")
     return None
 
