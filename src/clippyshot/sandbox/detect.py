@@ -67,9 +67,16 @@ def inner_layer_problem(inner_wrap: NonoWrap) -> str | None:
     # support Landlock — don't enable the inner layer on a tier without it.
     if not landlock_available():
         return ("inner nono layer requested (CLIPPYSHOT_INNER_NONO / inner_wrap) but Landlock "
-                "is unavailable on this kernel/runtime (the gVisor Sentry does not implement "
-                "it); disable inner-nono on this tier — runc and the Firecracker guest "
-                "support it")
+                "is unavailable here: the gVisor Sentry does not implement it (ENOSYS), and a "
+                "seccomp profile can deny it (deploy/seccomp/clippyshot.seccomp.json does); "
+                "disable inner-nono on this tier, or run runc / the Firecracker guest without "
+                "a landlock-denying seccomp profile")
+    for label, path in (("state dir", inner_wrap.state_dir), ("profile", inner_wrap.profile)):
+        # Relative paths are checked against this worker's CWD but resolved by nono against
+        # the sandbox workdir "/" (and nsjail cannot bind a relative source).
+        if path is not None and not path.is_absolute():
+            return (f"inner nono layer {label} {path} is not an absolute path; refusing to "
+                    "select a sandbox without the requested layer")
     if inner_wrap.resolve_bin() is None:
         return ("inner nono layer requested (CLIPPYSHOT_INNER_NONO / inner_wrap) but the nono "
                 "binary was not found or is not an absolute, executable path (install nono "

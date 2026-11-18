@@ -88,8 +88,14 @@ def _resolve_bin(raw: str | None) -> str | None:
     # the binary's dir), so a relative path that resolves here fails at run time.
     if found is None or not os.path.isabs(found):
         return None
-    p = Path(found)
-    return found if p.is_file() and os.access(p, os.X_OK) else None
+    try:
+        # The real file: apply() mounts its directory, and a symlink's target outside
+        # that directory would be missing inside nsjail/bwrap.
+        real = os.path.realpath(found)
+        ok = Path(real).is_file() and os.access(real, os.X_OK)
+    except OSError:  # e.g. under a directory this worker cannot traverse
+        return None
+    return real if ok else None
 
 
 @dataclass(frozen=True)

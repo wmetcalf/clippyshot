@@ -6,6 +6,7 @@ real-conversion enforcement test lives in tests/integration.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -15,7 +16,8 @@ from clippyshot.sandbox.detect import select_sandbox
 from clippyshot.sandbox.nono_wrap import NonoWrap, NonoWrappedSandbox
 from clippyshot.types import SandboxResult
 
-_BIN = "/bin/true"  # exists -> resolve_bin returns it; argv shape is what we assert
+# resolve_bin returns the realpath (merged-/usr hosts: /bin -> usr/bin)
+_BIN = os.path.realpath("/bin/true")
 
 
 class _FakeSandbox:
@@ -403,3 +405,47 @@ def test_selection_fails_closed_when_the_wrapped_smoketest_fails(
     with pytest.raises(InnerSandboxLayerUnavailable, match="smoketest"):
         select_sandbox(inner_wrap=NonoWrap(bin=_BIN, state_dir=tmp_path / "s"),
                        _container_factory=lambda: _NonoFails())
+
+
+def test_symlinked_nono_resolves_to_its_target(tmp_path: Path) -> None:
+    real_dir = tmp_path / "opt"
+    real_dir.mkdir()
+    real = real_dir / "nono-real"
+    real.write_text("#!/bin/sh\n")
+    real.chmod(0o755)
+    link_dir = tmp_path / "bin"
+    link_dir.mkdir()
+    (link_dir / "nono").symlink_to(real)
+    wrap = NonoWrap(bin=str(link_dir / "nono"), state_dir=tmp_path / "s")
+    assert wrap.resolve_bin() == str(real)
+    out = wrap.apply(_req())
+    assert any(m.host_path == real_dir for m in out.ro_mounts)
+
+
+def test_untraversable_nono_path_is_none_not_permission_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import os
+
+    def deny(*a, **k):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(os.path, "realpath", deny)
+    assert NonoWrap(bin="/root/nono").resolve_bin() is None
+
+
+@pytest.mark.parametrize("field", ["state_dir", "profile"])
+def test_relative_state_dir_or_profile_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, field: str
+) -> None:
+    from clippyshot.errors import InnerSandboxLayerUnavailable
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "p.json").write_text("{}")
+    kw = {"state_dir": tmp_path / "s", "profile": None}
+    kw[field] = Path("rel-state") if field == "state_dir" else Path("p.json")
+    monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "container")
+    monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: True)
+    with pytest.raises(InnerSandboxLayerUnavailable, match="absolute"):
+        select_sandbox(inner_wrap=NonoWrap(bin=_BIN, **kw),
+                       _container_factory=lambda: _FakeSandbox())

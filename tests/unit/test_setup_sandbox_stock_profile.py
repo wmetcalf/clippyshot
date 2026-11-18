@@ -389,3 +389,24 @@ def test_success_is_judged_by_the_real_sandbox_selection(monkeypatch):
 
     monkeypatch.setattr(detect, "select_sandbox", boom)
     assert cli._runtime_backend() is None
+
+
+# --- a broken inner nono layer is not a bwrap problem ----------------------------------
+
+
+@pytest.mark.parametrize("argv", [
+    ["setup-sandbox"],
+    ["setup-sandbox", "--apply"],
+    ["setup-sandbox", "--disable-stock-bwrap-profile"],
+])
+def test_broken_inner_nono_never_leads_to_disabling_the_stock_profile(monkeypatch, capsys, argv):
+    """Selection fails on the nono layer before any backend is tried, so recommending (or
+    performing) the host-wide bwrap-hardening removal cannot help."""
+    host = Host(monkeypatch, [LOADED, FIXED])
+    monkeypatch.setattr(cli, "_inner_layer_problem", lambda: "nono binary was not found")
+    rc = cli.main(argv)
+    out = capsys.readouterr().out
+    assert rc != 0
+    assert host.commands == []
+    assert "nono binary was not found" in out
+    assert "clippyshot setup-sandbox --disable-stock-bwrap-profile" not in out
