@@ -72,6 +72,16 @@ def select_sandbox(
             "is unavailable on this kernel/runtime (the gVisor Sentry does not implement it); "
             "disable inner-nono on this tier — runc and the Firecracker guest support it"
         )
+    # Fail closed on a missing/non-executable nono binary too. Every base backend is
+    # constructed + smoketested before it is accepted; without this the wrapper was
+    # returned unverified, so selection "succeeded" (and the selection's name claimed a
+    # Landlock layer) while every conversion then failed in build_argv.
+    if inner_wrap is not None and inner_wrap.resolve_bin() is None:
+        raise SandboxUnavailable(
+            "inner nono layer requested (CLIPPYSHOT_INNER_NONO / inner_wrap) but the nono "
+            "binary was not found or is not executable (install nono or set "
+            "CLIPPYSHOT_NONO_BIN); refusing to select a sandbox without the requested layer"
+        )
 
     def _wrap(sb: Sandbox) -> Sandbox:
         return NonoWrappedSandbox(sb, inner_wrap) if inner_wrap is not None else sb

@@ -124,6 +124,7 @@ def test_select_sandbox_wraps_only_when_requested(monkeypatch: pytest.MonkeyPatc
     monkeypatch.delenv("CLIPPYSHOT_INNER_NONO", raising=False)
     fake = _FakeSandbox()
 
+    monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: True)
     plain = select_sandbox(_container_factory=lambda: fake)
     assert plain is fake  # default: untouched, zero cost
 
@@ -136,6 +137,7 @@ def test_select_sandbox_wraps_only_when_requested(monkeypatch: pytest.MonkeyPatc
 def test_select_sandbox_env_trigger(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "container")
     monkeypatch.setenv("CLIPPYSHOT_INNER_NONO", "1")
+    monkeypatch.setenv("CLIPPYSHOT_NONO_BIN", _BIN)
     monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: True)
     wrapped = select_sandbox(_container_factory=lambda: _FakeSandbox())
     assert isinstance(wrapped, NonoWrappedSandbox)
@@ -145,6 +147,7 @@ def test_select_sandbox_inner_nono_profile_env(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "container")
     monkeypatch.setenv("CLIPPYSHOT_INNER_NONO", "1")
     monkeypatch.setenv("CLIPPYSHOT_INNER_NONO_PROFILE", "/etc/clippyshot/soffice.nono.json")
+    monkeypatch.setenv("CLIPPYSHOT_NONO_BIN", _BIN)
     monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: True)
     wrapped = select_sandbox(_container_factory=lambda: _FakeSandbox())
     assert isinstance(wrapped, NonoWrappedSandbox)
@@ -159,3 +162,63 @@ def test_select_sandbox_fails_fast_without_landlock(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: False)
     with pytest.raises(SandboxUnavailable, match="Landlock is unavailable"):
         select_sandbox(inner_wrap=NonoWrap(bin=_BIN), _container_factory=lambda: _FakeSandbox())
+
+
+# --------------------------------------------------------------------------
+# select_sandbox must not hand back a nono wrapper whose binary is missing: that
+# "succeeds" at selection time and only fails mid-conversion (every job), or, worse,
+# a caller that only inspects the selection believes the Landlock layer is present.
+# Every other backend is smoketested before it is accepted; nono must fail closed too.
+# --------------------------------------------------------------------------
+
+
+def test_select_sandbox_fails_closed_when_nono_binary_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from clippyshot.errors import SandboxUnavailable
+
+    monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "container")
+    monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: True)
+    with pytest.raises(SandboxUnavailable, match="nono"):
+        select_sandbox(
+            inner_wrap=NonoWrap(bin="/nonexistent/nono"),
+            _container_factory=lambda: _FakeSandbox(),
+        )
+
+
+def test_select_sandbox_env_trigger_fails_closed_without_nono_on_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from clippyshot.errors import SandboxUnavailable
+
+    monkeypatch.delenv("CLIPPYSHOT_SANDBOX", raising=False)
+    monkeypatch.setenv("CLIPPYSHOT_INNER_NONO", "1")
+    monkeypatch.delenv("CLIPPYSHOT_NONO_BIN", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))  # empty dir: no `nono` anywhere
+    monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: True)
+    built: list[str] = []
+
+    def _factory() -> _FakeSandbox:
+        built.append("x")
+        return _FakeSandbox()
+
+    with pytest.raises(SandboxUnavailable, match="nono"):
+        select_sandbox(
+            _nsjail_factory=_factory, _bwrap_factory=_factory, _container_factory=_factory
+        )
+
+
+def test_select_sandbox_rejects_non_executable_nono(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from clippyshot.errors import SandboxUnavailable
+
+    fake = tmp_path / "nono"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o644)  # exists, but cannot be exec'd
+    monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "container")
+    monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: True)
+    with pytest.raises(SandboxUnavailable, match="nono"):
+        select_sandbox(
+            inner_wrap=NonoWrap(bin=str(fake)), _container_factory=lambda: _FakeSandbox()
+        )

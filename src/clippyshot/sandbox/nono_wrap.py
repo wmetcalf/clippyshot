@@ -79,12 +79,13 @@ def landlock_available() -> bool:
 def _resolve_bin(raw: str | None) -> str | None:
     """Resolve a nono spec to an absolute existing file, or ``None``.
 
-    Accepts a path (``/opt/nono`` — must exist) or a bare name (``nono`` — via PATH).
+    Accepts a path (``/opt/nono`` — must be an executable file) or a bare name
+    (``nono`` — via PATH, which already requires the executable bit).
     """
     cand = (raw or "").strip() or "nono"
     if os.sep in cand:
         p = Path(cand)
-        return str(p) if p.is_file() else None
+        return str(p) if p.is_file() and os.access(p, os.X_OK) else None
     return shutil.which(cand)
 
 

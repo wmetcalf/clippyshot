@@ -30,7 +30,7 @@ blastbox **host/runtime** knobs (`BLASTBOX_*` — dispatch, warm pool, FC/gVisor
 |---|---|---|
 | `CLIPPYSHOT_SANDBOX` | auto | force the soffice sandbox: `nsjail` → `bwrap` → `container`. Auto picks the best available; `container` inside an OCI host. |
 | `CLIPPYSHOT_WARN_ON_INSECURE` | off | let the backend self-check run leniently (set by the dispatcher under runsc / opted-in runc). |
-| `CLIPPYSHOT_INNER_NONO` | off | **optional** nested Landlock layer (nono) inside the selected backend. Fails fast where Landlock is absent (the gVisor Sentry — ENOSYS); works on runc + the FC guest. See [DEPLOYMENT.md](DEPLOYMENT.md). |
+| `CLIPPYSHOT_INNER_NONO` | off | **optional** nested Landlock layer (nono) inside the selected backend. Fails fast where Landlock is absent (the gVisor Sentry — ENOSYS) or the nono binary is missing/not executable; works on runc + the FC guest. See [DEPLOYMENT.md](DEPLOYMENT.md). |
 | `CLIPPYSHOT_INNER_NONO_PROFILE` | `""` | a nono profile JSON (e.g. profiler-generated) for the inner layer; else auto-derived grants. |
 | `CLIPPYSHOT_NONO_BIN` | `nono` on PATH | nono binary path/name. |
 
