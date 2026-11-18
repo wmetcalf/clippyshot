@@ -263,10 +263,16 @@ def _budget_metadata_qr(meta: dict, budget_bytes: int, *,
     bookkeeping would cost more than it saves, nothing is dropped. ``meta`` is never
     modified. Returns ``(meta, omitted_total)``.
     """
+    out, omitted, _ = _budget_core(meta, budget_bytes, per_page, _qr_entries(meta))
+    return out, omitted
+
+
+def _qr_entries(meta: dict) -> list[tuple[int, int, int, str]]:
+    """(page pos, entry pos, sealed cost incl. a ", " separator, distinct key) per entry."""
     pages = meta.get("pages")
+    entries: list[tuple[int, int, int, str]] = []
     if not isinstance(pages, list):
-        return meta, 0
-    entries: list[tuple[int, int, int, str]] = []  # (page pos, entry pos, cost, value key)
+        return entries
     for pi, page_rec in enumerate(pages):
         qr = page_rec.get("qr") if isinstance(page_rec, dict) else None
         if not isinstance(qr, list):
@@ -279,9 +285,20 @@ def _budget_metadata_qr(meta: dict, budget_bytes: int, *,
             else:
                 key = repr(entry)
             entries.append((pi, ei, _meta_qr_entry_cost(entry), key))
+    return entries
+
+
+def _budget_core(meta: dict, budget_bytes: int, per_page: bool,
+                 entries: list[tuple[int, int, int, str]]) -> tuple[dict, int, int]:
+    """:func:`_budget_metadata_qr` on precomputed entries; also returns the number of
+    distinct payloads kept."""
+    pages = meta.get("pages")
+    if not isinstance(pages, list):
+        return meta, 0, 0
     total = sum(c for _, _, c, _ in entries)
-    if total <= budget_bytes:
-        return meta, 0
+    # A page's first entry carries no ", " separator, which every entry cost includes.
+    if total - 2 * len({pi for pi, _, _, _ in entries}) <= budget_bytes:
+        return meta, 0, len({k for _, _, _, k in entries})
     # Reserve the bookkeeping at its worst case, measured: every entry omitted, on every page.
     n, budget_shown = len(entries), max(0, budget_bytes)
     qr_page_counts: dict[int, int] = {}
@@ -328,7 +345,11 @@ def _budget_metadata_qr(meta: dict, budget_bytes: int, *,
 
     def slack() -> int:
         added, _, _ = bookkeeping()
-        return budget_bytes - sum(c for pi, ei, c, _ in entries if (pi, ei) in kept) - added
+        # Each entry's cost includes a ", " separator, but a page's first kept entry has
+        # none: credit those back.
+        first_free = 2 * len({pi for pi, ei in kept})
+        return (budget_bytes - sum(c for pi, ei, c, _ in entries if (pi, ei) in kept)
+                - added + first_free)
 
     # Distinct payloads first, to a fixpoint: select against the worst-case bookkeeping,
     # then hand back what the real bookkeeping did not use (a page that keeps everything
@@ -343,7 +364,8 @@ def _budget_metadata_qr(meta: dict, budget_bytes: int, *,
     added, omitted_total, by_page = bookkeeping()
     kept_cost = sum(c for pi, ei, c, _ in entries if (pi, ei) in kept)
     if total - kept_cost <= added:
-        return meta, 0  # dropping would add more bookkeeping than it removes
+        # dropping would add more bookkeeping than it removes
+        return meta, 0, len({k for _, _, _, k in entries})
     pages_out: list = []
     for pi, page_rec in enumerate(pages):
         if pi in by_page:
@@ -353,18 +375,8 @@ def _budget_metadata_qr(meta: dict, budget_bytes: int, *,
                 page_rec["qr_omitted"] = by_page[pi]
         pages_out.append(page_rec)
     root = {"omitted": omitted_total, "budget_bytes": budget_shown}
-    return {**meta, "pages": pages_out, "qr_truncated": root}, omitted_total
-
-
-def _distinct_payloads(meta: dict) -> int:
-    seen: set[str] = set()
-    for page_rec in meta.get("pages") or []:
-        for entry in (page_rec.get("qr") or []) if isinstance(page_rec, dict) else []:
-            if isinstance(entry, dict) and isinstance(entry.get("value"), str):
-                seen.add(repr((entry["value"], entry.get("raw_bytes_hex"))))
-            else:
-                seen.add(repr(entry))
-    return len(seen)
+    return ({**meta, "pages": pages_out, "qr_truncated": root}, omitted_total,
+            len(kept_keys))
 
 
 def _select_metadata_qr(meta: dict, budget_bytes: int) -> tuple[dict, int]:
@@ -372,13 +384,13 @@ def _select_metadata_qr(meta: dict, budget_bytes: int) -> tuple[dict, int]:
     root-count-only form keeps more distinct payloads (many pages each losing an entry,
     e.g. a footer QR on every page: per-page counts can eat the room a distinct payload
     needed)."""
-    with_pages = _budget_metadata_qr(meta, budget_bytes, per_page=True)
+    entries = _qr_entries(meta)  # costed once, shared by both forms
+    with_pages = _budget_core(meta, budget_bytes, True, entries)
     if not with_pages[1]:
-        return with_pages
-    root_only = _budget_metadata_qr(meta, budget_bytes, per_page=False)
-    if _distinct_payloads(root_only[0]) > _distinct_payloads(with_pages[0]):
-        return root_only
-    return with_pages
+        return with_pages[0], with_pages[1]
+    root_only = _budget_core(meta, budget_bytes, False, entries)
+    best = root_only if root_only[2] > with_pages[2] else with_pages
+    return best[0], best[1]
 
 
 def _nested_json_bytes(fragment: str) -> int:
@@ -1038,8 +1050,13 @@ class ClippyShotEngine:
         # estimate (artifact rows as they will serialize, a small margin), not the generous
         # one the typed copies keep: near the cap they would otherwise lose evidence that
         # sealed fine before this budget existed.
+        # Measured with every coded page's qr_values_truncated set (as it will be when
+        # anything is cut): the flag is a byte longer than false.
+        none_kept: dict[int, tuple[list[str], bool]] = {
+            p["index"]: ([], bool(p.get("qr"))) for p in meta.get("pages", [])
+            if isinstance(p, dict) and type(p.get("index")) is int}
         meta_qr_budget = self._headroom(max_meta, self._assemble(
-            meta, outdir, clamped_dpi, no_qr, [], metadata_meta=stripped_meta),
+            meta, outdir, clamped_dpi, none_kept, [], metadata_meta=stripped_meta),
             margin=_QR_META_MARGIN, tight=True, outdir=outdir, detected=detected)
         budgeted_meta, omitted = _select_metadata_qr(meta, meta_qr_budget)
         meta_qr_warnings: list[Warning] = []
@@ -1065,9 +1082,6 @@ class ClippyShotEngine:
             # content, one root count and the warning -- if THAT fits by the same estimate.
             # Where even it does not, the estimate cannot tell what fits; keep the result.
             # Typed copies are empty here too: say so on every page that had codes.
-            none_kept: dict[int, tuple[list[str], bool]] = {
-                p["index"]: ([], bool(p.get("qr"))) for p in meta.get("pages", [])
-                if isinstance(p, dict) and type(p.get("index")) is int}
             budget_shown = max(0, meta_qr_budget)
             fallback = self._assemble(
                 meta, outdir, clamped_dpi, none_kept,

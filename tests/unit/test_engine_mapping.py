@@ -468,7 +468,7 @@ def test_truncation_bookkeeping_is_measured_not_guessed():
     from clippyshot.engine import _budget_metadata_qr, _meta_qr_entry_cost
 
     entry = {"value": "x" * 900}
-    cost = _meta_qr_entry_cost(entry)
+    cost = _meta_qr_entry_cost(entry) - 2  # a page's only entry has no ", " separator
     out, omitted = _budget_metadata_qr({"pages": [{"index": 1, "qr": [entry]}]}, cost - 1)
     assert omitted == 1 and out["pages"][0]["qr"] == []
 
@@ -527,9 +527,12 @@ def test_unused_bookkeeping_reserve_is_handed_back():
     from clippyshot.engine import _budget_metadata_qr, _meta_qr_entry_cost
 
     pages = [{"index": i, "qr": [{"value": f"https://u{i}.example/x"}]} for i in range(1, 51)]
-    total = sum(_meta_qr_entry_cost(p["qr"][0]) for p in pages)
+    # Each entry's cost carries a ", " separator, which a page's only entry does not use.
+    total = sum(_meta_qr_entry_cost(p["qr"][0]) - 2 for p in pages)
     out, omitted = _budget_metadata_qr({"pages": pages}, total - 1)
     assert 0 < omitted <= 16
+    out, omitted = _budget_metadata_qr({"pages": pages}, total)
+    assert omitted == 0  # exactly fits once the unused separators are credited
 
 
 def test_bookkeeping_alone_never_pushes_a_fitting_result_over_the_cap(tmp_path):
@@ -620,3 +623,21 @@ def test_near_cap_keeps_what_master_kept_within_a_small_margin(tmp_path):
     inner = json.loads(res.payload.metadata.fields["clippyshot_metadata"])
     assert sum(len(p["qr"]) for p in inner["pages"]) == 50
     assert base < need
+
+
+def test_a_distinct_payload_is_not_lost_to_separator_overcount(tmp_path):
+    """Entry costs include a ", " separator a page's first entry does not use; not crediting
+    it dropped a fitting distinct payload while footer repeats were kept (verification lens
+    on #67)."""
+    from clippyshot.engine import _budget_metadata_qr, _meta_qr_entry_cost
+
+    footer = {"value": "https://footer.example/x"}
+    pages = [{"index": i, "qr": [{"value": f"https://u{i}.example/"}, footer]}
+             for i in range(1, 301)]
+    evil = {"value": "https://evil.example/" + "e" * 800}
+    pages[-1]["qr"].append(evil)
+    distinct = (sum(_meta_qr_entry_cost(p["qr"][0]) - 2 for p in pages)
+                + _meta_qr_entry_cost(footer) + _meta_qr_entry_cost(evil))
+    for extra in range(500, 1300, 50):
+        out, _ = _budget_metadata_qr({"pages": pages}, distinct + extra, per_page=False)
+        assert evil in out["pages"][-1]["qr"], extra
