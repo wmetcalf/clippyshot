@@ -191,10 +191,11 @@ _QR_TRUNCATED_MARKER_BYTES = 320
 # The bookkeeping is reserved up front at its measured worst case (see _budget_metadata_qr).
 # The metadata entries' headroom uses the tight sealed-size estimate (_sealed_estimate) and
 # a small margin instead of _QR_HEADROOM_MARGIN.
-_QR_META_MARGIN = 2048
+_QR_META_MARGIN = 512
 # Envelope fields outside payload/warnings/artifacts (~180 B measured) + a worst-case
-# Detection JSON (~400 B at the schema's string caps), rounded up.
-_TIGHT_HEADER_BYTES = 640
+# Detection JSON: the schema caps label/mime/source at 64/255/32 CHARACTERS, serialized
+# as UTF-8 (up to 4 bytes each), plus keys and a long float -- rounded up.
+_TIGHT_HEADER_BYTES = 1664
 
 
 def _json_bytes(text: str) -> int:
@@ -248,16 +249,19 @@ def _meta_qr_entry_cost(entry: object) -> int:
     return len(json.dumps(inner)) - 2 + 2
 
 
-def _budget_metadata_qr(meta: dict, budget_bytes: int) -> tuple[dict, int]:
+def _budget_metadata_qr(meta: dict, budget_bytes: int, *,
+                        per_page: bool = True) -> tuple[dict, int]:
     """A copy of ``meta`` whose pages' ``qr`` entries fit ``budget_bytes`` of sealed JSON.
 
     Everything fits -> ``meta`` itself, untouched. Otherwise entries are kept whole, greedily:
     pass 1 takes the first entry of each distinct value in page order that fits (a
     smaller later copy can stand in for an oversized first one), pass 2 then adds repeats of
     kept values the same way. Kept entries stay in their original order. A page that lost
-    any carries ``qr_omitted``; the root gets ``qr_truncated: {omitted, budget_bytes}``. Truncating never grows the result: when the
-    bookkeeping would cost more than it saves, nothing is dropped. ``meta`` is never modified.
-    Returns ``(meta, omitted_total)``.
+    any carries ``qr_omitted`` (unless ``per_page`` is false: then only the root count,
+    which leaves more room for entries when many pages lose some); the root gets
+    ``qr_truncated: {omitted, budget_bytes}``. Truncating never grows the result: when the
+    bookkeeping would cost more than it saves, nothing is dropped. ``meta`` is never
+    modified. Returns ``(meta, omitted_total)``.
     """
     pages = meta.get("pages")
     if not isinstance(pages, list):
@@ -287,22 +291,24 @@ def _budget_metadata_qr(meta: dict, budget_bytes: int) -> tuple[dict, int]:
         _nested_json_bytes(', "qr_truncated": '
                            + json.dumps({"omitted": n, "budget_bytes": budget_shown}))
         + len(_meta_qr_warning(n, budget_bytes).model_dump_json()) + 1
-        + sum(_nested_json_bytes(f', "qr_omitted": {c}') for c in qr_page_counts.values()))
+        + (sum(_nested_json_bytes(f', "qr_omitted": {c}') for c in qr_page_counts.values())
+           if per_page else 0))
     kept: set[tuple[int, int]] = set()
     kept_keys: set[str] = set()
 
     def bookkeeping() -> tuple[int, int, dict[int, int]]:
         """Exact (bytes added, omitted total, omitted per page) for the current selection."""
-        per_page: dict[int, int] = {}
+        by_page: dict[int, int] = {}
         for pi, ei, _, _ in entries:
             if (pi, ei) not in kept:
-                per_page[pi] = per_page.get(pi, 0) + 1
-        omitted = sum(per_page.values())
-        added = sum(_nested_json_bytes(f', "qr_omitted": {c}') for c in per_page.values())
+                by_page[pi] = by_page.get(pi, 0) + 1
+        omitted = sum(by_page.values())
+        added = (sum(_nested_json_bytes(f', "qr_omitted": {c}') for c in by_page.values())
+                 if per_page else 0)
         added += _nested_json_bytes(', "qr_truncated": ' + json.dumps(
             {"omitted": omitted, "budget_bytes": budget_shown}))
         added += len(_meta_qr_warning(omitted, budget_bytes).model_dump_json()) + 1
-        return added, omitted, per_page
+        return added, omitted, by_page
 
     def fill(remaining: int, repeats: bool) -> bool:
         """Greedy in page order; a misfit is skipped, not a stop, so one large early value
@@ -334,19 +340,45 @@ def _budget_metadata_qr(meta: dict, budget_bytes: int) -> tuple[dict, int]:
     for _ in range(16):
         if not fill(slack(), repeats=True):
             break
-    added, omitted_total, per_page = bookkeeping()
+    added, omitted_total, by_page = bookkeeping()
     kept_cost = sum(c for pi, ei, c, _ in entries if (pi, ei) in kept)
     if total - kept_cost <= added:
         return meta, 0  # dropping would add more bookkeeping than it removes
     pages_out: list = []
     for pi, page_rec in enumerate(pages):
-        if pi in per_page:
+        if pi in by_page:
             page_rec = {**page_rec,
-                        "qr": [e for ei, e in enumerate(page_rec["qr"]) if (pi, ei) in kept],
-                        "qr_omitted": per_page[pi]}
+                        "qr": [e for ei, e in enumerate(page_rec["qr"]) if (pi, ei) in kept]}
+            if per_page:
+                page_rec["qr_omitted"] = by_page[pi]
         pages_out.append(page_rec)
     root = {"omitted": omitted_total, "budget_bytes": budget_shown}
     return {**meta, "pages": pages_out, "qr_truncated": root}, omitted_total
+
+
+def _distinct_payloads(meta: dict) -> int:
+    seen: set[str] = set()
+    for page_rec in meta.get("pages") or []:
+        for entry in (page_rec.get("qr") or []) if isinstance(page_rec, dict) else []:
+            if isinstance(entry, dict) and isinstance(entry.get("value"), str):
+                seen.add(repr((entry["value"], entry.get("raw_bytes_hex"))))
+            else:
+                seen.add(repr(entry))
+    return len(seen)
+
+
+def _select_metadata_qr(meta: dict, budget_bytes: int) -> tuple[dict, int]:
+    """:func:`_budget_metadata_qr` with per-page ``qr_omitted`` bookkeeping, unless the
+    root-count-only form keeps more distinct payloads (many pages each losing an entry,
+    e.g. a footer QR on every page: per-page counts can eat the room a distinct payload
+    needed)."""
+    with_pages = _budget_metadata_qr(meta, budget_bytes, per_page=True)
+    if not with_pages[1]:
+        return with_pages
+    root_only = _budget_metadata_qr(meta, budget_bytes, per_page=False)
+    if _distinct_payloads(root_only[0]) > _distinct_payloads(with_pages[0]):
+        return root_only
+    return with_pages
 
 
 def _nested_json_bytes(fragment: str) -> int:
@@ -1008,13 +1040,16 @@ class ClippyShotEngine:
         # sealed fine before this budget existed.
         meta_qr_budget = self._headroom(max_meta, self._assemble(
             meta, outdir, clamped_dpi, no_qr, [], metadata_meta=stripped_meta),
-            margin=_QR_META_MARGIN, tight=True, outdir=outdir)
-        budgeted_meta, omitted = _budget_metadata_qr(meta, meta_qr_budget)
+            margin=_QR_META_MARGIN, tight=True, outdir=outdir, detected=detected)
+        budgeted_meta, omitted = _select_metadata_qr(meta, meta_qr_budget)
         meta_qr_warnings: list[Warning] = []
         if omitted:
             meta_qr_warnings.append(_meta_qr_warning(omitted, meta_qr_budget))
+        # The typed copies get the remainder, measured tight too (a generous per-row guess
+        # is no upper bound for long artifact paths), with the generous margin.
         headroom = self._headroom(max_meta, self._assemble(
-            meta, outdir, clamped_dpi, no_qr, meta_qr_warnings, metadata_meta=budgeted_meta))
+            meta, outdir, clamped_dpi, no_qr, meta_qr_warnings, metadata_meta=budgeted_meta),
+            tight=True, outdir=outdir)
         values_budget = min(_QR_VALUES_BUDGET_BYTES, headroom * 3 // 4)
         warn_budget = min(_QR_WARNING_BUDGET_BYTES, headroom - values_budget)
         final = self._assemble(
@@ -1024,7 +1059,8 @@ class ClippyShotEngine:
             metadata_meta=budgeted_meta)
         total_qr = sum(len(p["qr"]) for p in meta.get("pages", [])
                        if isinstance(p, dict) and isinstance(p.get("qr"), list))
-        if total_qr and self._sealed_estimate(final, tight=True, outdir=outdir) > max_meta:
+        if total_qr and self._sealed_estimate(final, tight=True, outdir=outdir,
+                                              detected=detected) > max_meta:
             # Last resort (bookkeeping at near-zero room, a never-grow overshoot): no QR
             # content, one root count and the warning -- if THAT fits by the same estimate.
             # Where even it does not, the estimate cannot tell what fits; keep the result.
@@ -1038,7 +1074,8 @@ class ClippyShotEngine:
                 [_meta_qr_warning(total_qr, budget_shown)],
                 metadata_meta={**stripped_meta, "qr_truncated": {
                     "omitted": total_qr, "budget_bytes": budget_shown}})
-            if self._sealed_estimate(fallback, tight=True, outdir=outdir) <= max_meta:
+            if self._sealed_estimate(fallback, tight=True, outdir=outdir,
+                                     detected=detected) <= max_meta:
                 final = fallback
             else:
                 # Not even the count fits: the QR-free result (qr_count on each page's
@@ -1059,16 +1096,17 @@ class ClippyShotEngine:
     @staticmethod
     def _sealed_estimate(assembled: tuple[list[Page], list[DeclaredArtifact],
                                           EmbeddedResource, list[Warning]],
-                         *, tight: bool = False, outdir: Path | None = None) -> int:
+                         *, tight: bool = False, outdir: Path | None = None,
+                         detected: Detection | None = None) -> int:
         """Upper estimate of the sealed metadata.json: payload + warnings as serialized,
         plus the sealed artifact rows and envelope header.
 
         Generous (default): 512 B per row (~140 B measured) + 4 KiB. ``tight``: each row as
         it will serialize (id/path/kind as given, a 64-hex sha256, the file's size from
         ``outdir``, else 20 digits), list separators, and the envelope header: ~180 B of
-        fixed fields plus the Detection, which the harness may take from its own
-        pre-detection, so it is counted at the schema's worst case (label 64, mime 255,
-        source 32 chars, a long float).
+        fixed fields plus the Detection -- ``detected``'s own size when given (the blastbox
+        harness and the host re-seal both seal the engine's result.detected, as this engine
+        has no pre-detect), else the schema's worst case.
         """
         _, artifacts, payload, warnings = assembled
         base = len(payload.model_dump_json(by_alias=True).encode())
@@ -1086,16 +1124,18 @@ class ClippyShotEngine:
                                    "sha256": "0" * 64, "bytes": size(a)},
                                   separators=(",", ":")).encode()) + 1
                    for a in artifacts)
-        return base + rows + _TIGHT_HEADER_BYTES
+        header = (_TIGHT_HEADER_BYTES if detected is None
+                  else 192 + len(detected.model_dump_json().encode()))
+        return base + rows + header
 
     @classmethod
     def _headroom(cls, max_meta: int, assembled: tuple[list[Page], list[DeclaredArtifact],
                                                        EmbeddedResource, list[Warning]],
                   *, margin: int = _QR_HEADROOM_MARGIN, tight: bool = False,
-                  outdir: Path | None = None) -> int:
+                  outdir: Path | None = None, detected: Detection | None = None) -> int:
         """Sealed bytes left under ``max_meta`` by an assembled result (margin kept spare)."""
-        return max(0, max_meta - cls._sealed_estimate(assembled, tight=tight, outdir=outdir)
-                   - margin)
+        return max(0, max_meta - cls._sealed_estimate(assembled, tight=tight, outdir=outdir,
+                                                      detected=detected) - margin)
 
     def _assemble(self, meta: dict, outdir: Path, clamped_dpi: dict[int, int],
                   qr_budgeted: dict[int, tuple[list[str], bool]],

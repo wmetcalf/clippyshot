@@ -420,9 +420,9 @@ def test_truncation_never_grows_a_result_with_no_room(tmp_path):
     page = {"index": 1, "file": "page-001.png", "width_mm": 210.0, "height_mm": 297.0,
             "qr": [], "ocr": {"text": "o" * 150_000, "char_count": 150_000}}
     res0, out0 = _detonate_capped(tmp_path / "a", _meta(pages=[page]), 4 << 20)
-    # The QR-free result fits with ~1 KB to spare: too little for the bookkeeping+warning
+    # The QR-free result fits with ~2 KB to spare: too little for the bookkeeping+warning
     # a drop would add, enough (by the tight estimate's worst-case header) for the entry.
-    cap = _sealed_size(res0, out0) + 1200
+    cap = _sealed_size(res0, out0) + 2300
     page = {**page, "qr": [{"format": "qr_code", "value": "https://e.example/",
                             "position": [], "raw_bytes_hex": "68"}]}
     res, out = _detonate_capped(tmp_path / "b", _meta(pages=[page]), cap)
@@ -569,9 +569,10 @@ def test_tight_estimate_counts_a_worst_case_detection_and_separators():
 
     from clippyshot.engine import ClippyShotEngine, _TIGHT_HEADER_BYTES
 
-    big = Detection(label="l" * 64, mime="m" * 255, confidence=0.9998764991760254,
-                    source="s" * 32)
-    assert len(big.model_dump_json()) + 180 <= _TIGHT_HEADER_BYTES
+    for ch in ("l", "\U0001F600"):  # the caps count characters; UTF-8 is up to 4 B each
+        big = Detection(label=ch * 64, mime=ch * 255, confidence=0.9998764991760254,
+                        source=ch * 32)
+        assert len(big.model_dump_json().encode()) + 180 <= _TIGHT_HEADER_BYTES
     from blastbox.contract import EmbeddedResource, Record
     from blastbox.contract import Warning as W
 
@@ -582,3 +583,40 @@ def test_tight_estimate_counts_a_worst_case_detection_and_separators():
     serialized = len(payload.model_dump_json(by_alias=True)) + len(
         "[" + ",".join(w.model_dump_json() for w in ws) + "]")
     assert est >= serialized + _TIGHT_HEADER_BYTES - 2
+
+
+def test_a_footer_code_on_every_page_does_not_hide_a_distinct_payload(tmp_path):
+    """Per-page qr_omitted counts can eat the room a distinct payload needs when every page
+    loses an entry (a footer QR on each page): the root-count-only form is used then."""
+    pages = [{"index": i, "file": f"page-{i:03d}.png", "width_mm": 210.0, "height_mm": 297.0,
+              "qr": [], "ocr": {}} for i in range(1, 201)]
+    res0, out0 = _detonate_capped(tmp_path / "a", _meta(pages=pages), 4 << 20)
+    base = _sealed_size(res0, out0)
+    footer = {"format": "qr_code", "value": "https://footer.example/" + "f" * 120,
+              "position": [], "raw_bytes_hex": "00"}
+    evil = {"format": "qr_code", "value": "https://evil.example/login", "position": [],
+            "raw_bytes_hex": "01"}
+    for p in pages:
+        p["qr"] = [footer]
+    pages[-1]["qr"] = [footer, evil]
+    for room in (2_500, 4_000, 6_000):
+        res, out = _detonate_capped(tmp_path / f"r{room}", _meta(pages=pages), base + room)
+        assert _sealed_size(res, out) <= base + room
+        inner = json.loads(res.payload.metadata.fields["clippyshot_metadata"])
+        assert any(q["value"] == evil["value"] for q in inner["pages"][-1]["qr"]), room
+
+
+def test_near_cap_keeps_what_master_kept_within_a_small_margin(tmp_path):
+    pages = [{"index": i, "file": f"page-{i:03d}.png", "width_mm": 210.0, "height_mm": 297.0,
+              "qr": [], "ocr": {}} for i in range(1, 51)]
+    res0, out0 = _detonate_capped(tmp_path / "a", _meta(pages=pages), 4 << 20)
+    base = _sealed_size(res0, out0)
+    for i, p in enumerate(pages):
+        p["qr"] = [{"format": "qr_code", "value": f"https://u{i}.example/" + "p" * 150,
+                    "position": [], "raw_bytes_hex": "00"}]
+    full, outf = _detonate_capped(tmp_path / "f", _meta(pages=pages), 4 << 20)
+    need = _sealed_size(full, outf)
+    res, out = _detonate_capped(tmp_path / "b", _meta(pages=pages), need + 1_200)
+    inner = json.loads(res.payload.metadata.fields["clippyshot_metadata"])
+    assert sum(len(p["qr"]) for p in inner["pages"]) == 50
+    assert base < need
