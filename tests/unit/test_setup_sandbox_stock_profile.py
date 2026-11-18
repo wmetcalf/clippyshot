@@ -45,6 +45,9 @@ class Host:
         monkeypatch.setattr(ss, "default_profile_dir", lambda: PROFILE_DIR)
         self._mp = monkeypatch
         self.nsjail_secure = True
+        # Real sandbox selection would probe this machine: a conflicted bwrap-only host
+        # has nothing selectable.
+        monkeypatch.setattr(cli, "_runtime_backend", lambda: None)
 
         def state():
             return self.states.pop(0) if len(self.states) > 1 else self.states[0]
@@ -79,7 +82,8 @@ class Host:
             return any(a.profile_name == "clippyshot-nsjail" for a in self.applied)
 
         self._mp.setattr(ss, "_userns_ok", ok)
-        self._mp.setattr(cli, "_nsjail_selectable", lambda: self.nsjail_secure)
+        self._mp.setattr(cli, "_runtime_backend", lambda: (
+            "nsjail" if self.nsjail_secure and ok("nsjail", "/usr/bin/nsjail") else None))
         return self
 
 
@@ -343,7 +347,7 @@ def test_conflicted_apply_that_only_loads_soffice_is_not_success(monkeypatch, ca
         ENABLED_UNLOADED, False, "profile_not_loaded", "profile 'clippyshot-soffice' does not exist"))
     assert cli.main(["setup-sandbox", "--apply"]) == 1
     assert [a.profile_name for a in host.applied] == ["clippyshot-soffice"]
-    assert "No backend is usable yet" in capsys.readouterr().out
+    assert "No backend is selectable yet" in capsys.readouterr().out
 
 
 def test_conflicted_host_with_a_working_nsjail_is_success(monkeypatch, capsys):
@@ -365,6 +369,12 @@ def test_an_insecure_nsjail_is_not_reported_as_a_usable_backend(monkeypatch, cap
     assert cli.main(["setup-sandbox", "--apply"]) == 1
 
 
-def test_a_forced_other_backend_is_not_rescued_by_nsjail(monkeypatch):
-    monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "bwrap")
-    assert cli._nsjail_selectable() is False
+def test_success_is_judged_by_the_real_sandbox_selection(monkeypatch):
+    from clippyshot.errors import SandboxUnavailable
+    from clippyshot.sandbox import detect
+
+    def boom():
+        raise SandboxUnavailable("forced backend 'bwrap' failed")
+
+    monkeypatch.setattr(detect, "select_sandbox", boom)
+    assert cli._runtime_backend() is None
