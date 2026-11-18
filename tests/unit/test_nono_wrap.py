@@ -38,6 +38,14 @@ class _FakeSandbox:
         return SandboxResult(0, b"", b"", 1, False)
 
 
+@pytest.fixture(autouse=True)
+def _tmp_state_dirs_allowed(monkeypatch: pytest.MonkeyPatch, request) -> None:
+    """pytest's tmp_path lives under /tmp, which nono grants the child; the state-dir
+    placement rule is tested on its own (test_state_dir_under_a_granted_dir_is_refused)."""
+    if "granted_dir" not in request.node.name:
+        monkeypatch.setattr("clippyshot.sandbox.detect._GRANTED_RW_DIRS", ("/nonexistent-rw",))
+
+
 def _req(**kw) -> SandboxRequest:
     kw.setdefault("argv", ["/usr/bin/soffice", "--convert-to", "pdf", "x.docx"])
     return SandboxRequest(**kw)
@@ -487,3 +495,17 @@ def test_nono_failure_under_the_chosen_base_fails_closed_not_over(
                        _bwrap_factory=bwrap,
                        _container_factory=lambda: _Base("container", True))
     assert built == []
+
+
+@pytest.mark.parametrize("state", ["/tmp/nono-state", "/dev/shm/nono", "/tmp"])
+def test_state_dir_under_a_granted_dir_is_refused(monkeypatch: pytest.MonkeyPatch,
+                                                    state: str) -> None:
+    """nono grants the child write access to /tmp and /dev; its own state there could be
+    rewritten by the process it confines (codex prosecutor on #66)."""
+    from clippyshot.errors import InnerSandboxLayerUnavailable
+
+    monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "container")
+    monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: True)
+    with pytest.raises(InnerSandboxLayerUnavailable, match="grants"):
+        select_sandbox(inner_wrap=NonoWrap(bin=_BIN, state_dir=Path(state)),
+                       _container_factory=lambda: _FakeSandbox())

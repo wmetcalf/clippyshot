@@ -13,6 +13,7 @@ from clippyshot.sandbox.base import Sandbox
 from clippyshot.sandbox.bwrap import BwrapSandbox
 from clippyshot.sandbox.container import ContainerSandbox
 from clippyshot.sandbox.nono_wrap import (
+    _RW_BASE_DIRS,
     NonoWrap,
     NonoWrappedSandbox,
     landlock_available,
@@ -36,6 +37,10 @@ def _security_state(sb: Sandbox) -> tuple[bool, list[str]]:
 
 def _keep_existing_error(current: Exception | None) -> bool:
     return current is not None and "insecure" in str(current)
+
+
+# Paths nono's auto-derived grants give the child write access to (nono_wrap._RW_BASE_DIRS).
+_GRANTED_RW_DIRS: tuple[str, ...] = _RW_BASE_DIRS
 
 
 def inner_wrap_from_env() -> NonoWrap | None:
@@ -86,6 +91,14 @@ def inner_layer_problem(inner_wrap: NonoWrap) -> str | None:
         return (f"inner nono layer requested with profile {inner_wrap.profile} "
                 "(CLIPPYSHOT_INNER_NONO_PROFILE), which is not a readable file; refusing to "
                 "select a sandbox without the requested layer")
+    # nono's state must stay off every path it grants the child, or the sandboxed process
+    # could rewrite the state of the layer confining it.
+    state = Path(os.path.realpath(inner_wrap.state_dir))
+    for granted in _GRANTED_RW_DIRS:
+        if state == Path(granted) or Path(granted) in state.parents:
+            return (f"inner nono layer state dir {inner_wrap.state_dir} is under {granted}, "
+                    "which nono grants the sandboxed child write access to; use a dir off "
+                    "the grants (default /var/lib/clippyshot/nono-state)")
     try:
         inner_wrap.state_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
