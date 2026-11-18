@@ -424,3 +424,21 @@ def test_broken_inner_nono_still_loads_the_independent_profiles_on_apply(monkeyp
     assert [a.profile_name for a in host.applied] == ["clippyshot-nsjail"]
     assert "nono binary was not found" in out
     assert "clippyshot setup-sandbox --disable-stock-bwrap-profile" not in out
+
+
+def test_runtime_nono_failure_is_seen_by_setup_sandbox(monkeypatch):
+    """A nono that passes the static checks but fails when run (a profile it rejects)
+    is reported by selection, not inner_layer_problem: setup-sandbox must see it too."""
+    from clippyshot.errors import InnerSandboxLayerUnavailable
+    from clippyshot.sandbox import detect
+
+    monkeypatch.setenv("CLIPPYSHOT_INNER_NONO", "1")
+    monkeypatch.setattr(detect, "inner_layer_problem", lambda w: None)
+
+    def boom(**kw):
+        raise InnerSandboxLayerUnavailable("inner nono layer smoketest under nsjail failed")
+
+    monkeypatch.setattr(detect, "select_sandbox", boom)
+    assert "smoketest" in (cli._inner_layer_problem() or "")
+    monkeypatch.delenv("CLIPPYSHOT_INNER_NONO")
+    assert cli._inner_layer_problem() is None

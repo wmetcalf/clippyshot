@@ -422,16 +422,21 @@ def test_symlinked_nono_resolves_to_its_target(tmp_path: Path) -> None:
     assert any(m.host_path == real_dir for m in out.ro_mounts)
 
 
-def test_untraversable_nono_path_is_none_not_permission_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    import os
-
-    def deny(*a, **k):
-        raise PermissionError(13, "Permission denied")
-
-    monkeypatch.setattr(os.path, "realpath", deny)
-    assert NonoWrap(bin="/root/nono").resolve_bin() is None
+def test_untraversable_nono_path_is_none_not_permission_error(tmp_path: Path) -> None:
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    nono = locked / "nono"
+    nono.write_text("#!/bin/sh\n")
+    nono.chmod(0o755)
+    locked.chmod(0o000)
+    try:
+        if os.access(nono, os.F_OK):
+            pytest.skip("running as root: mode bits do not restrict")
+        with pytest.raises(PermissionError):
+            nono.is_file() or nono.stat()  # the call the fix must contain
+        assert NonoWrap(bin=str(nono)).resolve_bin() is None
+    finally:
+        locked.chmod(0o755)
 
 
 @pytest.mark.parametrize("field", ["state_dir", "profile"])
@@ -451,11 +456,11 @@ def test_relative_state_dir_or_profile_is_refused(
                        _container_factory=lambda: _FakeSandbox())
 
 
-def test_auto_selection_tries_the_next_base_when_nono_fails_under_one(
+def test_nono_failure_under_the_chosen_base_fails_closed_not_over(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """codex on #66: nono blocked under nsjail (base smoketest fine) must not stop the
-    fallback to a bwrap under which it works."""
+    """Enabling the opt-in EXTRA layer must never change which base is chosen: a nono
+    failure under nsjail must not fall through to a weaker bwrap/container."""
     from clippyshot.errors import InnerSandboxLayerUnavailable
 
     class _Base(_FakeSandbox):
@@ -471,11 +476,14 @@ def test_auto_selection_tries_the_next_base_when_nono_fails_under_one(
     monkeypatch.delenv("CLIPPYSHOT_SANDBOX", raising=False)
     monkeypatch.setattr("clippyshot.sandbox.detect.landlock_available", lambda: True)
     wrap = NonoWrap(bin=_BIN, state_dir=tmp_path / "s")
-    sb = select_sandbox(inner_wrap=wrap, _nsjail_factory=lambda: _Base("nsjail", False),
-                        _bwrap_factory=lambda: _Base("bwrap", True),
-                        _container_factory=lambda: _Base("container", True))
-    assert sb.name == "bwrap+nono"
-    with pytest.raises(InnerSandboxLayerUnavailable):
+    built: list[str] = []
+
+    def bwrap():
+        built.append("bwrap")
+        return _Base("bwrap", True)
+
+    with pytest.raises(InnerSandboxLayerUnavailable, match="nsjail"):
         select_sandbox(inner_wrap=wrap, _nsjail_factory=lambda: _Base("nsjail", False),
-                       _bwrap_factory=lambda: _Base("bwrap", False),
-                       _container_factory=lambda: _Base("container", False))
+                       _bwrap_factory=bwrap,
+                       _container_factory=lambda: _Base("container", True))
+    assert built == []

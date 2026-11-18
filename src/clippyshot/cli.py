@@ -123,11 +123,31 @@ def _runtime_backend() -> str | None:
 
 
 def _inner_layer_problem() -> str | None:
-    """Why the env-requested inner nono layer cannot run, or None (also None when off)."""
-    from clippyshot.sandbox.detect import inner_layer_problem, inner_wrap_from_env
+    """Why the env-requested inner nono layer cannot run, or None (also None when off).
+
+    Static preconditions first, then the authoritative check: selection itself, whose
+    smoketest runs through nono (a profile nono rejects, a broken binary, ...).
+    """
+    from clippyshot.errors import InnerSandboxLayerUnavailable
+    from clippyshot.sandbox.detect import (
+        inner_layer_problem,
+        inner_wrap_from_env,
+        select_sandbox,
+    )
 
     wrap = inner_wrap_from_env()
-    return inner_layer_problem(wrap) if wrap is not None else None
+    if wrap is None:
+        return None
+    problem = inner_layer_problem(wrap)
+    if problem is not None:
+        return problem
+    try:
+        select_sandbox(inner_wrap=wrap)
+    except InnerSandboxLayerUnavailable as e:
+        return str(e)
+    except Exception:  # noqa: BLE001 - a base-backend failure is not a nono problem
+        return None
+    return None
 
 
 def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
