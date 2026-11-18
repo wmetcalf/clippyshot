@@ -396,8 +396,9 @@ def test_entity_heavy_file_magika_cannot_classify_is_still_counted(tmp_path, mon
     from types import SimpleNamespace
 
     entities = "".join(f'<!ENTITY e{i} "x">' for i in range(65))
-    bomb = tmp_path / "bomb.odt"
-    bomb.write_bytes(f'<?xml version="1.0"?><!DOCTYPE r [{entities}]><r/>'.encode("utf-16"))
+    content = f'<?xml version="1.0"?><!DOCTYPE r [{entities}]><r/>'.encode("utf-16")
+    bomb = tmp_path / "bomb.fodt"
+    bomb.write_bytes(content)
     detector = Detector()
     monkeypatch.setattr(
         detector._magika,
@@ -410,3 +411,7 @@ def test_entity_heavy_file_magika_cannot_classify_is_still_counted(tmp_path, mon
     with pytest.raises(DetectionError) as ei:
         detector.detect(bomb)
     assert ei.value.reason == "xml_safety_check_failed"
+    # The same bytes as plain text are documentation, not declarations (codex on #65).
+    txt = tmp_path / "notes.txt"
+    txt.write_bytes(content)
+    assert detector.detect(txt).label == "txt"
