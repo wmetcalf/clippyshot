@@ -4,14 +4,16 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
-from clippyshot.errors import SandboxUnavailable
+from clippyshot.errors import InnerSandboxLayerUnavailable, SandboxUnavailable
 from clippyshot.sandbox.base import Sandbox
 from clippyshot.sandbox.bwrap import BwrapSandbox
 from clippyshot.sandbox.container import ContainerSandbox
 from clippyshot.sandbox.nono_wrap import (
+    _RW_BASE_DIRS,
     NonoWrap,
     NonoWrappedSandbox,
     landlock_available,
@@ -37,6 +39,81 @@ def _keep_existing_error(current: Exception | None) -> bool:
     return current is not None and "insecure" in str(current)
 
 
+# Paths nono's auto-derived grants give the child write access to (nono_wrap._RW_BASE_DIRS).
+_GRANTED_RW_DIRS: tuple[str, ...] = _RW_BASE_DIRS
+
+
+def inner_wrap_from_env() -> NonoWrap | None:
+    """The NonoWrap ``CLIPPYSHOT_INNER_NONO`` requests, or None when it is off."""
+    if not _env_truthy("CLIPPYSHOT_INNER_NONO"):
+        return None
+    profile = os.environ.get("CLIPPYSHOT_INNER_NONO_PROFILE", "").strip()
+    state = os.environ.get("CLIPPYSHOT_INNER_NONO_STATE_DIR", "").strip()
+    wrap = NonoWrap(profile=Path(profile) if profile else None)
+    return replace(wrap, state_dir=Path(state)) if state else wrap
+
+
+def _readable_file(path: Path) -> bool:
+    try:
+        return path.is_file() and os.access(path, os.R_OK)
+    except OSError:  # e.g. a parent directory this worker cannot traverse
+        return False
+
+
+def inner_layer_problem(inner_wrap: NonoWrap) -> str | None:
+    """Why the requested inner nono layer cannot run on this host, or None.
+
+    Every base backend is constructed + smoketested before it is accepted; the nono layer
+    must be checked up front the same way, or selection "succeeds" (and the selection's
+    name advertises a Landlock layer) while every conversion then fails in
+    ``NonoWrap.apply``/``build_argv``. Checks each precondition ``apply`` needs.
+    """
+    # gVisor's Sentry returns ENOSYS for the landlock_* syscalls; runc + the FC guest
+    # support Landlock — don't enable the inner layer on a tier without it.
+    if not landlock_available():
+        return ("inner nono layer requested (CLIPPYSHOT_INNER_NONO / inner_wrap) but Landlock "
+                "is unavailable here: the gVisor Sentry does not implement it (ENOSYS), and a "
+                "seccomp profile can deny it (deploy/seccomp/clippyshot.seccomp.json does); "
+                "disable inner-nono on this tier, or run runc / the Firecracker guest without "
+                "a landlock-denying seccomp profile")
+    for label, path in (("state dir", inner_wrap.state_dir), ("profile", inner_wrap.profile)):
+        # Relative paths are checked against this worker's CWD but resolved by nono against
+        # the sandbox workdir "/" (and nsjail cannot bind a relative source).
+        if path is not None and not path.is_absolute():
+            return (f"inner nono layer {label} {path} is not an absolute path; refusing to "
+                    "select a sandbox without the requested layer")
+    if inner_wrap.resolve_bin() is None:
+        return ("inner nono layer requested (CLIPPYSHOT_INNER_NONO / inner_wrap) but the nono "
+                "binary was not found or is not an absolute, executable path (install nono "
+                "or set CLIPPYSHOT_NONO_BIN to an absolute path); refusing to select a "
+                "sandbox without the requested layer")
+    if inner_wrap.profile is not None and not _readable_file(inner_wrap.profile):
+        return (f"inner nono layer requested with profile {inner_wrap.profile} "
+                "(CLIPPYSHOT_INNER_NONO_PROFILE), which is not a readable file; refusing to "
+                "select a sandbox without the requested layer")
+    # nono's state must stay off every path it grants the child, or the sandboxed process
+    # could rewrite the state of the layer confining it.
+    state = Path(os.path.realpath(inner_wrap.state_dir))
+    for granted in _GRANTED_RW_DIRS:
+        if state == Path(granted) or Path(granted) in state.parents:
+            return (f"inner nono layer state dir {inner_wrap.state_dir} is under {granted}, "
+                    "which nono grants the sandboxed child write access to; use a dir off "
+                    "the grants (default /var/lib/clippyshot/nono-state)")
+    try:
+        inner_wrap.state_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return (f"inner nono layer requested but its state dir {inner_wrap.state_dir} "
+                f"cannot be created ({exc}); refusing to select a sandbox without the "
+                "requested layer")
+    # exist_ok: an existing dir (e.g. created by root during setup) may not be the
+    # worker's to write.
+    if not os.access(inner_wrap.state_dir, os.W_OK | os.X_OK):
+        return (f"inner nono layer requested but its state dir {inner_wrap.state_dir} "
+                "is not writable by this worker; refusing to select a sandbox without the "
+                "requested layer")
+    return None
+
+
 def select_sandbox(
     *,
     inner_wrap: NonoWrap | None = None,
@@ -48,7 +125,10 @@ def select_sandbox(
 
     Order: nsjail → bwrap → container. Each candidate is constructed AND
     smoketest-verified before being accepted. A backend that constructs
-    successfully but fails /bin/true is skipped in favour of the next.
+    successfully but fails /bin/true is skipped in favour of the next. With the
+    inner nono layer requested, the chosen backend is then smoketested THROUGH
+    nono; a failure there raises InnerSandboxLayerUnavailable rather than falling
+    through to a later (weaker) backend.
 
     CLIPPYSHOT_SANDBOX env var (nsjail|bwrap|container) forces a specific
     backend; no silent fallback if forced.
@@ -59,22 +139,30 @@ def select_sandbox(
     as-is (zero cost). It decorates whichever backend is chosen, so it composes with
     nsjail/bwrap/container alike.
     """
-    if inner_wrap is None and _env_truthy("CLIPPYSHOT_INNER_NONO"):
-        profile = os.environ.get("CLIPPYSHOT_INNER_NONO_PROFILE", "").strip()
-        inner_wrap = NonoWrap(profile=Path(profile) if profile else None)
-
-    # Fail fast on a tier that can't enforce Landlock (e.g. the gVisor Sentry returns
-    # ENOSYS) rather than letting nono error mid-conversion. runc + the FC guest support
-    # Landlock; gVisor C/R does not — don't enable the inner layer there.
-    if inner_wrap is not None and not landlock_available():
-        raise SandboxUnavailable(
-            "inner nono layer requested (CLIPPYSHOT_INNER_NONO / inner_wrap) but Landlock "
-            "is unavailable on this kernel/runtime (the gVisor Sentry does not implement it); "
-            "disable inner-nono on this tier — runc and the Firecracker guest support it"
-        )
+    if inner_wrap is None:
+        inner_wrap = inner_wrap_from_env()
+    if inner_wrap is not None:
+        problem = inner_layer_problem(inner_wrap)
+        if problem is not None:
+            raise InnerSandboxLayerUnavailable(problem)
 
     def _wrap(sb: Sandbox) -> Sandbox:
-        return NonoWrappedSandbox(sb, inner_wrap) if inner_wrap is not None else sb
+        if inner_wrap is None:
+            return sb
+        wrapped = NonoWrappedSandbox(sb, inner_wrap)
+        # The base passed its own smoketest; now prove the requested layer end to end
+        # (binary runs, profile loads, the grants suffice under this base).
+        try:
+            smoke = wrapped.smoketest()
+        except Exception as exc:  # noqa: BLE001
+            raise InnerSandboxLayerUnavailable(
+                f"inner nono layer smoketest under {sb.name} raised: {exc}") from exc
+        if smoke.exit_code != 0 or smoke.killed:
+            raise InnerSandboxLayerUnavailable(
+                f"inner nono layer smoketest under {sb.name} failed "
+                f"(exit={smoke.exit_code}, killed={smoke.killed}): "
+                f"{smoke.stderr.decode(errors='replace')[:200]}")
+        return wrapped
 
     factories: dict[str, Callable[[], Sandbox]] = {
         "nsjail": _nsjail_factory,
@@ -174,6 +262,11 @@ def select_sandbox(
                 "sandbox backend selected in insecure mode",
                 extra={"backend": name, "reasons": reasons},
             )
+        # A nono failure under the backend auto-selection settled on fails closed: falling
+        # through to the next one would let the opt-in EXTRA layer swap a secure nsjail for
+        # a weaker bwrap/container (the backends that confine nono's child the same way
+        # fail the same way, so a fallback only "works" by dropping confinement).
+        wrapped = _wrap(sb)
         if skipped:
             _log.info(
                 "sandbox backend selected: %s (passed over %s)",
@@ -182,7 +275,7 @@ def select_sandbox(
             )
         else:
             _log.info("sandbox backend selected", extra={"backend": name})
-        return _wrap(sb)
+        return wrapped
 
     raise SandboxUnavailable(
         "no sandbox backend available; "

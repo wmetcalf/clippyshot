@@ -389,3 +389,71 @@ def test_success_is_judged_by_the_real_sandbox_selection(monkeypatch):
 
     monkeypatch.setattr(detect, "select_sandbox", boom)
     assert cli._runtime_backend() is None
+
+
+# --- a broken inner nono layer is not a bwrap problem ----------------------------------
+
+
+@pytest.mark.parametrize("argv", [
+    ["setup-sandbox"],
+    ["setup-sandbox", "--apply"],
+    ["setup-sandbox", "--disable-stock-bwrap-profile"],
+])
+def test_broken_inner_nono_never_leads_to_disabling_the_stock_profile(monkeypatch, capsys, argv):
+    """Selection fails on the nono layer before any backend is tried, so recommending (or
+    performing) the host-wide bwrap-hardening removal cannot help."""
+    host = Host(monkeypatch, [LOADED, FIXED])
+    monkeypatch.setattr(cli, "_inner_layer_problem", lambda: "nono binary was not found")
+    rc = cli.main(argv)
+    out = capsys.readouterr().out
+    assert rc != 0
+    assert host.commands == []
+    assert "nono binary was not found" in out
+    assert "clippyshot setup-sandbox --disable-stock-bwrap-profile" not in out
+
+
+def test_broken_inner_nono_still_loads_the_independent_profiles_on_apply(monkeypatch, capsys):
+    """codex on #66: --apply loads clippyshot-nsjail/-soffice regardless of the nono
+    problem (they do not touch the stock bwrap profile); only the stock advice stops."""
+    host = Host(monkeypatch, [LOADED]).with_nsjail(blocked_until_loaded=True)
+    monkeypatch.setattr(cli, "_inner_layer_problem", lambda: "nono binary was not found")
+    rc = cli.main(["setup-sandbox", "--apply"])
+    out = capsys.readouterr().out
+    assert rc != 0
+    assert host.commands == []
+    assert [a.profile_name for a in host.applied] == ["clippyshot-nsjail"]
+    assert "nono binary was not found" in out
+    assert "clippyshot setup-sandbox --disable-stock-bwrap-profile" not in out
+
+
+def test_runtime_nono_failure_is_seen_by_setup_sandbox(monkeypatch):
+    """A nono that passes the static checks but fails when run (a profile it rejects)
+    is reported by selection, not inner_layer_problem: setup-sandbox must see it too."""
+    from clippyshot.errors import InnerSandboxLayerUnavailable
+    from clippyshot.sandbox import detect
+
+    monkeypatch.setenv("CLIPPYSHOT_INNER_NONO", "1")
+    monkeypatch.setattr(detect, "inner_layer_problem", lambda w: None)
+
+    def boom(**kw):
+        raise InnerSandboxLayerUnavailable("inner nono layer smoketest under nsjail failed")
+
+    monkeypatch.setattr(detect, "select_sandbox", boom)
+    assert "smoketest" in (cli._inner_layer_problem() or "")
+    monkeypatch.delenv("CLIPPYSHOT_INNER_NONO")
+    assert cli._inner_layer_problem() is None
+
+
+def test_nono_failure_seen_only_after_apply_is_not_blamed_on_bwrap(monkeypatch, capsys):
+    """final prosecutor on #66: before --apply loads clippyshot-nsjail no base runs, so the
+    nono check is inconclusive; after it, selection reaches nono and fails. The advice
+    must name nono, not the stock bwrap profile."""
+    host = Host(monkeypatch, [LOADED]).with_nsjail(blocked_until_loaded=True)
+    host.nsjail_secure = False  # _runtime_backend -> None after the apply
+    calls = iter([None, "inner nono layer smoketest under nsjail failed"])
+    monkeypatch.setattr(cli, "_inner_layer_problem", lambda: next(calls, None))
+    rc = cli.main(["setup-sandbox", "--apply"])
+    out = capsys.readouterr().out
+    assert rc != 0 and host.commands == []
+    assert "smoketest under nsjail failed" in out
+    assert "clippyshot setup-sandbox --disable-stock-bwrap-profile" not in out

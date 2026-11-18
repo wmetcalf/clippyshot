@@ -373,7 +373,7 @@ is the full reference** (every `CLIPPYSHOT_*` knob by group); the most common on
 | Env var | Default | Effect |
 |---|---|---|
 | `CLIPPYSHOT_SANDBOX` | _(auto)_ | Force `nsjail`, `bwrap`, or `container`; fail loudly if unavailable |
-| `CLIPPYSHOT_INNER_NONO` | off | Optional nested **Landlock** (nono) layer inside the selected backend — opt-in defense-in-depth on runc + the FC guest (fails fast under gVisor, which has no Landlock). See `docs/CONFIGURATION.md`. |
+| `CLIPPYSHOT_INNER_NONO` | off | Optional nested **Landlock** (nono) layer inside the selected backend — opt-in defense-in-depth on runc + the FC guest. Selection fails closed when the layer cannot run (no Landlock under gVisor or a landlock-denying seccomp profile; nono binary/profile/state dir problems; a smoketest through nono failing). See `docs/CONFIGURATION.md` (`CLIPPYSHOT_NONO_BIN`, `CLIPPYSHOT_INNER_NONO_PROFILE`, `CLIPPYSHOT_INNER_NONO_STATE_DIR`). |
 | `CLIPPYSHOT_TIMEOUT` | `60` | Per-conversion soffice timeout (seconds) |
 | `CLIPPYSHOT_MAX_PAGES` | `50` | Page count cap (truncates beyond this) |
 | `CLIPPYSHOT_DPI` | `150` | Rasterization DPI |

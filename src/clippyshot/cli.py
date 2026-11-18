@@ -122,6 +122,34 @@ def _runtime_backend() -> str | None:
     return str(getattr(sb, "name", "unknown"))
 
 
+def _inner_layer_problem() -> str | None:
+    """Why the env-requested inner nono layer cannot run, or None (also None when off).
+
+    Static preconditions first, then the authoritative check: selection itself, whose
+    smoketest runs through nono (a profile nono rejects, a broken binary, ...).
+    """
+    from clippyshot.errors import InnerSandboxLayerUnavailable
+    from clippyshot.sandbox.detect import (
+        inner_layer_problem,
+        inner_wrap_from_env,
+        select_sandbox,
+    )
+
+    wrap = inner_wrap_from_env()
+    if wrap is None:
+        return None
+    problem = inner_layer_problem(wrap)
+    if problem is not None:
+        return problem
+    try:
+        select_sandbox(inner_wrap=wrap)
+    except InnerSandboxLayerUnavailable as e:
+        return str(e)
+    except Exception:  # noqa: BLE001 - a base-backend failure is not a nono problem
+        return None
+    return None
+
+
 def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
     from clippyshot import setup_sandbox as ss
     from clippyshot.sandbox import host_apparmor as ha
@@ -150,6 +178,14 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
             "  to ClippyShot with no untrusted local users; otherwise run ClippyShot in its own VM\n"
             "  or a gVisor/Firecracker tier, which never runs bwrap (deploy/apparmor/README.md)."
         )
+        inner = _inner_layer_problem()
+        inner_msg = (f"\nNo backend can be selected until the requested inner nono layer "
+                     f"can run:\n  {inner}\nFix that (or unset CLIPPYSHOT_INNER_NONO); "
+                     f"disabling {stock} would not help.")
+        if inner is not None and disable_stock:
+            # Never trade away host-wide hardening for a failure it cannot fix.
+            print(inner_msg + " Nothing changed.")
+            return 1
         if not disable_stock:
             # The stock profile only conflicts with clippyshot-bwrap (both attach
             # /usr/bin/bwrap). Every other scheduled profile (clippyshot-nsjail,
@@ -168,6 +204,11 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
                     return rc
                 print(f"\nLoaded {', '.join(a.profile_name for a in other)}; the distro's "
                       "bwrap hardening is untouched.")
+            if inner is not None:
+                # The profiles above (nsjail/soffice) are independent of the nono problem and
+                # were still loaded on --apply; the stock-profile advice below is not.
+                print(inner_msg)
+                return 1
             if not other or args.apply:
                 # Success is a working backend, not what this run happened to load: re-check
                 # nsjail itself (it is unaffected by the stock profile).
@@ -177,6 +218,13 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
                           "hardening kept. Only the bwrap backend still needs "
                           f"`{ha.FIX_COMMAND}` (dedicated hosts only).")
                     return 0
+                late_inner = _inner_layer_problem() if args.apply else None
+                if late_inner is not None:
+                    # Selection could only reach nono once the profiles above loaded.
+                    print(f"\nNo backend can be selected until the requested inner nono "
+                          f"layer can run:\n  {late_inner}\nFix that (or unset "
+                          f"CLIPPYSHOT_INNER_NONO); disabling {stock} would not help.")
+                    return 1
                 if args.apply:
                     print("\nNo backend is selectable yet; bwrap still needs "
                           f"`{ha.FIX_COMMAND}` (dedicated hosts only), or make nsjail usable.")

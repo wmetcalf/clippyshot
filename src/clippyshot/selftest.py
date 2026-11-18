@@ -9,7 +9,7 @@ from pathlib import Path
 
 from clippyshot._version import __version__
 from clippyshot.detector import Detector
-from clippyshot.errors import SandboxUnavailable
+from clippyshot.errors import InnerSandboxLayerUnavailable, SandboxUnavailable
 from clippyshot.observability import configure_logging, get_logger, set_sandbox_backend
 from clippyshot.sandbox.detect import select_sandbox
 from clippyshot.sandbox.host_apparmor import (
@@ -120,7 +120,11 @@ def run_selftest() -> int:
         # a forced nsjail/container deployment never runs bwrap.
         forced = os.environ.get("CLIPPYSHOT_SANDBOX", "").strip().lower()
         bwrap_possible = forced == "bwrap" or (forced == "" and shutil.which("bwrap") is not None)
-        if (isinstance(e, AppArmorAttachUnavailable)
+        if isinstance(e, InnerSandboxLayerUnavailable):
+            # A nono-layer failure (static, or its smoketest under the chosen base):
+            # relaxing the bwrap hardening cannot fix it.
+            fields["inner_layer"] = "nono"
+        elif (isinstance(e, AppArmorAttachUnavailable)
                 and e.probe.cause == "stock_profile_conflict") or (
                     bwrap_possible and stock.conflict):
             fields["fix"] = FIX_COMMAND

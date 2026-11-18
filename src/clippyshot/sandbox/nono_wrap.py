@@ -79,13 +79,23 @@ def landlock_available() -> bool:
 def _resolve_bin(raw: str | None) -> str | None:
     """Resolve a nono spec to an absolute existing file, or ``None``.
 
-    Accepts a path (``/opt/nono`` — must exist) or a bare name (``nono`` — via PATH).
+    Accepts an absolute path (``/opt/nono``) or a bare name (``nono`` — via PATH); either
+    way the result must be an absolute path to an executable file.
     """
     cand = (raw or "").strip() or "nono"
-    if os.sep in cand:
-        p = Path(cand)
-        return str(p) if p.is_file() else None
-    return shutil.which(cand)
+    found = cand if os.sep in cand else shutil.which(cand)
+    # Absolute only: every request runs with workdir "/" (and nsjail/bwrap identity-mount
+    # the binary's dir), so a relative path that resolves here fails at run time.
+    if found is None or not os.path.isabs(found):
+        return None
+    try:
+        # The real file: apply() mounts its directory, and a symlink's target outside
+        # that directory would be missing inside nsjail/bwrap.
+        real = os.path.realpath(found)
+        ok = Path(real).is_file() and os.access(real, os.X_OK)
+    except OSError:  # e.g. under a directory this worker cannot traverse
+        return None
+    return real if ok else None
 
 
 @dataclass(frozen=True)
@@ -180,6 +190,9 @@ class NonoWrap:
         extra_ro = (
             [Mount(bin_dir, bin_dir, read_only=True)] if bin_dir is not None else []
         )
+        if self.profile is not None:
+            # nono reads -p inside a namespacing base sandbox too.
+            extra_ro.append(Mount(self.profile, self.profile, read_only=True))
         extra_rw = [Mount(self.state_dir, self.state_dir, read_only=False)]
         # nono PROCESS env (separate from the child's env above): relocate state HOME
         # off the grants + silence prompts. Merged onto the existing request env.
@@ -203,8 +216,8 @@ class NonoWrappedSandbox:
     """Decorator that nono-wraps every :meth:`run` then delegates to the base sandbox.
 
     Satisfies the :class:`~clippyshot.sandbox.base.Sandbox` protocol, so it drops in
-    anywhere a ``Sandbox`` is taken. ``smoketest`` delegates unwrapped — it probes the
-    base backend's liveness, not the (optional) nono layer.
+    anywhere a ``Sandbox`` is taken. ``smoketest`` runs ``/bin/true`` THROUGH the nono
+    layer, so it proves the layer as well as the base backend.
     """
 
     inner: Sandbox
@@ -225,8 +238,16 @@ class NonoWrappedSandbox:
     def insecurity_reasons(self) -> list[str]:
         return list(getattr(self.inner, "insecurity_reasons", []))
 
+    @property
+    def seccomp_source(self) -> str:
+        # The base's syscall filter still applies under nono; report it, not "none".
+        return str(getattr(self.inner, "seccomp_source", "none"))
+
     def run(self, request: SandboxRequest) -> SandboxResult:
         return self.inner.run(self.wrap.apply(request))
 
     def smoketest(self) -> SandboxResult:
-        return self.inner.smoketest()
+        # Through the wrapper, not just the base: the nono layer is what selection must
+        # prove (binary runs, profile loads, grants/mounts suffice), or "+nono" is
+        # advertised for a layer that fails every conversion.
+        return self.run(SandboxRequest(argv=["/bin/true"]))
