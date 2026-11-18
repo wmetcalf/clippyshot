@@ -426,3 +426,17 @@ def test_inventory_source_says_when_type_and_state_came_from_a_reexport(tmp_path
     runner.convert_to_pdf = convert
     meta = _convert(tmp_path, runner, Limits())
     assert meta["sheets"]["inventory_source"] == "libreoffice_xlsx_reexport"
+
+
+def test_a_workbook_typed_by_the_xml_default_is_not_an_anomaly(tmp_path):
+    p = _workbook(tmp_path, '<sheets><sheet name="A" r:id="rId1"/></sheets>', rels=True)
+    with zipfile.ZipFile(p) as z:
+        items = {n: z.read(n) for n in z.namelist()}
+    items["[Content_Types].xml"] = (
+        b'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        b'<Default Extension="xml" ContentType="application/vnd.openxmlformats-officedocument.'
+        b'spreadsheetml.sheet.main+xml"/></Types>')
+    with zipfile.ZipFile(p, "w") as z:
+        for n, b in items.items():
+            z.writestr(n, b)
+    assert read_sheet_inventory(p)[1] == []

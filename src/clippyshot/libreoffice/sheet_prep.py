@@ -160,9 +160,16 @@ def _package_anomalies(zf: zipfile.ZipFile) -> set[str]:
     # falls through to another importer (e.g. ODF, if the zip also carries ODS parts).
     try:
         ct = safe_fromstring(bounded_read(zf, "[Content_Types].xml"))
-        ok = any(o.attrib.get("PartName", "").lower() == "/xl/workbook.xml"
-                 and o.attrib.get("ContentType", "").strip() in _WORKBOOK_CONTENT_TYPES
-                 for o in ct.findall(f"{_CT_NS}Override"))
+        overrides = [o for o in ct.findall(f"{_CT_NS}Override")
+                     if o.attrib.get("PartName", "") == "/xl/workbook.xml"]
+        if overrides:
+            ok = any(o.attrib.get("ContentType", "") in _WORKBOOK_CONTENT_TYPES
+                     for o in overrides)
+        else:
+            # No Override: LO falls back to the Default for the .xml extension.
+            ok = any(d.attrib.get("Extension", "").lower() == "xml"
+                     and d.attrib.get("ContentType", "") in _WORKBOOK_CONTENT_TYPES
+                     for d in ct.findall(f"{_CT_NS}Default"))
     except Exception:  # noqa: BLE001
         ok = False
     if not ok:
