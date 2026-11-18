@@ -68,3 +68,64 @@ def test_ui_renders_worker_tier():
     'warm == gVisor' assumption."""
     assert "worker_tier" in _INDEX
     assert "firecracker" in _INDEX and "gvisor" in _INDEX
+
+
+# ── engine/host warnings (qr_metadata_truncated lives on the envelope, not in metadata) ──
+def _warning_helpers_js() -> str:
+    m = re.search(r"// WARNINGS-HELPERS-BEGIN.*?// WARNINGS-HELPERS-END", _INDEX, re.S)
+    assert m, "warning helpers block missing from index.html"
+    return m.group(0)
+
+
+def _run_helpers(script: str):
+    import json
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    out = subprocess.run([node, "-e", _warning_helpers_js() + "\n" + script],
+                         capture_output=True, text=True, timeout=30, check=True)
+    return json.loads(out.stdout)
+
+
+def test_ui_surfaces_envelope_warnings_with_the_embedded_metadata():
+    """The full-metadata path used to show only clippyshot_metadata.warnings, dropping the
+    envelope's engine warnings such as qr_metadata_truncated."""
+    code = _strip_js_comments(_INDEX)
+    assert "const envWarnings" in code
+    assert "collectWarnings(meta, envWarnings)" in code
+    got = _run_helpers("""
+      const meta = {warnings: [{code: 'resolution_clamped', message: 'm1'}],
+                    qr_truncated: {omitted: 3, budget_bytes: 2048},
+                    pages: [{index: 1, qr_omitted: 2}, {index: 2}, {index: 4, qr_omitted: 1}]};
+      const env = [{code: 'resolution_clamped', message: 'm1', context: 'x'},
+                   {code: 'qr_metadata_truncated', message: 'dropped'},
+                   {code: 'qr_decoded', message: 'https://a'}];
+      console.log(JSON.stringify(collectWarnings(meta, env)));
+    """)
+    codes = [w["code"] for w in got]
+    assert codes == ["resolution_clamped", "qr_metadata_truncated", "qr_decoded", "qr_truncated"]
+    qt = got[-1]["message"]
+    assert "3 decoded QR entries" in qt and "2048 bytes" in qt and "1 (2), 4 (1)" in qt
+
+
+def test_ui_merge_keeps_repeats_but_never_doubles():
+    got = _run_helpers("""
+      const a = {code: 'altchunk_present', message: 'same'};
+      console.log(JSON.stringify([
+        mergeWarnings([a, a], [a]).length,
+        mergeWarnings([a], [a, a]).length,
+        mergeWarnings([], [a, {code: 'x', message: 'y'}]).map(w => w.code),
+        mergeWarnings(null, undefined, [null, {message: 'no code'}]).length,
+        qrTruncatedWarning({}) === null,
+      ]));
+    """)
+    assert got == [2, 2, ["altchunk_present", "x"], 0, True]
+
+
+def test_ui_marks_pages_with_omitted_qr_entries():
+    assert "p.qr_omitted" in _strip_js_comments(_INDEX)

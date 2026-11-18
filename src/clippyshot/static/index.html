@@ -432,6 +432,10 @@ async function loadResult(jobId, opts) {
     const r = await fetch(API+'/v1/jobs/'+jobId+'/metadata');
     if (!r.ok) return;
     let meta = await r.json();
+    // Engine/host warnings sealed on the blastbox ENVELOPE (qr_metadata_truncated,
+    // qr_decoded, ...) are not inside the embedded clippyshot_metadata; keep them before
+    // the compat shim below swaps meta for the legacy schema.
+    const envWarnings = (meta && meta.payload && Array.isArray(meta.warnings)) ? meta.warnings : [];
 
     // --- compat shim: the backend now returns the blastbox ENVELOPE (engine/status/detected/
     // artifacts/payload), but this UI was written for the legacy clippyshot metadata.json schema
@@ -601,13 +605,25 @@ async function loadResult(jobId, opts) {
     } catch(e) { /* best-effort */ }
     setTable('security-table', secRows);
 
-    // Warnings
+    // Warnings: the metadata's own, the envelope's engine/host warnings, and the QR
+    // budget marker (root qr_truncated / page qr_omitted) the engine writes into metadata.
     const wb = document.getElementById('warnings-body');
-    const warnings = meta.warnings || [];
+    const warnings = collectWarnings(meta, envWarnings);
     if (warnings.length === 0) {
       wb.innerHTML = '<span style="color:#8b949e;font-size:.82rem">None</span>';
     } else {
-      wb.innerHTML = warnings.map(w=>'<div class="warn" style="font-size:.82rem;margin-bottom:4px">'+esc(w.code)+': '+esc(w.message)+'</div>').join('');
+      const line = w => '<div class="warn" style="font-size:.82rem;margin-bottom:4px">'
+        + esc(w.code) + ': ' + esc(w.message)
+        + (w.context ? ' <span style="color:#8b949e">(' + esc(w.context) + ')</span>' : '')
+        + '</div>';
+      // qr_decoded is one warning per distinct decoded value (up to 256): fold them.
+      const decoded = warnings.filter(w => w.code === 'qr_decoded');
+      wb.innerHTML = warnings.filter(w => w.code !== 'qr_decoded').map(line).join('')
+        + (decoded.length
+          ? '<details><summary class="warn" style="font-size:.82rem">qr_decoded: '
+            + decoded.length + ' decoded QR value(s)</summary>' + decoded.map(line).join('')
+            + '</details>'
+          : '');
     }
 
     // Download link
@@ -703,6 +719,11 @@ async function loadResult(jobId, opts) {
         card.insertAdjacentHTML('beforeend',
           `<details open><summary>QR codes (${p.qr.length})</summary><ul>${items}</ul></details>`
         );
+      }
+      // Entries the engine dropped from this page's list to fit the metadata budget.
+      if (Number(p.qr_omitted) > 0) {
+        card.insertAdjacentHTML('beforeend',
+          `<div class="warn" style="font-size:.78rem">${Number(p.qr_omitted)} QR entr${Number(p.qr_omitted) === 1 ? 'y' : 'ies'} omitted (qr_metadata_truncated)</div>`);
       }
 
       grid.appendChild(card);
@@ -941,6 +962,52 @@ setInterval(refreshJobs, 3000);
 refreshJobs();
 
 // Helpers
+// WARNINGS-HELPERS-BEGIN (pure; exercised by tests/unit/test_static_ui.py under node)
+// Union of warning lists. The metadata's warnings are re-sealed onto the envelope, so the
+// same (code, message) appears in both: keep each pair as many times as the list that has
+// it most often (two identical altChunk parts stay two), never doubled.
+function mergeWarnings(...lists) {
+  const keyOf = w => String(w.code) + '\u0000' + String(w.message ?? '');
+  const best = new Map();
+  for (const list of lists) {
+    const counts = new Map();
+    for (const w of (Array.isArray(list) ? list : [])) {
+      if (!w || typeof w !== 'object' || !w.code) continue;
+      const k = keyOf(w);
+      const items = counts.get(k) || [];
+      items.push(w);
+      counts.set(k, items);
+    }
+    for (const [k, items] of counts) {
+      const prev = best.get(k);
+      if (!prev || items.length > prev.items.length) best.set(k, {items, order: prev ? prev.order : best.size});
+    }
+  }
+  return [...best.values()].sort((a, b) => a.order - b.order).flatMap(e => e.items);
+}
+// The engine's QR budget marker in clippyshot_metadata: root qr_truncated {omitted,
+// budget_bytes} and per-page qr_omitted counts.
+function qrTruncatedWarning(meta) {
+  const t = meta && meta.qr_truncated;
+  if (!t || typeof t !== 'object') return null;
+  const pages = (Array.isArray(meta.pages) ? meta.pages : [])
+    .filter(p => p && Number(p.qr_omitted) > 0)
+    .map(p => p.index + ' (' + p.qr_omitted + ')');
+  return {
+    code: 'qr_truncated',
+    message: (t.omitted ?? '?') + ' decoded QR entr' + (t.omitted === 1 ? 'y' : 'ies')
+      + ' omitted from the per-page QR lists to fit ' + (t.budget_bytes ?? '?')
+      + ' bytes of metadata; per-page QR counts stay exact'
+      + (pages.length ? '; pages: ' + pages.join(', ') : ''),
+  };
+}
+function collectWarnings(meta, envWarnings) {
+  const out = mergeWarnings((meta && meta.warnings) || [], envWarnings || []);
+  const qt = qrTruncatedWarning(meta);
+  if (qt) out.push(qt);
+  return out;
+}
+// WARNINGS-HELPERS-END
 function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML}
 function escapeHtml(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function fmtSize(b){if(!b)return '0B';const u=['B','KB','MB','GB'];let i=0;let v=b;while(v>=1024&&i<u.length-1){v/=1024;i++}return v.toFixed(i?1:0)+' '+u[i]}
