@@ -105,26 +105,38 @@ def _looks_like_ooxml(
         return False
 
 
+# ``<!ENTITY`` in every encoding expat (and LibreOffice's parser) will decode
+# from BOM / byte-pattern autodetection. Counting only the ASCII form let a
+# UTF-16/UTF-32 bomb (bytes interleaved with NULs) through the gate.
+_ENTITY_MARKERS: tuple[bytes, ...] = tuple(
+    "<!ENTITY".encode(codec)
+    for codec in ("utf-8", "utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be")
+)
+
+
 def _looks_like_safe_xml(
     path: Path, *, max_entity_count: int = _MAX_XML_ENTITY_COUNT
 ) -> bool:
     """Sanity-check that a file labeled 'xml' is not a billion-laughs bomb.
 
-    Streaming scan: count <!ENTITY occurrences; abort as soon as the limit is
-    exceeded. This is a cheap heuristic sufficient to block the classic entity
-    expansion attack without pulling in a real XML parser (expat already has a
-    CVE track record on this).
+    Streaming scan: count <!ENTITY occurrences (in UTF-8 and the UTF-16/32
+    byte forms); abort as soon as the limit is exceeded. This is a cheap
+    heuristic sufficient to block the classic entity expansion attack without
+    pulling in a real XML parser (expat already has a CVE track record on this).
     """
     try:
         ent_count = 0
+        # Per-marker carry of the last len(marker)-1 bytes: long enough to catch
+        # a marker straddling a read boundary, too short to re-count one.
+        tails = [b""] * len(_ENTITY_MARKERS)
         with open(path, "rb") as f:
-            overlap = b""
             for chunk in iter(lambda: f.read(8192), b""):
-                buf = overlap + chunk
-                ent_count += buf.count(b"<!ENTITY")
+                for i, marker in enumerate(_ENTITY_MARKERS):
+                    buf = tails[i] + chunk
+                    ent_count += buf.count(marker)
+                    tails[i] = buf[-(len(marker) - 1):]
                 if ent_count > max_entity_count:
                     return False
-                overlap = chunk[-7:] if len(chunk) >= 7 else chunk
         return True
     except OSError:
         return False

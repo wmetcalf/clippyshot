@@ -325,3 +325,37 @@ def test_addin_extensions_are_accepted_via_family_fallback(fixture_name: str, su
         assert dt.agreed_with_extension is True
     finally:
         path.unlink()
+
+
+@pytest.mark.parametrize("codec", ["utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"])
+def test_looks_like_safe_xml_counts_entities_in_wide_encodings(tmp_path: Path, codec):
+    # The entity counter used to look only for the ASCII bytes; a UTF-16/32
+    # bomb interleaves them with NULs and sailed through.
+    from clippyshot.detector import _looks_like_safe_xml
+
+    entities = "".join(f'<!ENTITY e{i} "x">' for i in range(65))
+    text = f'<?xml version="1.0" encoding="{codec[:6].upper()}"?><!DOCTYPE root [{entities}]><root/>'
+    bomb = tmp_path / f"bomb-{codec}.xml"
+    bomb.write_bytes(text.encode(codec))
+    assert _looks_like_safe_xml(bomb) is False
+
+    safe = tmp_path / f"safe-{codec}.xml"
+    safe.write_bytes('<?xml version="1.0"?><root/>'.encode(codec))
+    assert _looks_like_safe_xml(safe) is True
+
+
+@pytest.mark.parametrize("codec", ["utf-16-le", "utf-32-be"])
+def test_looks_like_safe_xml_wide_split_across_chunks(tmp_path: Path, codec):
+    from clippyshot.detector import _looks_like_safe_xml
+
+    marker = "<!ENTITY".encode(codec)
+    entities = "".join(f'<!ENTITY e{i} "x">' for i in range(64)).encode(codec)
+    head = entities + b" " * 0
+    # Pad so the 65th declaration straddles the 8192-byte read boundary.
+    pad = (8192 - (len(head) % 8192)) - len(marker) // 2
+    unit = len(" ".encode(codec))
+    pad -= pad % unit
+    body = head + " ".encode(codec) * (pad // unit) + marker + ' e64 "x">'.encode(codec)
+    bomb = tmp_path / "split.xml"
+    bomb.write_bytes(body)
+    assert _looks_like_safe_xml(bomb) is False
