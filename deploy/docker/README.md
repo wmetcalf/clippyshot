@@ -521,6 +521,49 @@ injecting reverse proxy.
 
 ---
 
+## Host AppArmor prep by deployment mode
+
+Ubuntu's stock `bwrap-userns-restrict` AppArmor profile (apparmor 4.1+, newer Ubuntu
+releases and the GitHub-hosted runner images) stops `aa-exec` attaching `clippyshot-soffice`
+inside bwrap. Whether a host must deal with it depends on which ClippyShot sandbox runs
+where. Details and the full command list are in
+[`deploy/apparmor/README.md`](../apparmor/README.md#ubuntus-stock-bwrap-userns-restrict-profile);
+host prep for the blastbox runtimes themselves (KVM, runsc, Docker) is in blastbox's
+[docs/HOST-PREP.md](https://github.com/wmetcalf/blastbox/blob/main/docs/HOST-PREP.md).
+
+- **gVisor** (the compose stack's cold workers under `runsc`, and the
+  `docker-compose.gvisor.yml` warm sidecar). AppArmor is not enforced for processes inside
+  the gVisor sandbox, and runsc ignores the container's OCI AppArmor profile (only a
+  profile attached to the runsc binary confines it on the host). ClippyShot must use `CLIPPYSHOT_SANDBOX=container`
+  there, which the cold-worker image sets and `docker-compose.gvisor.yml` sets for warm
+  slots (`BLASTBOX_GVISOR_EXTRA_ENV`). No bwrap, no aa-exec: **no host prep for the stock
+  bwrap profile.**
+- **Firecracker via blastbox** (`docker-compose.firecracker.yml`). The guest runs its own
+  kernel, so host AppArmor policy does not apply inside it. The FC rootfs is blastbox's
+  `deploy/firecracker/Dockerfile.clippyshot` layered on this image; it bakes
+  `guest.clippyshot.env` (sourced by the guest `/init`), which exports
+  `CLIPPYSHOT_SANDBOX=container` and `CLIPPYSHOT_WARN_ON_INSECURE=1`. The guest therefore
+  selects the `container` backend (forced, no nsjail/bwrap fallback) and never runs bwrap or
+  aa-exec. **No host or guest-image prep for the stock bwrap profile.**
+- **Bare host, or plain `docker run` where ClippyShot itself selects bwrap.** bwrap runs
+  under the host kernel's AppArmor policy, so the stock profile conflicts. ClippyShot
+  refuses to start with an error naming `bwrap-userns-restrict`. Disabling that profile
+  removes host-wide hardening (any local user can then get a capability-bearing user
+  namespace through `/usr/bin/bwrap`), so do it only on a host or VM dedicated to
+  ClippyShot; on a shared host use a VM or the gVisor/Firecracker tiers. On a dedicated
+  host, fix it once:
+
+  ```sh
+  clippyshot setup-sandbox                                # reports the conflict, exits 1
+  clippyshot setup-sandbox --disable-stock-bwrap-profile  # disables it persistently, loads
+                                                          # the four ClippyShot profiles
+  ```
+
+  `clippyshot selftest` reports `apparmor_attach` and `stock_bwrap_profile`, and warns
+  (`stock_bwrap_profile_conflict`) if a host upgrade brings the profile back.
+
+---
+
 ## Local bare-metal / VM runs (nsjail or bwrap)
 
 When you're running ClippyShot directly on a host (no outer container),
@@ -544,6 +587,11 @@ sudo apt install -y \
 # 2. Load the AppArmor profiles. On Ubuntu 24.04+
 #    apparmor_restrict_unprivileged_userns=1 blocks unprivileged
 #    user-namespace creation except for profiles that permit it.
+#    `clippyshot setup-sandbox` (after the venv install below) checks all of
+#    this, including Ubuntu's stock bwrap-userns-restrict profile, which must
+#    be disabled for the bwrap backend (see "Host AppArmor prep" above).
+#    If /etc/apparmor.d/bwrap-userns-restrict exists, leave out clippyshot-bwrap here:
+#    loading it next to the stock profile breaks /usr/bin/bwrap for every user.
 sudo cp deploy/apparmor/clippyshot-nsjail  /etc/apparmor.d/
 sudo cp deploy/apparmor/clippyshot-bwrap   /etc/apparmor.d/
 sudo cp deploy/apparmor/clippyshot-runtime /etc/apparmor.d/
