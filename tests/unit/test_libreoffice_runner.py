@@ -508,3 +508,14 @@ def test_original_name_retry_still_captures_the_sheet_inventory(tmp_path):
     runner.convert_to_pdf(src, tmp_path / 'out', Limits(), 'xlsx')
     assert Path(sb.requests[-1].argv[-1]).name == 'book.xls'
     assert [s['name'] for s in runner.last_run_sheets] == ['Visible', 'Payload']
+
+
+def test_writer_fallback_still_captures_the_sheet_inventory(tmp_path):
+    src = tmp_path / 'book.xlsx'
+    _ooxml_book(src)
+    sb = _FilterSandbox(lambda conv, name: "calc_pdf_Export" in conv)
+    runner = LibreOfficeRunner(sandbox=sb, uno_server=None)
+    runner.convert_to_pdf(src, tmp_path / 'out', Limits(), 'xlsx')
+    assert runner.last_run_export_filter == "writer_pdf_Export"
+    assert [s['name'] for s in runner.last_run_sheets] == ['Visible', 'Payload']
+    assert runner.last_run_sheet_anomalies  # no workbook rels in this fixture

@@ -63,6 +63,25 @@ _MIN_OCR_CALL_S = 30
 _MAX_SHEET_ATTR_CHARS = 32
 
 
+def _json_bounded(text: str, max_json_chars: int) -> str:
+    """Longest prefix of ``text`` whose JSON encoding (ASCII-escaped, as json.dumps writes
+    metadata.json) is at most ``max_json_chars``. Bounds the sealed size, which a code-point
+    cap does not: one astral character escapes to 12 bytes."""
+    used = 2  # the quotes
+    for i, ch in enumerate(text):
+        used += len(json.dumps(ch)) - 2
+        if used > max_json_chars:
+            return text[:i]
+    return text
+
+
+def _sheet_anomalies_from_runner(runner) -> list[str]:
+    raw = getattr(runner, "last_run_sheet_anomalies", None)
+    if not isinstance(raw, list):
+        return []
+    return sorted({a[:64] for a in raw if isinstance(a, str) and a})[:32]
+
+
 def _sheets_from_runner(runner) -> list[dict]:
     """Read captured sheet inventory off the runner.
 
@@ -84,6 +103,7 @@ def _sheets_from_runner(runner) -> list[dict]:
             continue
         if len(name) > _MAX_SHEET_NAME_CHARS:
             name = name[:_MAX_SHEET_NAME_CHARS]
+        name = _json_bounded(name, _MAX_SHEET_NAME_CHARS + 2) or "?"
         state = s.get("state", "visible")
         sheet_type = s.get("type", "worksheet")
         if not isinstance(state, str):
@@ -91,8 +111,9 @@ def _sheets_from_runner(runner) -> list[dict]:
         if not isinstance(sheet_type, str):
             sheet_type = "worksheet"
         # Attacker-written attributes: bound them like the name.
-        cleaned.append({"name": name, "state": state[:_MAX_SHEET_ATTR_CHARS],
-                        "type": sheet_type[:_MAX_SHEET_ATTR_CHARS],
+        cleaned.append({"name": name,
+                        "state": _json_bounded(state, _MAX_SHEET_ATTR_CHARS),
+                        "type": _json_bounded(sheet_type, _MAX_SHEET_ATTR_CHARS),
                         "active": s.get("active") is True})
         if len(cleaned) > MAX_SHEETS:
             break  # one past the cap: _sheet_provenance reports the inventory truncated
@@ -101,32 +122,39 @@ def _sheets_from_runner(runner) -> list[dict]:
 
 def _page_sheet_names(sheets: list[dict], page_count: int, *,
                       total_pages: int | None = None,
-                      single_page_sheets: bool = False) -> list[str | None]:
+                      single_page_sheets: bool = False,
+                      anomalies: list[str] | None = None) -> list[str | None]:
     """SinglePageSheets exports hidden sheets too; paginated fallback is not positional.
 
     Bind names only when the actual export mode and full PDF count agree with the
     workbook inventory. A capped rasterization may safely use the matching prefix.
     """
-    if not single_page_sheets or len(sheets) > MAX_SHEETS or total_pages != len(sheets):
+    if (not single_page_sheets or anomalies or len(sheets) > MAX_SHEETS
+            or total_pages != len(sheets)):
         return [None] * page_count
     return [sheets[i]['name'] if i < len(sheets) else None for i in range(page_count)]
 
 
 def _sheet_provenance(sheets: list[dict], total_pages: int, single_page_sheets: bool,
                       pages: list[dict], blank_pages: list[int], *,
-                      paginated_calc: bool = False) -> dict:
+                      paginated_calc: bool = False,
+                      anomalies: list[str] | None = None) -> dict:
     """Per-sheet capture status for ``metadata.sheets``.
 
     ``sheets`` may carry one entry past MAX_SHEETS (the reader's truncation signal); the
     inventory then keeps MAX_SHEETS entries, ``inventory_truncated`` is true and the mapping
     is unverified. ``paginated_calc``: the export was plain ``calc_pdf_Export``, which never
-    emits hidden/veryHidden sheets (other than the active tab, which LO forces visible), so
-    those are ``not_captured`` even without a mapping.
+    emits a non-visible sheet (other than the active tab, which LO forces visible), so those
+    are ``not_captured`` even without a mapping. ``anomalies`` (sheet_prep.read_sheet_inventory)
+    non-empty means the reader's list may not be LO's: nothing is claimed positionally, and
+    they are reported as ``reader_anomalies``.
     """
+    anomalies = list(anomalies or [])
     truncated = len(sheets) > MAX_SHEETS
     if truncated:
         sheets = sheets[:MAX_SHEETS]
-    mapped = single_page_sheets and not truncated and total_pages == len(sheets)
+    mapped = (single_page_sheets and not truncated and not anomalies
+              and total_pages == len(sheets))
     captured = {p['index'] for p in pages}
     blanks = set(blank_pages)
     inventory = []
@@ -134,9 +162,8 @@ def _sheet_provenance(sheets: list[dict], total_pages: int, single_page_sheets: 
         if mapped:
             status = ('captured' if index in captured else
                       'blank_skipped' if index in blanks else 'not_captured')
-        elif (paginated_calc and not single_page_sheets and not sheet.get('active')
-              and sheet.get('state') in ('hidden', 'veryHidden')):
-            # LO's importer only hides the spec values, and forces the active tab visible.
+        elif (paginated_calc and not single_page_sheets and not anomalies
+              and not sheet.get('active') and sheet.get('state') != 'visible'):
             status = 'not_captured'
         else:
             status = 'unverified'
@@ -145,6 +172,7 @@ def _sheet_provenance(sheets: list[dict], total_pages: int, single_page_sheets: 
             'exported': total_pages if mapped else None,
             'export_mode': 'single_page_sheets' if single_page_sheets else 'paginated_or_unknown',
             'page_mapping_verified': mapped, 'inventory_truncated': truncated,
+            'reader_anomalies': anomalies,
             'inventory': inventory,
             'non_rendered': [s for s in inventory if s['capture_status'] == 'not_captured']}
 
@@ -660,8 +688,10 @@ class Converter:
                     else:
                         _sheets_discovered = []
                     single_page_sheets = getattr(self._runner, 'last_run_single_page_sheets', False) is True
+                    _sheet_anomalies = _sheet_anomalies_from_runner(self._runner)
                     page_sheet_names = _page_sheet_names(_sheets_discovered, pages_to_render,
-                        total_pages=total_pages, single_page_sheets=single_page_sheets)
+                        total_pages=total_pages, single_page_sheets=single_page_sheets,
+                        anomalies=_sheet_anomalies)
                     # Detect which PDF pages are OCR-worthy. We run OCR on a
                     # page when ANY of:
                     #   (a) the page carries raster images (pypdf reports
@@ -1073,7 +1103,8 @@ class Converter:
                         _sheets_discovered, total_pages, single_page_sheets, page_records,
                         blank_indices if options.limits.skip_blanks else [],
                         paginated_calc=getattr(self._runner, 'last_run_export_filter', '')
-                        == 'calc_pdf_Export')
+                        == 'calc_pdf_Export',
+                        anomalies=_sheet_anomalies)
                 (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
             finally:
                 # 7. Copy the intermediate PDF to the output dir as

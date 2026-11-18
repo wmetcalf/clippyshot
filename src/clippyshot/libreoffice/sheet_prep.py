@@ -42,79 +42,143 @@ def is_spreadsheet(path: Path) -> bool:
 # OOXML spreadsheet namespace used in xl/workbook.xml. Hardcoded because
 # this namespace is frozen in the OPC/OOXML spec (ECMA-376 part 1).
 _OOXML_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
-# Transitional, Strict, and unqualified (some non-Microsoft writers) workbook roots.
+# Transitional and Strict workbook roots (LibreOffice imports nothing from an unqualified one).
 _SPREADSHEETML_NS = (
     _OOXML_NS,
     "{http://purl.oclc.org/ooxml/spreadsheetml/main}",
-    "",
 )
 # Sheets kept in the inventory. A workbook with more is reported truncated and its page
 # mapping unverified; this bounds the metadata a crafted workbook can make us emit.
 MAX_SHEETS = 512
 
 
-def read_sheet_list(xlsx_path: Path) -> list[dict]:
-    """Parse ``xl/workbook.xml`` and return per-sheet metadata in workbook order.
+_REL_NS = (
+    "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}",
+    "{http://purl.oclc.org/ooxml/officeDocument/relationships}",
+)
+_SPEC_STATES = frozenset({"visible", "hidden", "veryHidden"})
+# Characters Calc refuses in a sheet name (it renames or drops such a sheet on import).
+_CALC_BAD_NAME = re.compile(r"[\[\]*?:/\\]")
 
-    Each entry is a dict with:
 
-    - ``name``: human-readable sheet name (up to 31 chars per Excel, uncapped here)
-    - ``state``: ``"visible"`` / ``"hidden"`` / ``"veryHidden"`` (defaults to
-      ``"visible"`` when the attribute is absent)
-    - ``type``: ``"worksheet"`` / ``"chartsheet"`` / ``"macro"`` / ``"dialog"``
-      (defaults to ``"worksheet"``; the ``type`` attribute only appears for
-      non-default types, and Excel 4 macro sheets set it to ``"macro"``)
+def _local(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
 
-    Returns an empty list if the file is not an OOXML zip, the workbook.xml
-    is missing, or the XML fails to parse. This function is read-only and
-    safe to call on any Path — it never raises on a well-formed but unusual
-    zip (encrypted content, foreign namespaces, missing sheet nodes, etc.).
+
+def _sheet_types_by_rid(zf: zipfile.ZipFile) -> dict[str, str] | None:
+    """Map workbook relationship id -> sheet kind, from xl/_rels/workbook.xml.rels.
+
+    An Excel 4 macro sheet is identified by its relationship type (xlMacrosheet), not by
+    any attribute on <sheet>. None when the rels part is missing or unparseable.
+    """
+    try:
+        data = bounded_read(zf, "xl/_rels/workbook.xml.rels")
+        root = safe_fromstring(data)
+    except (KeyError, ExtractionLimitExceeded, ET.ParseError):
+        return None
+    out: dict[str, str] = {}
+    for rel in root.iter():
+        if _local(rel.tag) != "Relationship":
+            continue
+        rid, rtype = rel.attrib.get("Id"), rel.attrib.get("Type", "")
+        if not rid:
+            continue
+        kind = rtype.rsplit("/", 1)[-1]
+        out[rid] = {"worksheet": "worksheet", "chartsheet": "chartsheet",
+                    "xlMacrosheet": "macro", "xlIntlMacrosheet": "macro",
+                    "dialogsheet": "dialog"}.get(kind, kind[:32] or "unknown")
+    return out
+
+
+def read_sheet_inventory(xlsx_path: Path) -> tuple[list[dict], list[str]]:
+    """Parse ``xl/workbook.xml``: (per-sheet metadata in workbook order, anomalies).
+
+    Each entry is ``{name, state, type, active}``; ``type`` comes from the sheet's workbook
+    relationship (``macro`` for an Excel 4 / XLM macro sheet). ``active`` marks the
+    workbookView activeTab, which LibreOffice forces visible on import.
+
+    ``anomalies`` lists every way this workbook could make this reader's list differ from
+    the sheets LibreOffice actually imports (unnamed sheets LO auto-names, names Calc
+    rejects, duplicates, non-spec states, markup-compatibility wrappers, foreign or mixed
+    namespaces, several <sheets> blocks, an unqualified root LO does not import at all,
+    unresolvable relationships). Callers must not trust a page-count match as a positional
+    sheet mapping unless it is empty. The list is a lenient superset so a hidden sheet in an
+    odd position is still reported.
+
+    Returns ``([], [])`` if the file is not an OOXML zip, workbook.xml is missing, or the
+    XML fails to parse. Never raises on a well-formed but unusual zip.
     """
     if not zipfile.is_zipfile(xlsx_path):
-        return []
+        return [], []
     try:
         with zipfile.ZipFile(xlsx_path) as zf:
             try:
                 data = bounded_read(zf, "xl/workbook.xml")
             except (KeyError, ExtractionLimitExceeded):
-                return []
+                return [], []
+            rel_types = _sheet_types_by_rid(zf)
     except (zipfile.BadZipFile, OSError):
-        return []
+        return [], []
     try:
         root = safe_fromstring(data)
     except ET.ParseError:
-        return []
-    # Read the sheet list the way LibreOffice's importer does, so a page-count match can be
-    # trusted as a positional mapping: only <sheet> elements in the workbook's own
-    # SpreadsheetML namespace (a foreign-namespace <x:sheet> is ignored by LO), across EVERY
-    # <sheets> block (LO imports them all, not just the first).
+        return [], []
+    anomalies: set[str] = set()
     root_ns = root.tag[: root.tag.index("}") + 1] if root.tag.startswith("{") else ""
-    if root_ns not in _SPREADSHEETML_NS:
-        return []
-    # LibreOffice forces the active tab visible on import even if the file marks it hidden,
-    # so a paginated export renders it; record which sheet that is.
+    if root_ns not in _SPREADSHEETML_NS or _local(root.tag) != "workbook":
+        anomalies.add("unsupported_root")
+    if rel_types is None:
+        anomalies.add("no_workbook_rels")
     active_tab = 0
     view = root.find(f"{root_ns}bookViews/{root_ns}workbookView")
     if view is not None:
         try:
             active_tab = int(view.attrib.get("activeTab", "0"))
         except ValueError:
-            active_tab = 0
+            anomalies.add("bad_active_tab")
+    canonical_blocks = root.findall(f"{root_ns}sheets")
+    if len(canonical_blocks) > 1:
+        anomalies.add("multiple_sheets_blocks")
+    canonical = {id(e) for b in canonical_blocks for e in b if e.tag == f"{root_ns}sheet"}
     out: list[dict] = []
-    for sheets in root.findall(f"{root_ns}sheets"):
-        for sheet in sheets.findall(f"{root_ns}sheet"):
-            if len(out) > MAX_SHEETS:
-                return out  # the caller sees > MAX_SHEETS and marks the list truncated
-            name = sheet.attrib.get("name")
-            if not isinstance(name, str) or not name:
-                continue
-            state = sheet.attrib.get("state", "visible")
-            # type attribute: when missing it's a worksheet by convention. Only
-            # Excel 4 macro sheets set this explicitly.
-            sheet_type = sheet.attrib.get("type", "worksheet")
-            out.append({"name": name, "state": state, "type": sheet_type,
-                        "active": len(out) == active_tab})
-    return out
+    seen: set[str] = set()
+    for el in root.iter():
+        local = _local(el.tag)
+        # Excel routinely wraps unrelated workbook.xml parts (x15ac:absPath, ...) in
+        # mc:AlternateContent; only one that carries sheets changes what LO imports.
+        if local == "AlternateContent" and any(
+                _local(d.tag) in ("sheet", "sheets") for d in el.iter()):
+            anomalies.add("markup_compatibility")
+        if local != "sheet":
+            continue
+        if id(el) not in canonical:
+            anomalies.add("noncanonical_sheet_element")
+        if len(out) > MAX_SHEETS:
+            continue  # the caller sees > MAX_SHEETS and marks the list truncated
+        name = el.attrib.get("name")
+        if not isinstance(name, str) or not name:
+            anomalies.add("unnamed_sheet")
+            continue
+        if _CALC_BAD_NAME.search(name) or name.startswith("'") or name.endswith("'"):
+            anomalies.add("invalid_sheet_name")
+        if name.casefold() in seen:
+            anomalies.add("duplicate_sheet_name")
+        seen.add(name.casefold())
+        state = el.attrib.get("state", "visible")
+        if state not in _SPEC_STATES:
+            anomalies.add("nonstandard_sheet_state")
+        rid = next((el.attrib[k + "id"] for k in _REL_NS if k + "id" in el.attrib), None)
+        if rel_types is not None and (rid is None or rid not in rel_types):
+            anomalies.add("unresolved_sheet_relationship")
+        sheet_type = (rel_types or {}).get(rid or "") or el.attrib.get("type", "worksheet")
+        out.append({"name": name, "state": state, "type": sheet_type,
+                    "active": len(out) == active_tab})
+    return out, sorted(anomalies)
+
+
+def read_sheet_list(xlsx_path: Path) -> list[dict]:
+    """The sheet list of :func:`read_sheet_inventory`, without the anomalies."""
+    return read_sheet_inventory(xlsx_path)[0]
 
 
 def visible_sheet_names(sheets: list[dict]) -> list[str]:

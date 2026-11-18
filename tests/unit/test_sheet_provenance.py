@@ -1,3 +1,4 @@
+import pytest
 import json
 import zipfile
 from pathlib import Path
@@ -5,7 +6,7 @@ from pathlib import Path
 from PIL import Image
 
 from clippyshot.converter import Converter, ConvertOptions, _page_sheet_names, _sheet_provenance
-from clippyshot.libreoffice.sheet_prep import MAX_SHEETS, read_sheet_list
+from clippyshot.libreoffice.sheet_prep import MAX_SHEETS, read_sheet_inventory, read_sheet_list
 from clippyshot.limits import Limits
 from clippyshot.types import DetectedType, RasterizedPage
 
@@ -40,21 +41,83 @@ def test_blank_page_and_page_limit_are_distinct_from_hidden_sheet():
 _MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 
 
-def _workbook(tmp_path, body: str, name: str = "book.xlsx") -> Path:
+_RELS_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_REL_T = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+
+
+def _workbook(tmp_path, body: str, name: str = "book.xlsx", rels: bool = False) -> Path:
     p = tmp_path / name
     with zipfile.ZipFile(p, "w") as z:
-        z.writestr("xl/workbook.xml", f'<workbook xmlns="{_MAIN}">{body}</workbook>')
+        z.writestr("xl/workbook.xml",
+                   f'<workbook xmlns="{_MAIN}" xmlns:r="{_RELS_NS}">{body}</workbook>')
+        if rels:
+            z.writestr("xl/_rels/workbook.xml.rels",
+                       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/'
+                       f'relationships"><Relationship Id="rId1" Type="{_REL_T}worksheet" '
+                       f'Target="worksheets/sheet1.xml"/><Relationship Id="rId2" '
+                       'Type="http://schemas.microsoft.com/office/2006/relationships/xlMacrosheet"'
+                       ' Target="macrosheets/sheet1.xml"/></Relationships>')
     return p
 
 
-def test_reader_matches_libreoffice_on_foreign_and_repeated_sheet_blocks(tmp_path):
-    """LO ignores a foreign-namespace <x:sheet> and imports every <sheets> block; a reader
-    that differs lets a same-length but different list pass as a verified mapping."""
+def test_reader_flags_foreign_and_repeated_sheet_blocks(tmp_path):
+    """A foreign-namespace <x:sheet> plus a second <sheets> block can give a same-length but
+    different list from LO's: the reader reports every candidate and flags the workbook, so
+    a count match is never taken as a positional mapping."""
     p = _workbook(tmp_path,
                   '<sheets><sheet name="A"/><x:sheet xmlns:x="urn:not-spreadsheetml" name="Decoy"/>'
                   '<sheet name="B"/></sheets><sheets><sheet name="PAYLOAD" state="hidden"/></sheets>')
-    assert [(s["name"], s["state"]) for s in read_sheet_list(p)] == [
-        ("A", "visible"), ("B", "visible"), ("PAYLOAD", "hidden")]
+    sheets, anomalies = read_sheet_inventory(p)
+    assert [s["name"] for s in sheets] == ["A", "Decoy", "B", "PAYLOAD"]
+    assert {"noncanonical_sheet_element", "multiple_sheets_blocks"} <= set(anomalies)
+    c = _sheet_provenance(sheets[:3], 3, True, [{"index": i} for i in (1, 2, 3)], [],
+                          anomalies=anomalies)
+    assert c["page_mapping_verified"] is False and c["reader_anomalies"] == anomalies
+    assert _page_sheet_names(sheets[:3], 3, total_pages=3, single_page_sheets=True,
+                             anomalies=anomalies) == [None] * 3
+
+
+@pytest.mark.parametrize("body,anomaly", [
+    ('<sheets><sheet name="A" r:id="rId1"/><sheet r:id="rId2"/></sheets>', "unnamed_sheet"),
+    ('<sheets><sheet name="Bad:Name" r:id="rId1"/></sheets>', "invalid_sheet_name"),
+    ('<sheets><sheet name="A" r:id="rId1"/><sheet name="a" r:id="rId2"/></sheets>',
+     "duplicate_sheet_name"),
+    ('<sheets><sheet name="A" state="Hidden" r:id="rId1"/></sheets>', "nonstandard_sheet_state"),
+    ('<sheets><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/'
+     'markup-compatibility/2006"><mc:Fallback><sheet name="H" state="hidden" r:id="rId1"/>'
+     '</mc:Fallback></mc:AlternateContent></sheets>', "markup_compatibility"),
+    ('<sheets><sheet name="A" r:id="rId9"/></sheets>', "unresolved_sheet_relationship"),
+])
+def test_reader_flags_what_libreoffice_imports_differently(tmp_path, body, anomaly):
+    p = _workbook(tmp_path, body, rels=True)
+    assert anomaly in read_sheet_inventory(p)[1]
+
+
+def test_excel_alternate_content_outside_the_sheet_list_is_not_an_anomaly(tmp_path):
+    p = _workbook(tmp_path,
+                  '<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/'
+                  'markup-compatibility/2006"><mc:Choice Requires="x15"><x15ac:absPath '
+                  'xmlns:x15ac="http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac" '
+                  'url="C:\\x\\"/></mc:Choice></mc:AlternateContent>'
+                  '<sheets><sheet name="A" r:id="rId1"/></sheets>', rels=True)
+    assert read_sheet_inventory(p)[1] == []
+
+
+def test_reader_flags_an_unqualified_root_libreoffice_does_not_import(tmp_path):
+    p = tmp_path / "book.xlsx"
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("xl/workbook.xml",
+                   '<workbook><sheets><sheet name="Payload" state="hidden"/></sheets></workbook>')
+    sheets, anomalies = read_sheet_inventory(p)
+    assert [s["name"] for s in sheets] == ["Payload"] and "unsupported_root" in anomalies
+
+
+def test_clean_workbook_has_no_anomalies_and_types_come_from_relationships(tmp_path):
+    p = _workbook(tmp_path, '<sheets><sheet name="A" r:id="rId1"/>'
+                            '<sheet name="M" state="hidden" r:id="rId2"/></sheets>', rels=True)
+    sheets, anomalies = read_sheet_inventory(p)
+    assert anomalies == []
+    assert [(s["name"], s["type"]) for s in sheets] == [("A", "worksheet"), ("M", "macro")]
 
 
 def test_reader_stops_one_past_the_sheet_cap(tmp_path):
@@ -168,18 +231,31 @@ def test_convert_bounds_attacker_sheet_attributes(tmp_path):
     assert len(meta["sheets"]["inventory"][0]["type"]) <= 32
 
 
-def test_paginated_export_does_not_claim_the_active_or_odd_state_sheet_was_dropped():
-    """LO forces the active tab visible and treats non-spec state values as visible."""
+def test_paginated_export_does_not_claim_the_active_sheet_was_dropped():
+    """LO forces the active tab visible on import."""
     sheets = [{"name": "Active", "state": "hidden", "type": "worksheet", "active": True},
-              {"name": "Odd", "state": "Visible", "type": "worksheet", "active": False},
+              {"name": "Shown", "state": "visible", "type": "worksheet", "active": False},
               {"name": "Gone", "state": "veryHidden", "type": "worksheet", "active": False}]
     c = _sheet_provenance(sheets, 2, False, [{"index": 1}, {"index": 2}], [],
                           paginated_calc=True)
     assert [s["capture_status"] for s in c["inventory"]] == [
         "unverified", "unverified", "not_captured"]
+    # With reader anomalies (e.g. a non-spec state), nothing is claimed either way.
+    a = _sheet_provenance(sheets, 2, False, [{"index": 1}, {"index": 2}], [],
+                          paginated_calc=True, anomalies=["nonstandard_sheet_state"])
+    assert all(s["capture_status"] == "unverified" for s in a["inventory"])
 
 
 def test_reader_records_the_active_tab(tmp_path):
     p = _workbook(tmp_path, '<bookViews><workbookView activeTab="1"/></bookViews>'
                             '<sheets><sheet name="A"/><sheet name="B" state="hidden"/></sheets>')
     assert [(s["name"], s["active"]) for s in read_sheet_list(p)] == [("A", False), ("B", True)]
+
+
+def test_sheet_names_are_bounded_in_escaped_json_bytes():
+    from clippyshot.converter import _sheets_from_runner
+
+    R = type("R", (), {"last_run_sheets": [
+        {"name": "\U0001F600" * 300, "state": "\U0001F600" * 40, "type": "worksheet"}]})
+    (s,) = _sheets_from_runner(R)
+    assert len(json.dumps(s["name"])) <= 257 and len(json.dumps(s["state"])) <= 32
