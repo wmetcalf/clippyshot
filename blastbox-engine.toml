@@ -54,6 +54,10 @@ description = "The LibreOffice PDF export the pages were rasterized from. Declar
 [payload]
 root = "embedded_resource"
 node_types = ["embedded_resource", "page", "record"]
+# Checked on the EmbeddedResource root's metadata Record. engine.py detonate() sets all six on
+# every ok result (defaults 0/False/""; clippyshot_metadata is "" if json.dumps fails).
+# No schema_version: the metadata carries none (see evidence-in-opaque-json).
+required_root_fields = ["label", "page_count_total", "page_count_rendered", "truncated", "clippyshot_version", "clippyshot_metadata"]
 
 # altchunk_present / macro_enabled_format / extension_mismatch are envelope warnings with
 # stable codes. They are the only findings the output carries in a stable form.
@@ -76,8 +80,8 @@ source = "warnings[].code"
 description = "Input extension disagrees with the detected type."
 
 [[gaps]]
-id = "root-not-record"
-description = "The root is an EmbeddedResource, so required_root_fields cannot be stated. On ok its metadata Record carries label, page_count_total, page_count_rendered, truncated, clippyshot_version, clippyshot_metadata; on rejected only label='rejected' and reason."
+id = "root-fields-ok-only"
+description = "required_root_fields are checked on ok results only. A rejected result's root metadata carries just label='rejected' and reason, which the contract cannot require. clippyshot_metadata is required present but may be the empty string when json.dumps fails (fail-open), and clippyshot_version may be empty."
 
 [[gaps]]
 id = "evidence-in-opaque-json"
