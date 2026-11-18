@@ -196,7 +196,7 @@ def test_a_failed_escaped_mode_probe_is_retried_not_cached(monkeypatch):
             raise OSError("EAGAIN")
         return 0, "  -mode <plain|eci|hri|escaped>", ""
 
-    assert qr_mod._zxing_supports_escaped_mode(bin_path, runner=flaky) is False
+    assert qr_mod._zxing_supports_escaped_mode(bin_path, runner=flaky) is None
     assert bin_path not in qr_mod._zxing_escaped_mode_cache
     assert qr_mod._zxing_supports_escaped_mode(bin_path, runner=flaky) is True
 
@@ -205,8 +205,27 @@ def test_a_sandbox_failure_during_the_probe_is_not_cached(monkeypatch):
     bin_path = "/y/ZXingReader"
     monkeypatch.delitem(qr_mod._zxing_escaped_mode_cache, bin_path, raising=False)
     runner = lambda argv, t: (1, "", "bwrap: Creating new namespace failed: EAGAIN")  # noqa: E731
-    assert qr_mod._zxing_supports_escaped_mode(bin_path, runner=runner) is False
+    assert qr_mod._zxing_supports_escaped_mode(bin_path, runner=runner) is None
     assert bin_path not in qr_mod._zxing_escaped_mode_cache
     old = lambda argv, t: (0, "Usage: ZXingReader [options]\n    -format <FORMAT>\n", "")  # noqa: E731
     assert qr_mod._zxing_supports_escaped_mode(bin_path, runner=old) is False
     assert qr_mod._zxing_escaped_mode_cache[bin_path] is False
+
+
+def test_scan_escapes_when_the_probe_could_not_tell(monkeypatch, tmp_path):
+    png = tmp_path / "p.png"
+    png.write_bytes(b"fake")
+    bin_path = "/z/ZXingReader"
+    monkeypatch.setitem(qr_mod._zxing_json_support_cache, bin_path, False)
+    monkeypatch.delitem(qr_mod._zxing_escaped_mode_cache, bin_path, raising=False)
+    monkeypatch.setattr(qr_mod, "_zxing_binary", lambda: bin_path)
+    seen = []
+
+    def runner(argv, t):
+        if "-help" in argv:
+            return 1, "", "sandbox: spawn failed"
+        seen.append(argv)
+        return 0, "", ""
+
+    scan_qr(png, argv_runner=runner)
+    assert "-mode" in seen[0] and "escaped" in seen[0]

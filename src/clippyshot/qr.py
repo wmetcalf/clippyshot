@@ -254,7 +254,7 @@ def _zxing_supports_json(bin_path: str, runner=None) -> bool:
 _zxing_escaped_mode_cache: dict[str, bool] = {}
 
 
-def _zxing_supports_escaped_mode(bin_path: str, runner=None) -> bool:
+def _zxing_supports_escaped_mode(bin_path: str, runner=None) -> bool | None:
     """True if this ZXingReader accepts ``-mode escaped`` (2.2.x plain-text output).
 
     The plain-text output is line-structured, but ZXing prints the decoded text raw, so a
@@ -279,7 +279,7 @@ def _zxing_supports_escaped_mode(bin_path: str, runner=None) -> bool:
             exit_code, help_text = proc.returncode, (proc.stdout or "") + (proc.stderr or "")
     except Exception as e:  # noqa: BLE001
         _log.warning("zxing_escaped_mode_probe_failed", error=str(e)[:200])
-        return False
+        return None
     if "escaped" in help_text:
         _zxing_escaped_mode_cache[bin_path] = True
         return True
@@ -291,7 +291,7 @@ def _zxing_supports_escaped_mode(bin_path: str, runner=None) -> bool:
     # failed probe: never cached, so it cannot switch escaping off for the process.
     _log.warning("zxing_escaped_mode_probe_failed", exit_code=exit_code,
                  output=help_text[:200])
-    return False
+    return None
 
 
 # Format name map: ZXingReader 2.2.x plain-text → normalized internal name
@@ -449,7 +449,10 @@ def scan_qr(
         # ZXingReader 2.2.x: uses -format (singular) with PascalCase names
         v2_formats = _translate_formats_for_v2(formats)
         argv = [bin_path, "-fast", "-norotate", "-noscale"]
-        if _zxing_supports_escaped_mode(bin_path, runner=runner):
+        # Fail closed: escape unless this build is KNOWN to lack the option. A probe that
+        # failed (None) still escapes; if the build really lacks it, the scan errors and the
+        # page is reported as a QR scan error rather than parsed unescaped.
+        if _zxing_supports_escaped_mode(bin_path, runner=runner) is not False:
             argv += ["-mode", "escaped"]
         if v2_formats:
             argv += ["-format", v2_formats]
