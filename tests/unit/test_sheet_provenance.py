@@ -51,6 +51,11 @@ def _workbook(tmp_path, body: str, name: str = "book.xlsx", rels: bool = False) 
         z.writestr("xl/workbook.xml",
                    f'<workbook xmlns="{_MAIN}" xmlns:r="{_RELS_NS}">{body}</workbook>')
         if rels:
+            z.writestr("[Content_Types].xml",
+                       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/'
+                       'content-types"><Override PartName="/xl/workbook.xml" ContentType="'
+                       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.'
+                       'main+xml"/></Types>')
             z.writestr("_rels/.rels",
                        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/'
                        f'relationships"><Relationship Id="rId1" Type="{_REL_T}officeDocument" '
@@ -366,3 +371,58 @@ def test_reader_flags_a_package_whose_office_document_is_elsewhere(tmp_path, rel
 ])
 def test_reader_flags_more_libreoffice_divergences(tmp_path, body, anomaly):
     assert anomaly in read_sheet_inventory(_workbook(tmp_path, body, rels=True))[1]
+
+
+@pytest.mark.parametrize("mutate,anomaly", [
+    (lambda z: z.writestr("mimetype", "application/vnd.oasis.opendocument.spreadsheet"),
+     "odf_polyglot"),
+    (lambda z: z.writestr("content.xml", "<office:document-content/>"), "odf_polyglot"),
+])
+def test_reader_flags_an_odf_polyglot(tmp_path, mutate, anomaly):
+    p = _workbook(tmp_path, '<sheets><sheet name="A" r:id="rId1"/></sheets>', rels=True)
+    with zipfile.ZipFile(p, "a") as z:
+        mutate(z)
+    assert anomaly in read_sheet_inventory(p)[1]
+
+
+def test_reader_requires_the_content_type_and_exact_office_document_uri(tmp_path):
+    p = _workbook(tmp_path, '<sheets><sheet name="A" r:id="rId1"/></sheets>', rels=True)
+    with zipfile.ZipFile(p) as z:
+        items = {n: z.read(n) for n in z.namelist() if n != "[Content_Types].xml"}
+    with zipfile.ZipFile(p, "w") as z:
+        for n, b in items.items():
+            z.writestr(n, b)
+    assert "nonstandard_package_part" in read_sheet_inventory(p)[1]
+    q = _workbook(tmp_path / "q", '<sheets><sheet name="A" r:id="rId1"/></sheets>', rels=True) \
+        if (tmp_path / "q").mkdir() is None else None
+    with zipfile.ZipFile(q) as z:
+        items = {n: z.read(n) for n in z.namelist()}
+    items["_rels/.rels"] = items["_rels/.rels"].replace(
+        b"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument",
+        b"urn:decoy/officeDocument")
+    with zipfile.ZipFile(q, "w") as z:
+        for n, b in items.items():
+            z.writestr(n, b)
+    assert "nonstandard_package_part" in read_sheet_inventory(q)[1]
+
+
+def test_mixed_namespace_book_views_are_an_anomaly(tmp_path):
+    body = ('<s:bookViews xmlns:s="http://purl.oclc.org/ooxml/spreadsheetml/main">'
+            '<s:workbookView activeTab="1"/></s:bookViews>'
+            '<sheets><sheet name="A" r:id="rId1"/><sheet name="B" state="hidden" r:id="rId1"/>'
+            '</sheets>')
+    assert "noncanonical_sheet_element" in read_sheet_inventory(_workbook(tmp_path, body, rels=True))[1]
+
+
+def test_inventory_source_says_when_type_and_state_came_from_a_reexport(tmp_path):
+    runner = _SheetRunner(3, SHEETS)
+    orig = runner.convert_to_pdf
+
+    def convert(*a, **k):
+        r = orig(*a, **k)
+        runner.last_run_sheets_from_reexport = True
+        return r
+
+    runner.convert_to_pdf = convert
+    meta = _convert(tmp_path, runner, Limits())
+    assert meta["sheets"]["inventory_source"] == "libreoffice_xlsx_reexport"

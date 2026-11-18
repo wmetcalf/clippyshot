@@ -72,6 +72,8 @@ class LibreOfficeRunner:
         # Ways the workbook could make last_run_sheets differ from what LO imported
         # (sheet_prep.read_sheet_inventory); non-empty => no positional page mapping.
         self.last_run_sheet_anomalies: list[str] = []
+        self.last_run_sheets_from_reexport = False
+        self._two_pass_output: Path | None = None
         self.last_run_single_page_sheets = False
         # PDF export filter name the successful export used ("calc_pdf_Export",
         # "writer_pdf_Export", ...), or "" before/without a successful export.
@@ -90,6 +92,10 @@ class LibreOfficeRunner:
             self.last_run_sheets, self.last_run_sheet_anomalies = read_sheet_inventory(exported)
         except Exception:
             self.last_run_sheets, self.last_run_sheet_anomalies = [], []
+        # xls/xlsb/ods/csv: the list was read from LO's own xlsx re-export, which keeps sheet
+        # order and count but writes XLM macro sheets as worksheets and veryHidden as hidden.
+        self.last_run_sheets_from_reexport = (
+            self._two_pass_output is not None and exported == self._two_pass_output)
 
     def convert_to_pdf(
         self,
@@ -190,6 +196,8 @@ class LibreOfficeRunner:
         # post-processing steps.
         self.last_run_sheets = []
         self.last_run_sheet_anomalies = []
+        self.last_run_sheets_from_reexport = False
+        self._two_pass_output = None
         self.last_run_single_page_sheets = False
         self.last_run_export_filter = ""
         self.last_altchunks = []
@@ -422,6 +430,7 @@ class LibreOfficeRunner:
                         shutil.move(str(converted), str(final))
                         staged_input = final
                         staged_name = final.name
+                        self._two_pass_output = final
                         _log.info(
                             "two_pass: patched %s, using for PDF export", staged_name
                         )

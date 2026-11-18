@@ -1102,12 +1102,18 @@ class Converter:
                 # workbook, all sheets unnamed, ...): an unverified block, not silence.
                 if detected.label in _SPREADSHEET_LABELS and (
                         _sheets_discovered or _sheet_anomalies):
-                    metadata["sheets"] = _sheet_provenance(
+                    metadata["sheets"] = {**_sheet_provenance(
                         _sheets_discovered, total_pages, single_page_sheets, page_records,
                         blank_indices if options.limits.skip_blanks else [],
                         paginated_calc=getattr(self._runner, 'last_run_export_filter', '')
                         == 'calc_pdf_Export',
-                        anomalies=_sheet_anomalies)
+                        anomalies=_sheet_anomalies),
+                        # Where type/state came from: a re-export (xls/xlsb/ods/csv two-pass)
+                        # loses XLM 'macro' and 'veryHidden' (see runner._capture_sheets).
+                        "inventory_source": (
+                            "libreoffice_xlsx_reexport"
+                            if getattr(self._runner, "last_run_sheets_from_reexport", False)
+                            is True else "input_workbook")}
                 (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
             finally:
                 # 7. Copy the intermediate PDF to the output dir as

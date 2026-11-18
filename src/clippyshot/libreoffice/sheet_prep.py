@@ -120,6 +120,18 @@ class _Unreadable(Exception):
 
 
 _OFFICE_DOC_REL = "/officeDocument"
+_OFFICE_DOC_TYPES = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument",
+)
+_CT_NS = "{http://schemas.openxmlformats.org/package/2006/content-types}"
+_WORKBOOK_CONTENT_TYPES = frozenset({
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml",
+    "application/vnd.ms-excel.sheet.macroEnabled.main+xml",
+    "application/vnd.ms-excel.template.macroEnabled.main+xml",
+    "application/vnd.ms-excel.addin.macroEnabled.main+xml",
+})
 _ESCAPED_XSTRING = re.compile(r"_x[0-9A-Fa-f]{4}_")
 
 
@@ -136,10 +148,27 @@ def _package_anomalies(zf: zipfile.ZipFile) -> set[str]:
     except Exception:  # noqa: BLE001
         out.add("nonstandard_package_part")
         return out
-    targets = [r.attrib.get("Target", "") for r in root.findall(f"{_PKG_REL_NS}Relationship")
-               if r.attrib.get("Type", "").endswith(_OFFICE_DOC_REL)]
+    rels = root.findall(f"{_PKG_REL_NS}Relationship")
+    if any(r.attrib.get("Type", "").endswith(_OFFICE_DOC_REL)
+           and r.attrib.get("Type") not in _OFFICE_DOC_TYPES for r in rels):
+        out.add("nonstandard_package_part")  # LO's detector accepts only the exact URIs
+    targets = [r.attrib.get("Target", "") for r in rels
+               if r.attrib.get("Type") in _OFFICE_DOC_TYPES]
     if len(targets) != 1 or targets[0] not in ("xl/workbook.xml", "/xl/workbook.xml"):
         out.add("nonstandard_package_part")
+    # LO also needs [Content_Types].xml to map the part to a SpreadsheetML main type, or it
+    # falls through to another importer (e.g. ODF, if the zip also carries ODS parts).
+    try:
+        ct = safe_fromstring(bounded_read(zf, "[Content_Types].xml"))
+        ok = any(o.attrib.get("PartName", "").lower() == "/xl/workbook.xml"
+                 and o.attrib.get("ContentType", "").strip() in _WORKBOOK_CONTENT_TYPES
+                 for o in ct.findall(f"{_CT_NS}Override"))
+    except Exception:  # noqa: BLE001
+        ok = False
+    if not ok:
+        out.add("nonstandard_package_part")
+    if any(n in names for n in ("mimetype", "content.xml", "META-INF/manifest.xml")):
+        out.add("odf_polyglot")
     return out
 
 
@@ -211,6 +240,10 @@ def _read_sheet_inventory(xlsx_path: Path) -> tuple[list[dict], list[str]]:
         if local in ("sheet", "sheets", "bookViews", "workbookView"):
             if in_ac:
                 anomalies.add("markup_compatibility")
+            if local in ("bookViews", "workbookView") and not node.tag.startswith(root_ns or "{"):
+                # LO maps Strict and Transitional to one token: a mixed-namespace bookViews
+                # is LO's active-tab source but not ours.
+                anomalies.add("noncanonical_sheet_element")
             if local == "sheet":
                 ordered.append(node)
         stack.extend((child, in_ac) for child in reversed(list(node)))
