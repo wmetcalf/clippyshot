@@ -373,3 +373,18 @@ def test_looks_like_safe_xml_counts_each_wide_declaration_once(tmp_path: Path, c
     ok = tmp_path / f"ok-{codec}.xml"
     ok.write_bytes(text.encode(codec))
     assert _looks_like_safe_xml(ok) is True
+
+
+def test_looks_like_safe_xml_does_not_recount_a_marker_ending_at_a_read_boundary(tmp_path: Path):
+    # The carry is len(marker)-1 bytes: a marker that ENDS exactly at 8192 must not be
+    # counted again in the next read (a full-length carry would push 64 to 65).
+    from clippyshot.detector import _looks_like_safe_xml
+
+    marker = b"<!ENTITY"
+    decls = b"".join(f'<!ENTITY e{i} "x">'.encode() for i in range(63))
+    pad = 8192 - len(decls) - len(marker)
+    body = decls + b" " * pad + marker + b' e63 "x">' + b" " * 100
+    assert body.index(marker, len(decls)) + len(marker) == 8192
+    p = tmp_path / "edge.xml"
+    p.write_bytes(body)
+    assert _looks_like_safe_xml(p) is True

@@ -122,8 +122,9 @@ def _looks_like_safe_xml(
 
     Streaming scan: count <!ENTITY occurrences per encoding (UTF-8 and the
     UTF-16/32 byte forms); abort as soon as any one count exceeds the limit.
-    A cheap heuristic that bounds the NUMBER of declarations without pulling in
-    a real XML parser (expat already has a CVE track record on this). It does
+    A cheap heuristic that bounds the number of literal ``<!ENTITY`` markers
+    (not declarations: a parameter entity can define more through character
+    references) without pulling in a real XML parser (expat already has a CVE track record on this). It does
     not stop a compact expansion bomb under the limit (the classic lol9 needs
     only 10 declarations): that file still reaches LibreOffice, which renders
     inside the sandbox with its own entity-expansion limits.

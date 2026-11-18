@@ -11,10 +11,12 @@ Legitimate OPC/OOXML and flat-ODF parts never carry a DTD, so any document
 that declares one is rejected outright. The rejection happens INSIDE an
 expat parse (defusedxml semantics, without the dependency): expat calls the
 DOCTYPE / entity / notation declaration handlers on the *decoded* character
-stream, so the guard holds whatever the document's encoding — a byte-level
-scan for ``<!DOCTYPE`` alone is blind to UTF-16/UTF-32 input, where those
-bytes are interleaved with NULs, and to any declared multi-byte encoding.
-The cheap ASCII byte pre-scan is kept as a fast path for the common case.
+stream, so the guard holds whatever the document's encoding. A byte-level
+scan for ``<!DOCTYPE`` is blind to UTF-16 input (BOM or autodetected), where
+those bytes are interleaved with NULs; expat refuses UTF-32 and declared
+multi-byte encodings outright, and keeps ``<!DOCTYPE`` as ASCII bytes in every
+single-byte encoding it accepts. The cheap ASCII byte pre-scan is kept as a
+fast path for those common cases.
 """
 from __future__ import annotations
 

@@ -187,9 +187,13 @@ def _encode(xml_text: str, codec: str, *, bom: bool) -> bytes:
     return (boms[codec] if bom else b"") + xml_text.encode(codec)
 
 
+# The XXE body here declares but never references its entity: bare ET.fromstring
+# accepts it, so only the guard can refuse it (a referenced external entity already
+# fails in ET as "undefined entity").
 _ENCODED_DTD_PAYLOADS = [
     ('<?xml version="1.0" encoding="UTF-16"?>' + _BILLION_LAUGHS.decode().split("?>", 1)[1]),
-    ('<?xml version="1.0" encoding="UTF-16"?>' + _XXE.decode().split("?>", 1)[1]),
+    ('<?xml version="1.0" encoding="UTF-16"?>'
+     '<!DOCTYPE foo [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]><foo/>'),
 ]
 
 
@@ -213,16 +217,23 @@ def test_safe_fromstring_rejects_dtd_in_utf16(text, codec, bom):
 
 @pytest.mark.parametrize("codec", ["utf-32-le", "utf-32-be"])
 def test_safe_fromstring_rejects_utf32_dtd(codec):
+    # expat cannot decode UTF-32 at all, so this is refused as malformed whatever the
+    # guard does; pinned so a future parser that CAN decode it still refuses the DTD.
     text = _ENCODED_DTD_PAYLOADS[1].replace("UTF-16", "UTF-32")
     with pytest.raises(ET.ParseError):
         safe_fromstring(_encode(text, codec, bom=True))
 
 
 def test_safe_fromstring_rejects_dtd_via_declared_single_byte_encoding():
-    # A declared non-UTF-8 encoding must not hide the DTD from the guard either.
+    # A declared non-UTF-8 encoding must not hide the DTD from the PARSER guard either
+    # (called directly: in single-byte encodings the ASCII fast path fires first).
+    from clippyshot.libreoffice._safexml import _reject_dtd
+
     payload = '<?xml version="1.0" encoding="ISO-8859-1"?><!DOCTYPE a [<!ENTITY e "x">]><a>&e;</a>'
     with pytest.raises(ET.ParseError):
         safe_fromstring(payload.encode("latin-1"))
+    with pytest.raises(ET.ParseError):
+        _reject_dtd(payload.encode("latin-1"))
 
 
 def test_safe_fromstring_rejects_unparsed_and_parameter_entities():
