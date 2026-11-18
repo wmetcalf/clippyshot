@@ -102,20 +102,62 @@ def _version_cmd(_: argparse.Namespace) -> int:
 
 def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
     from clippyshot import setup_sandbox as ss
+    from clippyshot.sandbox import host_apparmor as ha
 
     rep = ss.diagnose()
     print("Sandbox host check:")
     print(f"  apparmor_restrict_unprivileged_userns = {'1 (ACTIVE)' if rep.restrict_active else '0/absent'}")
     for note in rep.notes:
         print(f"  {note}")
+    profile_dir = Path(args.profile_dir) if args.profile_dir else ss.default_profile_dir()
+    disable_stock = args.disable_stock_bwrap_profile
+
+    if rep.stock_conflict and rep.stock is not None:
+        stock = ha.STOCK_BWRAP_PROFILE
+        print(
+            f"\nCONFLICT: Ubuntu's stock AppArmor profile {stock} ({rep.stock.describe()}).\n"
+            "  It attaches to /usr/bin/bwrap as `bwrap` and confines every child bwrap starts\n"
+            "  to `unpriv_bwrap`, which may not change profile, so `aa-exec -p "
+            f"{ss.SOFFICE_PROFILE}` fails\n"
+            "  (\"insufficient permissions to change to the profile\"). Loading clippyshot-bwrap\n"
+            "  next to it breaks bwrap's uid map instead. ClippyShot's bwrap backend refuses\n"
+            "  to start (fail closed) until it is disabled."
+        )
+        try:
+            plan = ss.stock_fix_plan(rep.stock, profile_dir)
+        except ss.StockProfileUnmanaged as e:
+            print(f"\n{e}", file=sys.stderr)
+            return 1
+        if not disable_stock:
+            print(f"\nTo fix, run:\n\n  {ha.FIX_COMMAND}\n\n"
+                  f"which disables {stock} persistently and loads the four ClippyShot "
+                  "profiles via sudo:\n")
+            for c in plan:
+                print("  " + " ".join(c.argv))
+            return 1
+        if not profile_dir.is_dir():
+            print(f"\nprofile dir not found: {profile_dir} (pass --profile-dir)", file=sys.stderr)
+            return 2
+        print(f"\nDisabling {stock} and loading the ClippyShot profiles via sudo "
+              "(you'll be prompted for your password):")
+        rc = ss.apply_plan(plan)
+        if rc != 0:
+            return rc
+        ok, lines = ss.verify_attach()
+        print("\nAfter:")
+        for line in lines:
+            print(f"  {line}")
+        return 0 if ok else 1
+
+    if disable_stock:
+        print(f"\n{ha.STOCK_BWRAP_PROFILE}: not in conflict; nothing to disable.")
     if not rep.actions:
         print("\nNothing to do — the namespace backends are usable (or unaffected).")
         return 0
-    profile_dir = Path(args.profile_dir) if args.profile_dir else ss.default_profile_dir()
     if not profile_dir.is_dir():
         print(f"\nprofile dir not found: {profile_dir} (pass --profile-dir)", file=sys.stderr)
         return 2
-    if args.apply:
+    if args.apply or disable_stock:
         print(f"\nLoading {len(rep.actions)} scoped profile(s) via sudo "
               "(you'll be prompted for your password):")
         return ss.apply(rep.actions, profile_dir)
@@ -170,10 +212,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     pss = sub.add_parser(
         "setup-sandbox",
-        help="detect (and with --apply, load) the scoped AppArmor userns profiles for bwrap/nsjail",
+        help="detect (and with --apply, load) the AppArmor profiles bwrap/nsjail need; reports Ubuntu's stock bwrap-userns-restrict conflict",
     )
     pss.add_argument("--apply", action="store_true",
                      help="load the needed profiles via sudo (interactive); default just prints them")
+    pss.add_argument(
+        "--disable-stock-bwrap-profile", action="store_true",
+        help="disable Ubuntu's stock bwrap-userns-restrict AppArmor profile persistently "
+             "(symlink into /etc/apparmor.d/disable/ + apparmor_parser -R), then load all four "
+             "ClippyShot profiles via sudo and re-probe; implies --apply. Without it, a host "
+             "where that profile is active is reported and setup exits non-zero",
+    )
     pss.add_argument("--profile-dir", default=None,
                      help="directory holding the clippyshot-{bwrap,nsjail} profiles (default: repo deploy/apparmor)")
     pss.set_defaults(func=_setup_sandbox_cmd)

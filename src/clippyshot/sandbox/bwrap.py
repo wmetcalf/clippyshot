@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 from clippyshot.errors import SandboxError, SandboxUnavailable
+from clippyshot.sandbox import host_apparmor
 from clippyshot.sandbox.base import SandboxRequest
 from clippyshot.types import SandboxResult
 
@@ -25,6 +26,11 @@ _BWRAP = shutil.which("bwrap") or "/usr/bin/bwrap"
 # and execve()s the target, which is the same mechanism nsjail uses via
 # its --proc_apparmor flag. Profile must be loaded on the host kernel.
 _DEFAULT_APPARMOR_PROFILE = "clippyshot-soffice"
+
+# (bwrap, aa-exec, profile) triples whose attach probe has PASSED in this process. Only
+# successes are remembered: the probe runs once at startup on a healthy host, while a host
+# that is failing keeps being re-probed (and named) on every selection until it is fixed.
+_ATTACH_PROBE_OK: dict[tuple[str, str, str], host_apparmor.AaExecProbe] = {}
 
 
 # libseccomp Python bindings. NOT the `libseccomp` PyPI package — the real upstream bindings
@@ -87,6 +93,7 @@ class BwrapSandbox:
             raise SandboxUnavailable(f"bwrap not found at {bwrap_path}")
         self._bwrap = bwrap_path
         self._apparmor_profile = apparmor_profile
+        self._attach_probe: host_apparmor.AaExecProbe | None = None
 
         # AppArmor attachment: bwrap has no built-in support, so we prefix
         # the argv with `aa-exec -p <profile> --` iff aa-exec is available
@@ -182,7 +189,37 @@ class BwrapSandbox:
     def insecurity_reasons(self) -> list[str]:
         return list(self._insecurity_reasons)
 
+    @property
+    def apparmor_attach_probe(self) -> host_apparmor.AaExecProbe | None:
+        """The last attach-probe result (None until probed, or without aa-exec)."""
+        return self._attach_probe
+
+    def check_apparmor_attach(self) -> host_apparmor.AaExecProbe | None:
+        """Probe that aa-exec can attach the soffice profile inside bwrap.
+
+        The same probe CI runs. Ubuntu's stock `bwrap-userns-restrict` makes it fail
+        ("insufficient permissions to change to the profile"); every sandboxed soffice
+        would then fail too. Raises :class:`host_apparmor.AppArmorAttachUnavailable`
+        (a ``SandboxUnavailable``) naming the cause and the setup command. Fail-closed
+        is unchanged -- without this the same host failed the smoketest anonymously.
+        """
+        if self._aa_exec is None:
+            return None
+        key = (self._bwrap, self._aa_exec, self._apparmor_profile)
+        passed = _ATTACH_PROBE_OK.get(key)
+        if passed is not None:
+            self._attach_probe = passed
+            return passed
+        probe = host_apparmor.probe_aa_exec(self._bwrap, self._aa_exec, self._apparmor_profile)
+        self._attach_probe = probe
+        if not probe.ok:
+            _log.error("bwrap_apparmor_attach_failed cause=%s %s", probe.cause, probe.message())
+            raise host_apparmor.AppArmorAttachUnavailable(probe)
+        _ATTACH_PROBE_OK[key] = probe
+        return probe
+
     def smoketest(self) -> SandboxResult:
+        self.check_apparmor_attach()
         return self.run(SandboxRequest(argv=["/bin/true"]))
 
     def run(self, request: SandboxRequest) -> SandboxResult:

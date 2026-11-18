@@ -1,7 +1,22 @@
 """setup-sandbox: detection + command generation (probes injected; no host deps)."""
 from pathlib import Path
 
+import pytest
+
 import clippyshot.setup_sandbox as ss
+from clippyshot.sandbox import host_apparmor as ha
+
+_ABSENT = ha.StockBwrapProfileState(installed=False, disabled=False, loaded=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_stock_profile_no_real_probe(monkeypatch):
+    """Keep these userns tests hermetic: diagnose() also reads the stock bwrap profile
+    and runs the aa-exec attach probe (covered in test_setup_sandbox_stock_profile.py)."""
+    monkeypatch.setattr(ha, "stock_bwrap_profile_state", lambda: _ABSENT)
+    monkeypatch.setattr(ha, "probe_aa_exec", lambda *a, stock_state=None, **k: ha.AaExecProbe(
+        ok=True, cause="ok", profile="clippyshot-soffice", argv=(), exit_code=0, stderr="",
+        stock=_ABSENT))
 
 
 def test_no_actions_when_restriction_inactive(monkeypatch):
