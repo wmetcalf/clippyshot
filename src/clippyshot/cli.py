@@ -159,12 +159,12 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
             "  or a gVisor/Firecracker tier, which never runs bwrap (deploy/apparmor/README.md)."
         )
         inner = _inner_layer_problem()
-        if inner is not None:
-            # Selection fails on the inner layer before any backend is tried: neither
-            # disabling the stock profile nor loading profiles can make one selectable.
-            print(f"\nBut no backend can be selected until the requested inner nono layer "
-                  f"can run:\n  {inner}\nFix that (or unset CLIPPYSHOT_INNER_NONO) first; "
-                  f"disabling {stock} would not help. Nothing changed.")
+        inner_msg = (f"\nNo backend can be selected until the requested inner nono layer "
+                     f"can run:\n  {inner}\nFix that (or unset CLIPPYSHOT_INNER_NONO); "
+                     f"disabling {stock} would not help.")
+        if inner is not None and disable_stock:
+            # Never trade away host-wide hardening for a failure it cannot fix.
+            print(inner_msg + " Nothing changed.")
             return 1
         if not disable_stock:
             # The stock profile only conflicts with clippyshot-bwrap (both attach
@@ -184,6 +184,11 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
                     return rc
                 print(f"\nLoaded {', '.join(a.profile_name for a in other)}; the distro's "
                       "bwrap hardening is untouched.")
+            if inner is not None:
+                # The profiles above (nsjail/soffice) are independent of the nono problem and
+                # were still loaded on --apply; the stock-profile advice below is not.
+                print(inner_msg)
+                return 1
             if not other or args.apply:
                 # Success is a working backend, not what this run happened to load: re-check
                 # nsjail itself (it is unaffected by the stock profile).

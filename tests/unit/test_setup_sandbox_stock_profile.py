@@ -410,3 +410,17 @@ def test_broken_inner_nono_never_leads_to_disabling_the_stock_profile(monkeypatc
     assert host.commands == []
     assert "nono binary was not found" in out
     assert "clippyshot setup-sandbox --disable-stock-bwrap-profile" not in out
+
+
+def test_broken_inner_nono_still_loads_the_independent_profiles_on_apply(monkeypatch, capsys):
+    """codex on #66: --apply loads clippyshot-nsjail/-soffice regardless of the nono
+    problem (they do not touch the stock bwrap profile); only the stock advice stops."""
+    host = Host(monkeypatch, [LOADED]).with_nsjail(blocked_until_loaded=True)
+    monkeypatch.setattr(cli, "_inner_layer_problem", lambda: "nono binary was not found")
+    rc = cli.main(["setup-sandbox", "--apply"])
+    out = capsys.readouterr().out
+    assert rc != 0
+    assert host.commands == []
+    assert [a.profile_name for a in host.applied] == ["clippyshot-nsjail"]
+    assert "nono binary was not found" in out
+    assert "clippyshot setup-sandbox --disable-stock-bwrap-profile" not in out
