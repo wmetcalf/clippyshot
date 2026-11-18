@@ -284,3 +284,360 @@ def test_no_qr_warning_room_means_no_qr_warnings_at_all():
     out = _qr_warnings(many, 2000)
     sealed = sum(len(w.model_dump_json().encode()) for w in out)
     assert out[-1].code == "qr_decoded_truncated" and sealed <= 2000
+
+
+# --------------------------------------------------------------------------
+# QR content inside clippyshot_metadata is budgeted too (was gap
+# host-metadata-cap-qr-flood): the host refuses a sealed metadata.json over
+# Limits.max_metadata_bytes, so an unbounded QR flood there cost the whole result.
+# --------------------------------------------------------------------------
+
+def _sealed_size(res, outdir) -> int:
+    """Bytes of the metadata.json the worker harness would write: the real seal."""
+    from blastbox.contract.envelope import seal_envelope
+
+    env = seal_envelope(engine="clippyshot", outdir=outdir, input_sha256="0" * 64,
+                        detected=res.detected, declared=res.artifacts,
+                        warnings=res.warnings, payload=res.payload, status=res.status)
+    return len(env.model_dump_json(by_alias=True).encode("utf-8"))
+
+
+def _detonate_capped(tmp_path, meta, cap):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    eng = ClippyShotEngine()
+    eng._converter = _StubConverter(meta)
+    inp = tmp_path / "in.docx"
+    inp.write_bytes(b"x")
+    out = tmp_path / "out"
+    out.mkdir()
+    res = eng.detonate(inp, out, BlastboxLimits(timeout_s=30, max_metadata_bytes=cap))
+    return res, out
+
+
+def _quote_heavy_pages(n_pages=20, per_page=16, chars=2900):
+    # '"' and '\\' cost 4 sealed bytes each inside the doubly-encoded metadata string.
+    return [
+        {"index": i, "file": f"page-{i:03d}.png", "width_mm": 210.0, "height_mm": 297.0,
+         "qr": [{"format": "qr_code", "value": f"{i}-{j}-" + '"\\' * (chars // 2),
+                 "position": [], "raw_bytes_hex": "22" * chars} for j in range(per_page)],
+         "ocr": {}}
+        for i in range(1, n_pages + 1)
+    ]
+
+
+def test_qr_flood_in_metadata_stays_under_the_host_cap(tmp_path):
+    cap = 1_000_000
+    meta = _meta(pages=_quote_heavy_pages())
+    assert len(json.dumps(json.dumps(meta))) > 3 * cap  # unbounded, this would be refused
+    res, out = _detonate_capped(tmp_path, meta, cap)
+    assert res.status == "ok"
+    assert _sealed_size(res, out) < cap
+    inner = json.loads(res.payload.metadata.fields["clippyshot_metadata"])
+    trunc = inner["qr_truncated"]
+    assert trunc["omitted"] > 0 and trunc["budget_bytes"] > 0
+    # qr_count stays exact on the typed record; the metadata page says how many it dropped.
+    for page, typed in zip(inner["pages"], res.payload.children):
+        assert _scanner(typed)["qr_count"] == 16
+        assert len(page["qr"]) + page.get("qr_omitted", 0) == 16
+    assert sum(p.get("qr_omitted", 0) for p in inner["pages"]) == trunc["omitted"]
+    assert [w.code for w in res.warnings].count("qr_metadata_truncated") == 1
+    # the input the converter returned is not mutated
+    assert all(len(p["qr"]) == 16 for p in meta["pages"])
+
+
+def test_metadata_qr_budget_keeps_whole_entries_in_page_order(tmp_path):
+    cap = 600_000
+    res, _ = _detonate_capped(tmp_path, _meta(pages=_quote_heavy_pages()), cap)
+    inner = json.loads(res.payload.metadata.fields["clippyshot_metadata"])
+    kept = [(p["index"], q["value"]) for p in inner["pages"] for q in p["qr"]]
+    full = [(p["index"], q["value"]) for p in _quote_heavy_pages() for q in p["qr"]]
+    assert kept and len(kept) < len(full)
+    it = iter(full)
+    assert all(k in it for k in kept)  # kept entries stay in their original order
+    assert all(q["raw_bytes_hex"] for p in inner["pages"] for q in p["qr"])
+
+
+def test_many_tiny_qr_codes_are_bounded_by_count_not_just_content(tmp_path):
+    # A flood of short codes costs ~100 bytes each in metadata whatever the value size.
+    pages = [
+        {"index": i, "file": f"page-{i:03d}.png", "width_mm": 210.0, "height_mm": 297.0,
+         "qr": [{"format": "qr_code", "value": "x", "position": [[1, 2], [3, 4]],
+                 "error_correction_level": "L", "is_mirrored": False, "raw_bytes_hex": "78"}
+                for _ in range(3000)],
+         "ocr": {}}
+        for i in range(1, 11)
+    ]
+    cap = 1_000_000
+    res, out = _detonate_capped(tmp_path, _meta(pages=pages), cap)
+    assert _sealed_size(res, out) < cap
+    inner = json.loads(res.payload.metadata.fields["clippyshot_metadata"])
+    assert inner["qr_truncated"]["omitted"] > 0
+
+
+def test_small_qr_payload_is_untouched_in_metadata(tmp_path):
+    res, _ = _detonate(tmp_path)
+    inner = json.loads(res.payload.metadata.fields["clippyshot_metadata"])
+    assert "qr_truncated" not in inner
+    assert [q["value"] for q in inner["pages"][0]["qr"]] == ["https://evil.example/a", "x" * 3000]
+    assert "qr_omitted" not in inner["pages"][0]
+    assert "qr_metadata_truncated" not in [w.code for w in res.warnings]
+
+
+def test_the_qr_flood_gap_is_closed_in_the_contract():
+    text = (Path(__file__).resolve().parents[2] / "blastbox-engine.toml").read_text()
+    assert 'id = "host-metadata-cap-qr-flood"' not in text
+    assert 'code = "qr_metadata_truncated"' in text
+    # The blastbox-side half (cold dispatcher not forwarding the cap) is still open.
+    assert 'id = "blastbox-cold-max-metadata-not-forwarded"' in text
+
+
+def test_a_repeated_benign_code_cannot_push_a_later_distinct_one_out_of_metadata(tmp_path):
+    """Loadout reads QR codes only from clippyshot_metadata; a flood of ONE benign code must
+    not spend the budget a later distinct payload needs (the qr_decoded findings already
+    de-duplicate for the same reason)."""
+    junk = "https://benign.example/?" + '"' * 2870
+    pages = [
+        {"index": i, "file": f"page-{i:03d}.png", "width_mm": 210.0, "height_mm": 297.0,
+         "qr": [{"format": "qr_code", "value": junk, "position": [],
+                 "raw_bytes_hex": "22" * 2900} for _ in range(12)],
+         "ocr": {}}
+        for i in range(1, 22)
+    ]
+    pages.append({"index": 22, "file": "page-022.png", "width_mm": 210.0, "height_mm": 297.0,
+                  "qr": [{"format": "qr_code", "value": "https://evil.example/login",
+                          "position": [], "raw_bytes_hex": "00"}], "ocr": {}})
+    res, out = _detonate_capped(tmp_path, _meta(pages=pages), 4 << 20)
+    assert _sealed_size(res, out) < 4 << 20
+    inner = json.loads(res.payload.metadata.fields["clippyshot_metadata"])
+    assert inner["qr_truncated"]["omitted"] > 0
+    assert [q["value"] for q in inner["pages"][-1]["qr"]] == ["https://evil.example/login"]
+    assert inner["pages"][0]["qr"][0]["value"] == junk  # the first copy is kept
+
+
+def test_truncation_never_grows_a_result_with_no_room(tmp_path):
+    """With the envelope already at the cap, dropping one small entry would add more
+    bookkeeping (qr_omitted, qr_truncated, the warning) than it saves: keep it instead."""
+    page = {"index": 1, "file": "page-001.png", "width_mm": 210.0, "height_mm": 297.0,
+            "qr": [], "ocr": {"text": "o" * 150_000, "char_count": 150_000}}
+    res0, out0 = _detonate_capped(tmp_path / "a", _meta(pages=[page]), 4 << 20)
+    # The QR-free result fits with ~2 KB to spare: too little for the bookkeeping+warning
+    # a drop would add, enough (by the tight estimate's worst-case header) for the entry.
+    cap = _sealed_size(res0, out0) + 2300
+    page = {**page, "qr": [{"format": "qr_code", "value": "https://e.example/",
+                            "position": [], "raw_bytes_hex": "68"}]}
+    res, out = _detonate_capped(tmp_path / "b", _meta(pages=[page]), cap)
+    assert _sealed_size(res, out) <= cap
+    inner = json.loads(res.payload.metadata.fields["clippyshot_metadata"])
+    assert "qr_truncated" not in inner
+    assert [q["value"] for q in inner["pages"][0]["qr"]] == ["https://e.example/"]
+    assert "qr_metadata_truncated" not in [w.code for w in res.warnings]
+
+
+def test_typed_copies_fit_the_headroom_at_a_low_cap(tmp_path):
+    """The typed qr_values / qr_decoded copies get only what the metadata leaves: at a cap
+    where their full ceilings would overshoot, the sealed result still fits."""
+    pages = [
+        {"index": i, "file": f"page-{i:03d}.png", "width_mm": 210.0, "height_mm": 297.0,
+         "qr": [{"format": "qr_code", "value": f"{i}-{j}-" + "v" * 2000, "position": []}
+                for j in range(16)],
+         "ocr": {}}
+        for i in range(1, 21)
+    ]
+    cap = 250_000
+    res, out = _detonate_capped(tmp_path, _meta(pages=pages), cap)
+    assert _sealed_size(res, out) < cap
+
+
+def test_one_oversized_early_value_does_not_push_later_small_ones_out():
+    from clippyshot.engine import _budget_metadata_qr
+
+    pages = [{"index": 1, "qr": [{"value": "big", "raw_bytes_hex": "ab" * 50_000}]},
+             {"index": 2, "qr": [{"value": "https://evil.example/login"}]},
+             {"index": 3, "qr": [{"value": "https://evil.example/login"},
+                                 {"value": "big", "raw_bytes_hex": "ab" * 50_000}]}]
+    out, omitted = _budget_metadata_qr({"pages": pages}, 20_000)
+    assert omitted == 2
+    assert [[q["value"] for q in p["qr"]] for p in out["pages"]] == [
+        [], ["https://evil.example/login"], ["https://evil.example/login"]]
+    assert [p.get("qr_omitted") for p in out["pages"]] == [1, None, 1]
+
+
+def test_truncation_bookkeeping_is_measured_not_guessed():
+    """Dropping an entry that saves more than the real bookkeeping costs must happen even
+    when the saving is below the conservative up-front estimate."""
+    from clippyshot.engine import _budget_metadata_qr, _meta_qr_entry_cost
+
+    entry = {"value": "x" * 900}
+    cost = _meta_qr_entry_cost(entry) - 2  # a page's only entry has no ", " separator
+    out, omitted = _budget_metadata_qr({"pages": [{"index": 1, "qr": [entry]}]}, cost - 1)
+    assert omitted == 1 and out["pages"][0]["qr"] == []
+
+
+def test_a_smaller_later_copy_stands_in_for_an_oversized_first_one():
+    from clippyshot.engine import _budget_metadata_qr
+
+    pages = [{"index": 1, "qr": [{"value": "u", "raw_bytes_hex": "ab" * 50_000}]},
+             {"index": 2, "qr": [{"value": "u", "raw_bytes_hex": "75"}]}]
+    out, omitted = _budget_metadata_qr({"pages": pages}, 20_000)
+    assert omitted == 1
+    assert out["pages"][1]["qr"] == [{"value": "u", "raw_bytes_hex": "75"}]
+
+
+def test_byte_distinct_payloads_with_the_same_text_are_distinct():
+    from clippyshot.engine import _budget_metadata_qr
+
+    a = {"value": "same", "raw_bytes_hex": "00" * 1000}
+    b = {"value": "same", "raw_bytes_hex": "ff" * 1000}
+    out, omitted = _budget_metadata_qr({"pages": [{"index": 1, "qr": [a, a, b]}]}, 5000)
+    assert omitted == 1
+    assert [q["raw_bytes_hex"][:2] for q in out["pages"][0]["qr"]] == ["00", "ff"]
+
+
+def test_bookkeeping_reserve_is_not_wastefully_large():
+    """Two ~300-byte entries plus their real bookkeeping fit 1000 bytes: keep them."""
+    from clippyshot.engine import _budget_metadata_qr
+
+    e = [{"value": str(i) + "x" * 280} for i in range(4)]
+    out, omitted = _budget_metadata_qr({"pages": [{"index": 1, "qr": e}]}, 1000)
+    assert omitted == 2 and len(out["pages"][0]["qr"]) == 2
+
+
+def test_near_cap_document_keeps_the_qr_entries_it_has_room_for(tmp_path):
+    """The metadata QR entries are measured exactly; they must not pay the typed copies'
+    64 KiB margin: with room for all of them, all are kept (as before this budget)."""
+    pages = [{"index": i, "file": f"page-{i:03d}.png", "width_mm": 210.0, "height_mm": 297.0,
+              "qr": [], "ocr": {"text": "t" * 3000, "char_count": 3000}} for i in range(1, 51)]
+    res0, out0 = _detonate_capped(tmp_path / "a", _meta(pages=pages), 4 << 20)
+    cap = _sealed_size(res0, out0) + 30_000
+    for i, p in enumerate(pages):
+        p["qr"] = [{"format": "qr_code", "value": f"https://u{i}.example/" + "p" * 150,
+                    "position": [], "raw_bytes_hex": "00"}]
+    res, out = _detonate_capped(tmp_path / "b", _meta(pages=pages), cap)
+    assert _sealed_size(res, out) <= cap
+    inner = json.loads(res.payload.metadata.fields["clippyshot_metadata"])
+    assert "qr_truncated" not in inner
+    assert sum(len(p["qr"]) for p in inner["pages"]) == 50
+
+
+def test_unused_bookkeeping_reserve_is_handed_back():
+    """One URL per page and a budget one byte short of keeping everything: only enough
+    entries to pay the real bookkeeping are dropped (each 39 B entry saves ~20 B net of its
+    page's qr_omitted, against ~300 B of root count + warning: ~15), not the worst-case
+    reserve's worth (24 at the reserve alone, 50 at the old fixed constants)."""
+    from clippyshot.engine import _budget_metadata_qr, _meta_qr_entry_cost
+
+    pages = [{"index": i, "qr": [{"value": f"https://u{i}.example/x"}]} for i in range(1, 51)]
+    # Each entry's cost carries a ", " separator, which a page's only entry does not use.
+    total = sum(_meta_qr_entry_cost(p["qr"][0]) - 2 for p in pages)
+    out, omitted = _budget_metadata_qr({"pages": pages}, total - 1)
+    assert 0 < omitted <= 16
+    out, omitted = _budget_metadata_qr({"pages": pages}, total)
+    assert omitted == 0  # exactly fits once the unused separators are credited
+
+
+def test_bookkeeping_alone_never_pushes_a_fitting_result_over_the_cap(tmp_path):
+    pages = [{"index": i, "file": f"page-{i:03d}.png", "width_mm": 210.0, "height_mm": 297.0,
+              "qr": [], "ocr": {"text": "t" * 3000, "char_count": 3000}} for i in range(1, 51)]
+    res0, out0 = _detonate_capped(tmp_path / "a", _meta(pages=pages), 4 << 20)
+    base = _sealed_size(res0, out0)
+    for i, p in enumerate(pages):
+        p["qr"] = [{"format": "qr_code", "value": f"{i}" + "q" * 2000, "position": []}]
+    for spare in (0, 100, 200, 500, 2_000, 5_000):  # 0-200: the last-resort branches
+        res, out = _detonate_capped(tmp_path / f"s{spare}", _meta(pages=pages), base + spare)
+        assert _sealed_size(res, out) <= base + spare, spare
+        # Whatever was dropped, no typed copy may claim to be complete (codex on #67).
+        for page in res.payload.children:
+            rec = _scanner(page)
+            if rec["qr_count"] and len(rec["qr_values"]) < rec["qr_count"]:
+                assert rec["qr_values_truncated"] is True, spare
+
+
+def test_reclaimed_reserve_goes_to_distinct_payloads_before_repeats():
+    """A benign flood on one page must not take the bookkeeping reserve handed back after
+    selection while a later distinct payload still fits (round-4 lens on #67)."""
+    from clippyshot.engine import _budget_metadata_qr, _meta_qr_entry_cost
+
+    pages = [{"index": i, "qr": [{"value": f"https://u{i}.example/a"}]} for i in range(1, 51)]
+    pages.append({"index": 51, "qr": [{"value": "https://benign.example/"}] * 101})
+    evil = {"value": "https://evil.example/" + "e" * 1400}
+    pages.append({"index": 52, "qr": [evil]})
+    distinct = sum(_meta_qr_entry_cost(p["qr"][0]) for p in pages)
+    for budget in range(distinct + 400, distinct + 1200, 50):
+        out, _ = _budget_metadata_qr({"pages": pages}, budget)
+        assert out["pages"][-1]["qr"] == [evil], budget
+
+
+def test_tight_estimate_counts_a_worst_case_detection_and_separators():
+    from blastbox.contract import Detection
+
+    from clippyshot.engine import ClippyShotEngine, _TIGHT_HEADER_BYTES
+
+    for ch in ("l", "\U0001F600"):  # the caps count characters; UTF-8 is up to 4 B each
+        big = Detection(label=ch * 64, mime=ch * 255, confidence=0.9998764991760254,
+                        source=ch * 32)
+        assert len(big.model_dump_json().encode()) + 180 <= _TIGHT_HEADER_BYTES
+    from blastbox.contract import EmbeddedResource, Record
+    from blastbox.contract import Warning as W
+
+    payload = EmbeddedResource(embedded_path="/", content_type="x", depth=0,
+                               metadata=Record(fields={}), children=[])
+    ws = [W(code="c", message="m")] * 10
+    est = ClippyShotEngine._sealed_estimate(([], [], payload, ws), tight=True)
+    serialized = len(payload.model_dump_json(by_alias=True)) + len(
+        "[" + ",".join(w.model_dump_json() for w in ws) + "]")
+    assert est >= serialized + _TIGHT_HEADER_BYTES - 2
+
+
+def test_a_footer_code_on_every_page_does_not_hide_a_distinct_payload(tmp_path):
+    """Per-page qr_omitted counts can eat the room a distinct payload needs when every page
+    loses an entry (a footer QR on each page): the root-count-only form is used then."""
+    pages = [{"index": i, "file": f"page-{i:03d}.png", "width_mm": 210.0, "height_mm": 297.0,
+              "qr": [], "ocr": {}} for i in range(1, 201)]
+    res0, out0 = _detonate_capped(tmp_path / "a", _meta(pages=pages), 4 << 20)
+    base = _sealed_size(res0, out0)
+    footer = {"format": "qr_code", "value": "https://footer.example/" + "f" * 120,
+              "position": [], "raw_bytes_hex": "00"}
+    evil = {"format": "qr_code", "value": "https://evil.example/login", "position": [],
+            "raw_bytes_hex": "01"}
+    for p in pages:
+        p["qr"] = [footer]
+    pages[-1]["qr"] = [footer, evil]
+    for room in (2_500, 4_000, 6_000):
+        res, out = _detonate_capped(tmp_path / f"r{room}", _meta(pages=pages), base + room)
+        assert _sealed_size(res, out) <= base + room
+        inner = json.loads(res.payload.metadata.fields["clippyshot_metadata"])
+        assert any(q["value"] == evil["value"] for q in inner["pages"][-1]["qr"]), room
+
+
+def test_near_cap_keeps_what_master_kept_within_a_small_margin(tmp_path):
+    pages = [{"index": i, "file": f"page-{i:03d}.png", "width_mm": 210.0, "height_mm": 297.0,
+              "qr": [], "ocr": {}} for i in range(1, 51)]
+    res0, out0 = _detonate_capped(tmp_path / "a", _meta(pages=pages), 4 << 20)
+    base = _sealed_size(res0, out0)
+    for i, p in enumerate(pages):
+        p["qr"] = [{"format": "qr_code", "value": f"https://u{i}.example/" + "p" * 150,
+                    "position": [], "raw_bytes_hex": "00"}]
+    full, outf = _detonate_capped(tmp_path / "f", _meta(pages=pages), 4 << 20)
+    need = _sealed_size(full, outf)
+    res, out = _detonate_capped(tmp_path / "b", _meta(pages=pages), need + 1_200)
+    inner = json.loads(res.payload.metadata.fields["clippyshot_metadata"])
+    assert sum(len(p["qr"]) for p in inner["pages"]) == 50
+    assert base < need
+
+
+def test_a_distinct_payload_is_not_lost_to_separator_overcount(tmp_path):
+    """Entry costs include a ", " separator a page's first entry does not use; not crediting
+    it dropped a fitting distinct payload while footer repeats were kept (verification lens
+    on #67)."""
+    from clippyshot.engine import _budget_metadata_qr, _meta_qr_entry_cost
+
+    footer = {"value": "https://footer.example/x"}
+    pages = [{"index": i, "qr": [{"value": f"https://u{i}.example/"}, footer]}
+             for i in range(1, 301)]
+    evil = {"value": "https://evil.example/" + "e" * 800}
+    pages[-1]["qr"].append(evil)
+    distinct = (sum(_meta_qr_entry_cost(p["qr"][0]) - 2 for p in pages)
+                + _meta_qr_entry_cost(footer) + _meta_qr_entry_cost(evil))
+    for extra in range(500, 1300, 50):
+        out, _ = _budget_metadata_qr({"pages": pages}, distinct + extra, per_page=False)
+        assert evil in out["pages"][-1]["qr"], extra
