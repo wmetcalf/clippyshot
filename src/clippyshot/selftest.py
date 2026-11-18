@@ -1,6 +1,8 @@
 """Healthcheck command."""
 from __future__ import annotations
 
+import os
+
 import shutil
 import subprocess
 from pathlib import Path
@@ -75,7 +77,9 @@ def apparmor_attach_report(
     """Selftest fields for the bwrap + aa-exec attach probe and the stock bwrap profile.
 
     ``apparmor_attach``: ``ok`` when the selected bwrap backend's probe passed,
-    ``not_applicable`` for other backends or a bwrap without aa-exec.
+    ``no_aa_exec`` for a bwrap backend without aa-exec (soffice runs with no AppArmor
+    profile; only selectable under CLIPPYSHOT_WARN_ON_INSECURE), ``not_applicable`` for
+    other backends.
     ``stock_bwrap_profile``: the state of Ubuntu's ``bwrap-userns-restrict`` on this host,
     reported whichever backend is selected so a host upgrade that brings it back is visible
     before it breaks a bwrap deployment.
@@ -83,6 +87,8 @@ def apparmor_attach_report(
     has, probe = _find_attach_probe(sandbox)
     if has and probe is not None:
         attach = "ok" if getattr(probe, "ok", False) else str(getattr(probe, "cause", "failed"))
+    elif has:
+        attach = "no_aa_exec"
     else:
         attach = "not_applicable"
     state = stock if stock is not None else stock_bwrap_profile_state()
@@ -110,9 +116,13 @@ def run_selftest() -> int:
         fields: dict[str, str] = {"stock_bwrap_profile": stock.describe()}
         if isinstance(e, AppArmorAttachUnavailable):
             fields["apparmor_attach"] = e.probe.cause
-        if stock.conflict or (
-            isinstance(e, AppArmorAttachUnavailable) and e.probe.cause == "stock_profile_conflict"
-        ):
+        # Only point at disabling host hardening when bwrap could be the backend at all:
+        # a forced nsjail/container deployment never runs bwrap.
+        forced = os.environ.get("CLIPPYSHOT_SANDBOX", "").strip().lower()
+        bwrap_possible = forced in ("", "auto", "bwrap")
+        if (isinstance(e, AppArmorAttachUnavailable)
+                and e.probe.cause == "stock_profile_conflict") or (
+                    bwrap_possible and stock.conflict):
             fields["fix"] = FIX_COMMAND
         log.error("sandbox_unavailable", error=str(e), **fields)
         return 1

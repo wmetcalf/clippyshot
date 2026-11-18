@@ -167,3 +167,16 @@ def test_no_conflict_warning_under_the_container_backend(host, capsys):
     ev = _events(capsys.readouterr().err)
     assert "stock_bwrap_profile_conflict" not in ev
     assert ev["selftest_passed"]["apparmor_attach"] == "not_applicable"
+
+
+def test_attach_report_names_a_bwrap_without_aa_exec():
+    """soffice runs unconfined there; 'not_applicable' would read as 'AppArmor irrelevant'."""
+    assert st.apparmor_attach_report(_Bwrap(None), stock=_ABSENT)["apparmor_attach"] == "no_aa_exec"
+
+
+def test_no_disable_hint_for_a_forced_non_bwrap_backend(host, capsys, monkeypatch):
+    monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "nsjail")
+    host(error=SandboxUnavailable("forced backend 'nsjail' failed smoketest"), stock=_LOADED)
+    assert st.run_selftest() == 1
+    err = _events(capsys.readouterr().err)["sandbox_unavailable"]
+    assert "fix" not in err and err["stock_bwrap_profile"].startswith("loaded")

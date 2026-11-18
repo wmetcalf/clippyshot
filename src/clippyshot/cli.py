@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import shlex
 import sys
 from pathlib import Path
 
@@ -134,14 +135,32 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
             print(f"\n{e}", file=sys.stderr)
             return 1
         if not disable_stock:
+            # The stock profile only affects /usr/bin/bwrap. Profiles for other backends
+            # (clippyshot-nsjail) are still loaded on --apply, so an nsjail host can keep the
+            # distro's bwrap hardening.
+            other = [a for a in rep.actions if a.binary not in ("bwrap", "aa-exec")]
+            if args.apply and other:
+                if not profile_dir.is_dir():
+                    print(f"\nprofile dir not found: {profile_dir} (pass --profile-dir)",
+                          file=sys.stderr)
+                    return 2
+                print(f"\nLoading {len(other)} profile(s) unaffected by the conflict via sudo "
+                      "(you'll be prompted for your password):")
+                rc = ss.apply(other, profile_dir)
+                if rc != 0:
+                    return rc
             print(f"\nTo fix on a dedicated host, run:\n\n  {ha.FIX_COMMAND}\n\n"
                   f"which disables {stock} persistently and loads the four ClippyShot "
                   "profiles via sudo:\n")
             for c in plan:
-                print("  " + " ".join(c.argv))
+                print("  " + shlex.join(c.argv))
             return 1
-        if not profile_dir.is_dir():
-            print(f"\nprofile dir not found: {profile_dir} (pass --profile-dir)", file=sys.stderr)
+        missing = [p for p in ss.ALL_PROFILES if not (profile_dir / p).is_file()]
+        if missing:
+            # Check before the first sudo step: disabling the stock profile and then failing
+            # to load clippyshot-bwrap would leave the host with neither.
+            print(f"\nprofile file(s) missing in {profile_dir}: {', '.join(missing)} "
+                  "(pass --profile-dir); nothing changed", file=sys.stderr)
             return 2
         print(f"\nDisabling {stock} and loading the ClippyShot profiles via sudo "
               "(you'll be prompted for your password):")
@@ -169,7 +188,7 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
     print(f"\n{len(rep.actions)} scoped AppArmor profile(s) to load. Re-run with --apply to "
           "load them (sudo), or run:\n")
     for cmd in ss.commands_for(rep.actions, profile_dir):
-        print("  " + " ".join(cmd))
+        print("  " + shlex.join(cmd))
     return 0
 
 

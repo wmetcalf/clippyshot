@@ -157,8 +157,9 @@ def test_probe_ok():
     "bwrap: setting up uid map: Permission denied",
 ])
 def test_probe_names_the_stock_profile_on_its_signature_errors(stderr):
+    enabled = ha.StockBwrapProfileState(installed=True, disabled=False, loaded=None)
     p = ha.probe_aa_exec("/b", "/a", "clippyshot-soffice", runner=_Runner(1, stderr),
-                         stock_state=_ABSENT)
+                         stock_state=enabled)
     assert not p.ok
     assert p.cause == "stock_profile_conflict"
     msg = p.message()
@@ -217,3 +218,30 @@ def test_attach_unavailable_is_a_sandbox_unavailable():
     assert isinstance(err, SandboxUnavailable)
     assert err.probe is p
     assert str(err) == p.message()
+
+
+def test_change_profile_refusal_without_a_stock_profile_is_not_blamed_on_it():
+    """Inside a container under docker-default, aa-exec gets the same 'insufficient
+    permissions' error with no stock profile anywhere; don't send the operator to disable
+    host hardening for it."""
+    import subprocess as _sp
+
+    from clippyshot.sandbox import host_apparmor as ha
+
+    absent = ha.StockBwrapProfileState(installed=False, disabled=False, loaded=None)
+
+    def runner(argv, capture_output, timeout):
+        return _sp.CompletedProcess(argv, 1, b"", b"aa-exec: ERROR: insufficient permissions "
+                                    b"to change to the profile 'clippyshot-soffice'")
+
+    p = ha.probe_aa_exec("bwrap", "aa-exec", "clippyshot-soffice", runner=runner,
+                         stock_state=absent)
+    assert p.cause == "change_profile_denied"
+    assert ha.FIX_COMMAND not in p.message() and "docker-default" in p.message()
+
+
+def test_uid_map_failure_without_a_stock_profile_is_a_plain_failure():
+    p = ha.probe_aa_exec("/b", "/a", "clippyshot-soffice",
+                         runner=_Runner(1, "bwrap: setting up uid map: Permission denied"),
+                         stock_state=_ABSENT)
+    assert p.cause == "failed" and ha.FIX_COMMAND not in p.message()

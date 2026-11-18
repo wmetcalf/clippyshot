@@ -107,9 +107,11 @@ no-op. The `disable/` symlink is what keeps the profile from returning on reboot
 `apparmor_parser -R` alone only lasts until the next boot. CI
 (`.github/workflows/ci.yml`) runs only the unload, because its runner is ephemeral.
 
-`clippyshot selftest` (the image healthcheck) reports both `apparmor_attach` (`ok` /
-`not_applicable` / the failure cause) and `stock_bwrap_profile` (its state) in
-`selftest_passed`, and logs a `stock_bwrap_profile_conflict` warning when the stock
+`clippyshot selftest` (the image healthcheck) reports both `apparmor_attach` (`ok`, or
+`not_applicable` for a non-bwrap backend, or `no_aa_exec` for a bwrap without aa-exec) and
+`stock_bwrap_profile` (its state) in `selftest_passed`; on failure, the probe's cause is a
+field only when bwrap was forced (`CLIPPYSHOT_SANDBOX=bwrap`; under auto-selection it is in
+the error text), and logs a `stock_bwrap_profile_conflict` warning when the stock
 profile is active on a host that has bwrap, even if nsjail was selected, so a host upgrade
 that brings it back is visible before it breaks a bwrap deployment. (Not under the
 `container` backend, where `/etc/apparmor.d` is the image's, not host policy.)
@@ -119,13 +121,14 @@ that brings it back is visible before it breaks a bwrap deployment. (Not under t
 | Deployment | ClippyShot sandbox | Stock-profile host prep? |
 |---|---|---|
 | Bare host (bwrap backend) | `bwrap` + `aa-exec` | **Yes**, dedicated hosts only (see the cost above): `clippyshot setup-sandbox --disable-stock-bwrap-profile` |
-| Plain `docker run` of the ClippyShot image with bwrap selected | `bwrap` + `aa-exec` in the container, host kernel policy | **Yes**, on the host (setup-sandbox in a container cannot change host policy; use the commands above) |
+| Plain `docker run` of the ClippyShot image with bwrap selected | `bwrap` + `aa-exec` in the container, host kernel policy | **Yes**, on the host if it ships the stock profile (setup-sandbox in a container cannot change host policy; use the commands above). The container must also run under an AppArmor profile that allows the change to `clippyshot-soffice`: under Docker's default `docker-default`, aa-exec is refused whatever the host has (`change_profile_denied`); otherwise use `CLIPPYSHOT_SANDBOX=container` |
 | gVisor (compose cold workers, `docker-compose.gvisor.yml` warm sidecar) | `container` (`CLIPPYSHOT_SANDBOX=container`) | No |
 | Firecracker via blastbox (`docker-compose.firecracker.yml`) | `container`, inside the guest kernel | No |
 
 - **gVisor.** AppArmor is not enforced for processes inside a gVisor sandbox: they run on
-  gVisor's Sentry, not on host-kernel syscalls. Docker's AppArmor profile for the container
-  (`docker-default` unless overridden) applies on the host side, to runsc. So ClippyShot
+  gVisor's Sentry, not on host-kernel syscalls, and runsc ignores the container's OCI
+  AppArmor profile (`docker inspect` may still show `docker-default`): only a profile that
+  attaches to the runsc binary itself confines it on the host. So ClippyShot
   must use `CLIPPYSHOT_SANDBOX=container` there; the cold-worker image sets it (`ENV` in
   blastbox's `deploy/docker/Dockerfile.clippyshot-cold-worker`) and
   `docker-compose.gvisor.yml` sets it for warm slots via `BLASTBOX_GVISOR_EXTRA_ENV`. bwrap

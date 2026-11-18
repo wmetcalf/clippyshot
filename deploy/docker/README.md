@@ -533,8 +533,8 @@ host prep for the blastbox runtimes themselves (KVM, runsc, Docker) is in blastb
 
 - **gVisor** (the compose stack's cold workers under `runsc`, and the
   `docker-compose.gvisor.yml` warm sidecar). AppArmor is not enforced for processes inside
-  the gVisor sandbox; Docker's AppArmor profile (`docker-default` unless overridden)
-  applies on the host side, to runsc. ClippyShot must use `CLIPPYSHOT_SANDBOX=container`
+  the gVisor sandbox, and runsc ignores the container's OCI AppArmor profile (only a
+  profile attached to the runsc binary confines it on the host). ClippyShot must use `CLIPPYSHOT_SANDBOX=container`
   there, which the cold-worker image sets and `docker-compose.gvisor.yml` sets for warm
   slots (`BLASTBOX_GVISOR_EXTRA_ENV`). No bwrap, no aa-exec: **no host prep for the stock
   bwrap profile.**

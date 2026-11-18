@@ -213,3 +213,42 @@ def test_it_states_the_host_wide_cost_before_anyone_opts_in(monkeypatch, capsys)
     out = capsys.readouterr().out
     assert "host-wide" in out
     assert "dedicated" in out
+
+
+def test_apply_on_a_conflicted_host_still_loads_the_nsjail_profile(monkeypatch, capsys):
+    """The stock profile only attaches to /usr/bin/bwrap: an nsjail host keeps the distro's
+    bwrap hardening and still gets clippyshot-nsjail, without touching bwrap policy."""
+    host = Host(monkeypatch, [LOADED])
+    monkeypatch.setattr(ss, "_userns_ok", lambda b, p: b != "nsjail")
+    applied: list = []
+    monkeypatch.setattr(ss, "apply", lambda actions, d: applied.extend(actions) or 0)
+    rc = cli.main(["setup-sandbox", "--apply"])
+    assert rc != 0  # bwrap is still blocked, and it says so
+    assert [a.profile_name for a in applied] == ["clippyshot-nsjail"]
+    assert host.commands == []  # no stock-profile / bwrap policy change
+
+
+def test_missing_profile_files_stop_before_any_host_change(monkeypatch, capsys, tmp_path):
+    """Disabling the stock profile and then failing to load clippyshot-bwrap would leave the
+    host with neither; every profile file is checked before the first sudo step."""
+    host = Host(monkeypatch, [LOADED, FIXED])
+    (tmp_path / "clippyshot-bwrap").write_text("x")
+    (tmp_path / "clippyshot-nsjail").write_text("x")
+    rc = cli.main(["setup-sandbox", "--disable-stock-bwrap-profile",
+                   "--profile-dir", str(tmp_path)])
+    assert rc == 2 and host.commands == []
+    assert "clippyshot-soffice" in capsys.readouterr().err
+
+
+def test_fresh_host_schedules_the_soffice_profile_on_the_first_pass(monkeypatch):
+    """bwrap's own userns fails before aa-exec runs, so the probe cannot see a missing
+    clippyshot-soffice; the kernel's profile list is used instead."""
+    monkeypatch.setattr(ss, "_restrict_active", lambda: True)
+    monkeypatch.setattr(ss.shutil, "which", lambda b: None if b == "nsjail" else f"/usr/bin/{b}")
+    monkeypatch.setattr(ss, "_userns_ok", lambda b, p: False)
+    monkeypatch.setattr(ha, "stock_bwrap_profile_state", lambda: ABSENT)
+    monkeypatch.setattr(ha, "loaded_profile_names", lambda *a, **k: frozenset({"docker-default"}))
+    monkeypatch.setattr(ha, "probe_aa_exec", lambda *a, stock_state=None, **k: _probe(
+        ABSENT, False, "failed", "bwrap: setting up uid map: Permission denied"))
+    names = [a.profile_name for a in ss.diagnose().actions]
+    assert "clippyshot-bwrap" in names and "clippyshot-soffice" in names

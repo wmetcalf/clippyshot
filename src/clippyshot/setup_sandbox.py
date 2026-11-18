@@ -20,6 +20,7 @@ four ClippyShot profiles, and re-runs the attach probe to prove the fix.
 """
 from __future__ import annotations
 
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -114,6 +115,13 @@ def _diagnose_attach(rep: SetupReport) -> None:
                      f"[{probe.cause}] {probe.stderr}")
     if probe.cause == "profile_not_loaded" and not rep.stock_conflict:
         rep.actions.append(ProfileAction("aa-exec", aa_exec, SOFFICE_PROFILE))
+    elif not rep.stock_conflict:
+        # The probe stops at the first failure: on a fresh host bwrap's own userns fails
+        # before aa-exec runs, so a missing clippyshot-soffice would only show on a second
+        # pass. Schedule it now when the kernel's profile list says it is not loaded.
+        names = host_apparmor.loaded_profile_names()
+        if names is not None and SOFFICE_PROFILE not in names:
+            rep.actions.append(ProfileAction("aa-exec", aa_exec, SOFFICE_PROFILE))
 
 
 def _diagnose_userns(rep: SetupReport, restrict: bool) -> None:
@@ -161,7 +169,7 @@ def commands_for(actions: list[ProfileAction], profile_dir: Path) -> list[list[s
 def apply(actions: list[ProfileAction], profile_dir: Path) -> int:
     """Run the load commands via sudo (interactive). Returns 0 on success."""
     for cmd in commands_for(actions, profile_dir):
-        print("+ " + " ".join(cmd))
+        print("+ " + shlex.join(cmd))
         rc = subprocess.run(cmd).returncode
         if rc != 0:
             return rc
@@ -221,7 +229,7 @@ def _run_host_command(argv: list[str]) -> int:
 
 def apply_plan(plan: list[HostCommand]) -> int:
     for c in plan:
-        print("+ " + " ".join(c.argv))
+        print("+ " + shlex.join(c.argv))
         rc = _run_host_command(c.argv)
         if rc != 0:
             if c.allow_failure:

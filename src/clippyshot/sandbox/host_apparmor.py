@@ -128,7 +128,7 @@ def aa_exec_probe_argv(bwrap: str, aa_exec: str, profile: str) -> list[str]:
 @dataclass(frozen=True)
 class AaExecProbe:
     ok: bool
-    # ok | stock_profile_conflict | profile_not_loaded | failed
+    # ok | stock_profile_conflict | change_profile_denied | profile_not_loaded | failed
     cause: str
     profile: str
     argv: tuple[str, ...]
@@ -151,6 +151,17 @@ class AaExecProbe:
                 "refuses to run soffice unconfined. Fix: run "
                 f"`{FIX_COMMAND}` (disables {STOCK_BWRAP_PROFILE} persistently and loads "
                 f"the ClippyShot profiles; see {README})."
+            )
+        if self.cause == "change_profile_denied":
+            return (
+                f"{head}. AppArmor refused the change to {self.profile!r}, and no stock "
+                f"{STOCK_BWRAP_PROFILE!r} profile is visible here "
+                f"(state: {self.stock.describe()}). Usually the process is itself confined by "
+                "a profile without change_profile, e.g. Docker's docker-default inside a "
+                "container: run containers with CLIPPYSHOT_SANDBOX=container (the gVisor and "
+                "Firecracker tiers do), or under a profile that allows the change. If this is "
+                f"a container on a host that ships {STOCK_BWRAP_PROFILE}, that also needs "
+                f"host-side prep; see {README}."
             )
         if self.cause == "profile_not_loaded":
             return (
@@ -189,8 +200,14 @@ def probe_aa_exec(
     stock = stock_state if stock_state is not None else stock_bwrap_profile_state()
     if exit_code == 0:
         cause = "ok"
-    elif any(sig in stderr for sig in _STOCK_SIGNATURES) or stock.loaded is True:
+    elif stock.conflict and (any(sig in stderr for sig in _STOCK_SIGNATURES)
+                             or stock.loaded is True):
         cause = "stock_profile_conflict"
+    elif _STOCK_SIGNATURES[0] in stderr:
+        # aa-exec refused, but not by a stock profile we can see: the process running bwrap
+        # is itself confined by a profile without change_profile (Docker's docker-default
+        # inside a container), or the host's policy is not visible from here.
+        cause = "change_profile_denied"
     elif _NOT_LOADED_SIGNATURE in stderr:
         cause = "profile_not_loaded"
     else:
