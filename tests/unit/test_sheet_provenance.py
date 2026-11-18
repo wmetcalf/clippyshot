@@ -259,3 +259,40 @@ def test_sheet_names_are_bounded_in_escaped_json_bytes():
         {"name": "\U0001F600" * 300, "state": "\U0001F600" * 40, "type": "worksheet"}]})
     (s,) = _sheets_from_runner(R)
     assert len(json.dumps(s["name"])) <= 257 and len(json.dumps(s["state"])) <= 32
+
+
+def test_active_tab_out_of_range_is_an_anomaly(tmp_path):
+    p = _workbook(tmp_path, '<bookViews><workbookView activeTab="-1"/></bookViews>'
+                            '<sheets><sheet name="H" state="hidden" r:id="rId1"/>'
+                            '<sheet name="V" r:id="rId1"/></sheets>', rels=True)
+    assert "bad_active_tab" in read_sheet_inventory(p)[1]
+
+
+def test_foreign_or_duplicate_relationships_do_not_retype_a_macro_sheet(tmp_path):
+    p = tmp_path / "book.xlsm"
+    rel_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
+    macro = "http://schemas.microsoft.com/office/2006/relationships/xlMacrosheet"
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("xl/workbook.xml", f'<workbook xmlns="{_MAIN}" xmlns:r="{_RELS_NS}">'
+                   '<sheets><sheet name="M" r:id="rId2"/></sheets></workbook>')
+        z.writestr("xl/_rels/workbook.xml.rels",
+                   f'<Relationships xmlns="{rel_ns}" xmlns:f="urn:foreign">'
+                   f'<Relationship Id="rId2" Type="{macro}" Target="m.xml"/>'
+                   f'<f:Relationship Id="rId2" Type="{_REL_T}worksheet" Target="w.xml"/>'
+                   f'<Relationship Id="rId2" Type="{_REL_T}worksheet" Target="w.xml"/>'
+                   '</Relationships>')
+    sheets, anomalies = read_sheet_inventory(p)
+    assert "unresolved_sheet_relationship" in anomalies  # duplicate Id: ambiguous
+    assert sheets[0]["type"] != "worksheet"
+
+
+def test_nested_alternate_content_is_scanned_linearly(tmp_path):
+    import time
+
+    depth = 2000
+    mc = 'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"'
+    body = (f"<mc:AlternateContent {mc}>" * depth) + ("</mc:AlternateContent>" * depth)
+    p = _workbook(tmp_path, body + '<sheets><sheet name="A" r:id="rId1"/></sheets>', rels=True)
+    t0 = time.monotonic()
+    read_sheet_inventory(p)
+    assert time.monotonic() - t0 < 2.0

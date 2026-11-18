@@ -65,6 +65,9 @@ def _local(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
+_PKG_REL_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+
+
 def _sheet_types_by_rid(zf: zipfile.ZipFile) -> dict[str, str] | None:
     """Map workbook relationship id -> sheet kind, from xl/_rels/workbook.xml.rels.
 
@@ -77,11 +80,12 @@ def _sheet_types_by_rid(zf: zipfile.ZipFile) -> dict[str, str] | None:
     except (KeyError, ExtractionLimitExceeded, ET.ParseError):
         return None
     out: dict[str, str] = {}
-    for rel in root.iter():
-        if _local(rel.tag) != "Relationship":
-            continue
+    for rel in root.findall(f"{_PKG_REL_NS}Relationship"):
         rid, rtype = rel.attrib.get("Id"), rel.attrib.get("Type", "")
         if not rid:
+            continue
+        if rid in out:
+            out[rid] = "ambiguous"  # duplicate Id: which one LO uses is not ours to guess
             continue
         kind = rtype.rsplit("/", 1)[-1]
         out[rid] = {"worksheet": "worksheet", "chartsheet": "chartsheet",
@@ -142,15 +146,22 @@ def read_sheet_inventory(xlsx_path: Path) -> tuple[list[dict], list[str]]:
     canonical = {id(e) for b in canonical_blocks for e in b if e.tag == f"{root_ns}sheet"}
     out: list[dict] = []
     seen: set[str] = set()
-    for el in root.iter():
-        local = _local(el.tag)
-        # Excel routinely wraps unrelated workbook.xml parts (x15ac:absPath, ...) in
-        # mc:AlternateContent; only one that carries sheets changes what LO imports.
-        if local == "AlternateContent" and any(
-                _local(d.tag) in ("sheet", "sheets") for d in el.iter()):
-            anomalies.add("markup_compatibility")
-        if local != "sheet":
-            continue
+    # One linear pass, document order, carrying "inside mc:AlternateContent". Excel routinely
+    # wraps unrelated workbook.xml parts (x15ac:absPath, ...) in AlternateContent; only one
+    # that carries sheets changes what LO imports.
+    stack: list[tuple[ET.Element, bool]] = [(root, False)]
+    ordered: list[ET.Element] = []
+    while stack:
+        node, in_ac = stack.pop()
+        local = _local(node.tag)
+        in_ac = in_ac or local == "AlternateContent"
+        if local in ("sheet", "sheets"):
+            if in_ac:
+                anomalies.add("markup_compatibility")
+            if local == "sheet":
+                ordered.append(node)
+        stack.extend((child, in_ac) for child in reversed(list(node)))
+    for el in ordered:
         if id(el) not in canonical:
             anomalies.add("noncanonical_sheet_element")
         if len(out) > MAX_SHEETS:
@@ -168,11 +179,14 @@ def read_sheet_inventory(xlsx_path: Path) -> tuple[list[dict], list[str]]:
         if state not in _SPEC_STATES:
             anomalies.add("nonstandard_sheet_state")
         rid = next((el.attrib[k + "id"] for k in _REL_NS if k + "id" in el.attrib), None)
-        if rel_types is not None and (rid is None or rid not in rel_types):
+        if rel_types is not None and (rid is None or rid not in rel_types
+                                      or rel_types[rid] == "ambiguous"):
             anomalies.add("unresolved_sheet_relationship")
         sheet_type = (rel_types or {}).get(rid or "") or el.attrib.get("type", "worksheet")
         out.append({"name": name, "state": state, "type": sheet_type,
                     "active": len(out) == active_tab})
+    if out and not 0 <= active_tab < len(out):
+        anomalies.add("bad_active_tab")  # LO clamps or ignores it; we can't say which tab
     return out, sorted(anomalies)
 
 
