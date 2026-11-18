@@ -98,6 +98,19 @@ def _inventory_source(runner) -> str:
             else "input_workbook")
 
 
+def _input_records_field(runner) -> dict[str, Any]:
+    """``{"input_records": <why>}`` when an xls/xlsb's own sheet records were refused or
+    did not align (so the re-export's degraded type/state stand), else ``{}``.
+
+    A refusal is a signal in itself: a consumer must not read a re-export inventory of a
+    binary workbook as equivalent to an ods/csv one.
+    """
+    from clippyshot.libreoffice.sheet_records import RECORD_STATUSES
+
+    status = getattr(runner, "last_run_sheet_records_status", "")
+    return {"input_records": status} if status in RECORD_STATUSES else {}
+
+
 def _sheets_from_runner(runner) -> list[dict]:
     """Read captured sheet inventory off the runner.
 
@@ -1118,7 +1131,7 @@ class Converter:
                 # workbook, all sheets unnamed, ...): an unverified block, not silence.
                 if detected.label in _SPREADSHEET_LABELS and (
                         _sheets_discovered or _sheet_anomalies):
-                    metadata["sheets"] = {**_sheet_provenance(
+                    sheets_block: dict[str, Any] = {**_sheet_provenance(
                         _sheets_discovered, total_pages, single_page_sheets, page_records,
                         blank_indices if options.limits.skip_blanks else [],
                         paginated_calc=getattr(self._runner, 'last_run_export_filter', '')
@@ -1128,6 +1141,8 @@ class Converter:
                         # loses XLM 'macro' and 'veryHidden', unless the binary original's
                         # own sheet records aligned with it (see runner._capture_sheets).
                         "inventory_source": _inventory_source(self._runner)}
+                    sheets_block.update(_input_records_field(self._runner))
+                    metadata["sheets"] = sheets_block
                 (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
             finally:
                 # 7. Copy the intermediate PDF to the output dir as

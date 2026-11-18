@@ -77,6 +77,9 @@ class LibreOfficeRunner:
         # "input_workbook", "libreoffice_xlsx_reexport", or the binary original's own
         # records (sheet_records.XLS_SOURCE / XLSB_SOURCE). "" before a capture.
         self.last_run_sheets_source = ""
+        # Why the binary original's records were not used (sheet_records.RECORD_STATUSES),
+        # "ok", "not_binary_workbook", or "" when no overlay was attempted.
+        self.last_run_sheet_records_status = ""
         self._two_pass_output: Path | None = None
         # The staged file the two-pass re-exported (the original xls/xlsb bytes).
         self._two_pass_input: Path | None = None
@@ -109,11 +112,15 @@ class LibreOfficeRunner:
             # Recover type/state from the original xls/xlsb's own sheet records when they
             # align with the re-export by name and order (sheet_records).
             try:
-                from clippyshot.libreoffice.sheet_records import overlay_binary_records
+                from clippyshot.libreoffice.sheet_records import (
+                    overlay_binary_records_status,
+                )
 
-                overlaid = overlay_binary_records(self._two_pass_input, self.last_run_sheets)
+                overlaid, status = overlay_binary_records_status(
+                    self._two_pass_input, self.last_run_sheets)
             except Exception:  # noqa: BLE001 - best effort; keep the re-export inventory
-                overlaid = None
+                overlaid, status = None, "unreadable"
+            self.last_run_sheet_records_status = status
             if overlaid is not None:
                 self.last_run_sheets, self.last_run_sheets_source = overlaid
 
@@ -218,6 +225,7 @@ class LibreOfficeRunner:
         self.last_run_sheet_anomalies = []
         self.last_run_sheets_from_reexport = False
         self.last_run_sheets_source = ""
+        self.last_run_sheet_records_status = ""
         self._two_pass_output = None
         self._two_pass_input = None
         self.last_run_single_page_sheets = False

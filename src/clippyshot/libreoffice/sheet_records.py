@@ -36,11 +36,18 @@ MAX_BIFF_GLOBALS_BYTES = 8 << 20
 # olefile materialises a whole stream on open; decline a Workbook stream larger than this
 # rather than load it (the re-export inventory still stands).
 MAX_BIFF_STREAM_BYTES = 32 << 20
+# xlsb package parts read in-process (workbook.bin, the rels and [Content_Types].xml) are
+# KB-sized in real files; a bigger one is declined rather than parsed into a huge tree.
+MAX_XLSB_PART_BYTES = 4 << 20
 # Records walked in either format before giving up.
 MAX_RECORDS = 200_000
 
 _STATES = {0: "visible", 1: "hidden", 2: "veryHidden"}
-_BIFF_TYPES = {0: "worksheet", 1: "macro", 2: "chartsheet", 6: "vba_module"}
+# BoundSheet8.dt (0 worksheet, 1 macro, 2 chart, 6 module) is NOT what LibreOffice uses: it
+# types each sheet by the BOF that opens its substream at lbPlyPos. Droppers declare XLM
+# macro sheets as dt=0 worksheets; read the substream BOF instead.
+_BOF_TYPES = {0x0010: "worksheet", 0x0020: "chartsheet", 0x0040: "macro",
+              0x0006: "vba_module"}
 
 # BIFF8 record ids.
 _BOF = 0x0809
@@ -65,11 +72,31 @@ class _Bad(Exception):
     pass
 
 
+class _Declined(Exception):
+    """This reader will not vouch for the file's records; ``args[0]`` is the reason."""
+
+
+# Why the records were not used (sheets.input_records when inventory_source stays the
+# re-export). "not_binary_workbook" (ods/csv/...) is not reported.
+RECORD_STATUSES = frozenset({"encrypted", "too_large", "unreadable", "unaligned"})
+
+
 def read_binary_sheet_records(path: Path) -> tuple[str, list[dict]] | None:
     """``(inventory_source, [{name, state, type}, ...])`` in workbook order, or ``None``.
 
     ``type`` is ``worksheet`` / ``macro`` (XLM) / ``chartsheet`` / ``vba_module`` /
     ``dialog`` (xlsb); ``state`` is ``visible`` / ``hidden`` / ``veryHidden``. Never raises.
+    """
+    got, _ = read_binary_sheet_records_status(path)
+    return got
+
+
+def read_binary_sheet_records_status(
+    path: Path,
+) -> tuple[tuple[str, list[dict]] | None, str]:
+    """Like :func:`read_binary_sheet_records`, plus why there is no result.
+
+    Status: ``ok``, ``not_binary_workbook``, or one of :data:`RECORD_STATUSES`.
     """
     try:
         # Dispatch on the leading signature, never zipfile.is_zipfile(): that also accepts
@@ -79,14 +106,23 @@ def read_binary_sheet_records(path: Path) -> tuple[str, list[dict]] | None:
         with open(path, "rb") as fh:
             head = fh.read(8)
         if head == _OLE_MAGIC:
-            sheets = _read_xls(path)
-            return (XLS_SOURCE, sheets) if sheets is not None else None
+            return (XLS_SOURCE, _ok(_read_xls(path))), "ok"
         if head[:4] == b"PK\x03\x04":
             sheets = _read_xlsb(path)
-            return (XLSB_SOURCE, sheets) if sheets is not None else None
-        return None
+            if sheets is None:
+                return None, "not_binary_workbook"  # a zip without xl/workbook.bin
+            return (XLSB_SOURCE, sheets), "ok"
+        return None, "not_binary_workbook"
+    except _Declined as exc:
+        return None, str(exc.args[0])
     except Exception:  # noqa: BLE001 - best effort; the caller keeps the re-export inventory
-        return None
+        return None, "unreadable"
+
+
+def _ok(sheets: list[dict] | None) -> list[dict]:
+    if sheets is None:
+        raise _Declined("unreadable")
+    return sheets
 
 
 # ─── xls (BIFF8) ─────────────────────────────────────────────────────────────
@@ -96,28 +132,58 @@ def _read_xls(path: Path) -> list[dict] | None:
     import olefile
 
     if not olefile.isOleFile(str(path)):
-        return None
+        raise _Declined("unreadable")
     with olefile.OleFileIO(str(path)) as ole:
-        # "Book" is BIFF5 and older: different string encoding, not handled.
-        if not ole.exists("Workbook") or ole.get_size("Workbook") > MAX_BIFF_STREAM_BYTES:
-            return None
-        # LibreOffice imports "Book" instead unless Workbook's BIFF version is strictly
-        # higher; with both present, which one it rendered is not ours to guess.
-        if ole.exists("Book"):
-            return None
+        # The stream LibreOffice opens is looked up the CFB way (case-insensitive, first
+        # entry wins); olefile's lookup can pick a different, duplicate or look-alike entry
+        # (e.g. "WOR\u212aBOOK"). Only trust a directory with exactly one Workbook/Book
+        # look-alike, spelled exactly "Workbook". With "Book" also present, LibreOffice may
+        # import that instead (it prefers Workbook only on a strictly higher BIFF version).
+        lookalikes = [e.name for e in ole.direntries
+                      if e is not None and e.name.casefold() in ("workbook", "book")]
+        if lookalikes != ["Workbook"]:
+            raise _Declined("unreadable")
+        size = ole.get_size("Workbook")
+        if size > MAX_BIFF_STREAM_BYTES:
+            raise _Declined("too_large")
+        if size < ole.minisectorcutoff:
+            # A small stream lives in the ministream: olefile loads the whole MiniFAT and
+            # ministream (sizes from the header / root entry, attacker-chosen) to read it.
+            if (ole.root.size > MAX_BIFF_STREAM_BYTES
+                    or ole.num_mini_fat_sectors * ole.sectorsize > MAX_BIFF_STREAM_BYTES):
+                raise _Declined("too_large")
         with ole.openstream("Workbook") as stream:
-            data = stream.read(MAX_BIFF_GLOBALS_BYTES)
+            data = stream.read(MAX_BIFF_STREAM_BYTES)
     try:
-        return parse_biff8_globals(data)
+        sheets = parse_biff8_globals(data[:MAX_BIFF_GLOBALS_BYTES])
+        if sheets is None:
+            raise _Declined("unreadable")
+        return [{"name": sh["name"], "state": sh["state"],
+                 "type": _substream_type(data, sh["offset"])} for sh in sheets]
     except _Bad:
-        return None
+        raise _Declined("unreadable") from None
+
+
+def _substream_type(data: bytes, offset: int) -> str:
+    """The sheet type LibreOffice uses: the dt of the BIFF8 BOF opening the substream."""
+    if offset + 8 > len(data):
+        raise _Bad("substream offset outside the stream")
+    rtype, rlen = struct.unpack_from("<HH", data, offset)
+    if rtype != _BOF or not 4 <= rlen <= 16 or offset + 4 + rlen > len(data):
+        raise _Bad("no BOF at substream offset")
+    vers, dt = struct.unpack_from("<HH", data, offset + 4)
+    if vers != _BIFF8_VERSION or dt not in _BOF_TYPES:
+        raise _Bad("unknown substream type")
+    return _BOF_TYPES[dt]
 
 
 def parse_biff8_globals(data: bytes) -> list[dict] | None:
     """BoundSheet8 records of a BIFF8 workbook-globals substream, or ``None``.
 
-    Raises ``_Bad`` on a malformed stream; returns ``None`` for one this reader declines
-    (not BIFF8, encrypted, globals not terminated within the bytes given).
+    Each entry is ``{name, state, offset}`` (``offset`` = lbPlyPos, the stream offset of
+    the sheet's substream BOF). Raises ``_Bad`` on a malformed stream; returns ``None``
+    for one this reader declines (not BIFF8, globals not terminated within the bytes
+    given) and raises ``_Declined("encrypted")`` on FILEPASS.
     """
     pos = 0
     n = len(data)
@@ -142,7 +208,8 @@ def parse_biff8_globals(data: bytes) -> list[dict] | None:
             first = False
             continue
         if rtype == _FILEPASS:
-            return None  # names/flags of BoundSheet8 are encrypted after this
+            # BoundSheet8 names/flags are RC4-encrypted after this.
+            raise _Declined("encrypted")
         if rtype == _BOF:
             raise _Bad("nested BOF inside globals")
         if rtype == _EOF:
@@ -156,13 +223,14 @@ def parse_biff8_globals(data: bytes) -> list[dict] | None:
 
 
 def _boundsheet(body: bytes) -> dict:
-    # lbPlyPos (4) | hsState (1: low 2 bits; the rest reserved) | dt (1) | stName
+    # lbPlyPos (4) | hsState (1: low 2 bits; the rest reserved) | dt (1, ignored: LO types
+    # sheets by the substream BOF) | stName
     if len(body) < 8:
         raise _Bad("short BoundSheet8")
+    (offset,) = struct.unpack_from("<I", body, 0)
     hs = body[4] & 0x03
-    dt = body[5]
-    if hs not in _STATES or dt not in _BIFF_TYPES:
-        raise _Bad("unknown BoundSheet8 state/type")
+    if hs not in _STATES:
+        raise _Bad("unknown BoundSheet8 state")
     cch = body[6]
     high = body[7] & 0x01
     raw = body[8:]
@@ -171,7 +239,7 @@ def _boundsheet(body: bytes) -> dict:
         raise _Bad("bad BoundSheet8 name")
     # ShortXLUnicodeString: fHighByte=0 means each char is the low byte of a UTF-16 unit.
     name = raw[:need].decode("utf-16-le" if high else "latin-1", errors="replace")
-    return {"name": name, "state": _STATES[hs], "type": _BIFF_TYPES[dt]}
+    return {"name": name, "state": _STATES[hs], "offset": offset}
 
 
 # ─── xlsb ────────────────────────────────────────────────────────────────────
@@ -195,9 +263,9 @@ def _xlsb_package_points_at_workbook_bin(zf: zipfile.ZipFile) -> bool:
     )
 
     try:
-        rels = safe_fromstring(bounded_read(zf, "_rels/.rels")).findall(
+        rels = safe_fromstring(bounded_read(zf, "_rels/.rels", MAX_XLSB_PART_BYTES)).findall(
             f"{_PKG_REL_NS}Relationship")
-        ct = safe_fromstring(bounded_read(zf, "[Content_Types].xml"))
+        ct = safe_fromstring(bounded_read(zf, "[Content_Types].xml", MAX_XLSB_PART_BYTES))
     except Exception:  # noqa: BLE001
         return False
     if any(r.attrib.get("Type", "").endswith(_OFFICE_DOC_REL)
@@ -217,30 +285,33 @@ def _xlsb_package_points_at_workbook_bin(zf: zipfile.ZipFile) -> bool:
 
 
 def _read_xlsb(path: Path) -> list[dict] | None:
+    """The xlsb sheet records; ``None`` when the zip has no workbook.bin at all (not an
+    xlsb); raises ``_Declined`` for an xlsb this reader will not vouch for."""
     # Late import: sheet_prep imports this module.
     from clippyshot.libreoffice._safezip import ExtractionLimitExceeded, bounded_read
     from clippyshot.libreoffice.sheet_prep import _sheet_types_by_rid
 
     with zipfile.ZipFile(path) as zf:
         names = zf.namelist()
+        twins = sum(1 for x in names if x.lower() == "xl/workbook.bin")
+        if twins == 0:
+            return None
         # One unambiguous workbook part; a case-variant twin could be the one LO reads.
-        if sum(1 for x in names if x.lower() == "xl/workbook.bin") != 1:
-            return None
-        if not _xlsb_package_points_at_workbook_bin(zf):
-            return None
+        if twins != 1 or not _xlsb_package_points_at_workbook_bin(zf):
+            raise _Declined("unreadable")
         try:
-            data = bounded_read(zf, "xl/workbook.bin")
-        except (KeyError, ExtractionLimitExceeded):
-            return None
-        rel_types = _sheet_types_by_rid(zf, "xl/_rels/workbook.bin.rels")
+            data = bounded_read(zf, "xl/workbook.bin", MAX_XLSB_PART_BYTES)
+        except ExtractionLimitExceeded:
+            raise _Declined("too_large") from None
+        rel_types = _sheet_types_by_rid(zf, "xl/_rels/workbook.bin.rels", MAX_XLSB_PART_BYTES)
     if rel_types is None:
-        return None
+        raise _Declined("unreadable")
     try:
         records = parse_xlsb_bundle_sheets(data)
     except _Bad:
-        return None
+        raise _Declined("unreadable") from None
     if records is None:
-        return None
+        raise _Declined("unreadable")
     out: list[dict] = []
     for name, state, rid in records:
         if rid is None:
@@ -248,7 +319,7 @@ def _read_xlsb(path: Path) -> list[dict] | None:
             continue
         kind = rel_types.get(rid)
         if kind is None or kind == "ambiguous":
-            return None
+            raise _Declined("unreadable")
         out.append({"name": name, "state": state, "type": kind})
     return out
 
@@ -348,22 +419,31 @@ def parse_xlsb_bundle_sheets(data: bytes) -> list[tuple[str, str, str | None]] |
 
 
 def overlay_binary_records(path: Path, sheets: list[dict]) -> tuple[list[dict], str] | None:
+    """See :func:`overlay_binary_records_status`; ``None`` when not overlaid."""
+    got, _ = overlay_binary_records_status(path, sheets)
+    return got
+
+
+def overlay_binary_records_status(
+    path: Path, sheets: list[dict],
+) -> tuple[tuple[list[dict], str] | None, str]:
     """Re-export inventory ``sheets`` with type/state taken from ``path``'s own records.
 
     Only when the two lists align exactly: the original's sheet records must carry the
     same names, in the same order, as the re-export (LibreOffice creates a tab for every
     BoundSheet8, hiding an xls VBA module sheet rather than dropping it, so module sheets
-    stay in the alignment and are reported as ``vba_module``). Anything else returns
+    stay in the alignment and are reported as ``vba_module``). Otherwise the result is
     ``None`` and the caller keeps the re-export inventory and its
-    ``libreoffice_xlsx_reexport`` source.
+    ``libreoffice_xlsx_reexport`` source. The status says why (``ok``,
+    ``not_binary_workbook`` or one of :data:`RECORD_STATUSES`).
     """
     if not sheets:
-        return None
-    got = read_binary_sheet_records(path)
+        return None, "unaligned"
+    got, status = read_binary_sheet_records_status(path)
     if got is None:
-        return None
+        return None, status
     source, records = got
     if [r["name"] for r in records] != [s.get("name") for s in sheets]:
-        return None
+        return None, "unaligned"
     return ([{**s, "state": r["state"], "type": r["type"]}
-             for s, r in zip(sheets, records)], source)
+             for s, r in zip(sheets, records)], source), "ok"
