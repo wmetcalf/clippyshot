@@ -177,3 +177,9 @@ def test_ui_merge_keeps_repeats_but_never_doubles():
       ]));
     """)
     assert got == [2, 2, ["altchunk_present", "x"], 0, True]
+
+
+def test_job_list_qr_badge_is_added_once_per_row():
+    code = _outside_helpers()
+    assert "!cell.querySelector('.badge-qr')" in code
+    assert "typedQrCounts(meta)).some(n => n > 0)" in code

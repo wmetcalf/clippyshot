@@ -919,7 +919,8 @@ async function refreshJobs() {
               || Object.values(typedQrCounts(meta)).some(n => n > 0);
             if (hasQr) {
               const cell = document.querySelector(`tr[data-job-id="${job.job_id}"] .badges`);
-              if (cell) cell.insertAdjacentHTML('beforeend',
+              // Refreshes overlap (3 s timer vs a slow metadata fetch): one badge per row.
+              if (cell && !cell.querySelector('.badge-qr')) cell.insertAdjacentHTML('beforeend',
                 '<span class="badge badge-qr">QR</span>');
             }
           })
