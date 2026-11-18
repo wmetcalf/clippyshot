@@ -119,13 +119,18 @@ def _looks_like_safe_xml(
 ) -> bool:
     """Sanity-check that a file labeled 'xml' is not a billion-laughs bomb.
 
-    Streaming scan: count <!ENTITY occurrences (in UTF-8 and the UTF-16/32
-    byte forms); abort as soon as the limit is exceeded. This is a cheap
-    heuristic sufficient to block the classic entity expansion attack without
-    pulling in a real XML parser (expat already has a CVE track record on this).
+    Streaming scan: count <!ENTITY occurrences per encoding (UTF-8 and the
+    UTF-16/32 byte forms); abort as soon as any one count exceeds the limit.
+    This is a cheap heuristic sufficient to block the classic entity expansion
+    attack without pulling in a real XML parser (expat already has a CVE track
+    record on this).
+
+    Counts are per encoding, never summed: a document is decoded in one
+    encoding, and the LE and BE markers overlap on the SAME wide declaration one
+    byte apart (the neighbouring NULs complete both), so a sum double-counted.
     """
     try:
-        ent_count = 0
+        counts = [0] * len(_ENTITY_MARKERS)
         # Per-marker carry of the last len(marker)-1 bytes: long enough to catch
         # a marker straddling a read boundary, too short to re-count one.
         tails = [b""] * len(_ENTITY_MARKERS)
@@ -133,9 +138,9 @@ def _looks_like_safe_xml(
             for chunk in iter(lambda: f.read(8192), b""):
                 for i, marker in enumerate(_ENTITY_MARKERS):
                     buf = tails[i] + chunk
-                    ent_count += buf.count(marker)
+                    counts[i] += buf.count(marker)
                     tails[i] = buf[-(len(marker) - 1):]
-                if ent_count > max_entity_count:
+                if max(counts) > max_entity_count:
                     return False
         return True
     except OSError:

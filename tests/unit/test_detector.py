@@ -359,3 +359,17 @@ def test_looks_like_safe_xml_wide_split_across_chunks(tmp_path: Path, codec):
     bomb = tmp_path / "split.xml"
     bomb.write_bytes(body)
     assert _looks_like_safe_xml(bomb) is False
+
+
+@pytest.mark.parametrize("codec", ["utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"])
+def test_looks_like_safe_xml_counts_each_wide_declaration_once(tmp_path: Path, codec):
+    # The LE and BE markers overlap on the same declaration one byte apart (the
+    # neighbouring NULs complete both), so summing them double-counted: a benign
+    # document with 33..64 declarations was refused (codex on #65).
+    from clippyshot.detector import _looks_like_safe_xml
+
+    entities = "".join(f'<!ENTITY e{i} "x">' for i in range(64))
+    text = f'<?xml version="1.0"?><!DOCTYPE root [{entities}]><root/>'
+    ok = tmp_path / f"ok-{codec}.xml"
+    ok.write_bytes(text.encode(codec))
+    assert _looks_like_safe_xml(ok) is True
