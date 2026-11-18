@@ -121,7 +121,8 @@ def run_selftest() -> int:
         forced = os.environ.get("CLIPPYSHOT_SANDBOX", "").strip().lower()
         bwrap_possible = forced == "bwrap" or (forced == "" and shutil.which("bwrap") is not None)
         if isinstance(e, InnerSandboxLayerUnavailable):
-            # Raised before any backend is tried: relaxing the bwrap hardening cannot fix it.
+            # A nono-layer failure (static, or its smoketest under the chosen base):
+            # relaxing the bwrap hardening cannot fix it.
             fields["inner_layer"] = "nono"
         elif (isinstance(e, AppArmorAttachUnavailable)
                 and e.probe.cause == "stock_profile_conflict") or (
