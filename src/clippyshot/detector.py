@@ -107,7 +107,8 @@ def _looks_like_ooxml(
 
 # ``<!ENTITY`` in every encoding expat (and LibreOffice's parser) will decode
 # from BOM / byte-pattern autodetection. Counting only the ASCII form let a
-# UTF-16/UTF-32 bomb (bytes interleaved with NULs) through the gate.
+# UTF-16/UTF-32 file with any number of declarations (bytes interleaved with
+# NULs) through the count.
 _ENTITY_MARKERS: tuple[bytes, ...] = tuple(
     "<!ENTITY".encode(codec)
     for codec in ("utf-8", "utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be")
@@ -121,9 +122,11 @@ def _looks_like_safe_xml(
 
     Streaming scan: count <!ENTITY occurrences per encoding (UTF-8 and the
     UTF-16/32 byte forms); abort as soon as any one count exceeds the limit.
-    This is a cheap heuristic sufficient to block the classic entity expansion
-    attack without pulling in a real XML parser (expat already has a CVE track
-    record on this).
+    A cheap heuristic that bounds the NUMBER of declarations without pulling in
+    a real XML parser (expat already has a CVE track record on this). It does
+    not stop a compact expansion bomb under the limit (the classic lol9 needs
+    only 10 declarations): that file still reaches LibreOffice, which renders
+    inside the sandbox with its own entity-expansion limits.
 
     Counts are per encoding, never summed: a document is decoded in one
     encoding, and the LE and BE markers overlap on the SAME wide declaration one

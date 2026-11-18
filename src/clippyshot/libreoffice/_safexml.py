@@ -60,7 +60,9 @@ def _reject_dtd(data: bytes) -> None:
         p.Parse(data, True)
     except _DtdRefused:
         raise ET.ParseError(_DTD_REFUSED) from None
-    except expat.ExpatError as exc:
+    except (expat.ExpatError, ValueError, LookupError) as exc:
+        # ValueError: expat's unknown-encoding hook refuses a declared multi-byte codec
+        # ("multi-byte encodings are not supported"); callers only catch ParseError.
         raise ET.ParseError(str(exc)) from None
 
 

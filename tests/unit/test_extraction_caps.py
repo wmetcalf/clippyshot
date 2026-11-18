@@ -254,3 +254,32 @@ def test_safe_fromstring_rejects_utf16_entity_bomb():
     ).encode("utf-16")
     with pytest.raises(ET.ParseError):
         safe_fromstring(bomb)
+
+
+@pytest.mark.parametrize("codec,declared", [
+    ("utf-16-le", "utf_16_le"),  # expat refuses a DECLARED multi-byte codec it can't map
+    ("utf-7", "utf-7"),
+])
+def test_safe_fromstring_raises_only_parse_error_on_unsupported_encoding(codec, declared):
+    # Callers catch ET.ParseError; expat's "multi-byte encodings are not supported"
+    # surfaced as ValueError and escaped them (altchunk inspection silently aborted).
+    payload = f'<?xml version="1.0" encoding="{declared}"?><a/>'.encode(codec)
+    with pytest.raises(ET.ParseError):
+        safe_fromstring(payload)
+
+
+@pytest.mark.parametrize("enc", ["Shift_JIS", "bogus", "rot13"])
+def test_safe_fromstring_unknown_or_multibyte_declared_encoding_is_parse_error(enc):
+    # ValueError (multi-byte codec) / LookupError (unknown or non-text codec) used to
+    # escape callers that only catch ParseError.
+    with pytest.raises(ET.ParseError):
+        safe_fromstring(f'<?xml version="1.0" encoding="{enc}"?><a/>'.encode())
+
+
+@pytest.mark.parametrize("codec", ["utf-16", "utf-16-le", "utf-16-be"])
+def test_safe_fromstring_rejects_declaration_free_wide_doctype(codec):
+    # No <!ENTITY at all: only the DOCTYPE handler can refuse this (an external
+    # subset is a fetch target for a parser that resolves it).
+    payload = '<!DOCTYPE a SYSTEM "http://127.0.0.1:1/x.dtd"><a/>'.encode(codec)
+    with pytest.raises(ET.ParseError):
+        safe_fromstring(payload)
