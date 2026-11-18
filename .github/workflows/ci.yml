@@ -50,16 +50,20 @@ jobs:
       # The runner image ships apparmor-utils, so BwrapSandbox finds `aa-exec` and attaches
       # the clippyshot-soffice profile to every sandboxed child -- by design it fails closed
       # ("aa-exec: ERROR: profile 'clippyshot-soffice' does not exist") rather than run
-      # unconfined. Load the repo's profiles exactly as deploy/apparmor/README.md tells an
-      # operator to, so CI exercises the confined path production runs.
+      # unconfined. Load that profile as deploy/apparmor/README.md tells an operator to, so CI
+      # exercises the confined path production runs. clippyshot-bwrap is NOT loaded: the
+      # runner already lets bwrap create user namespaces, and replacing its bwrap attachment
+      # takes that away (every bwrap test then skips). The final probe fails the step if
+      # sandboxed bwrap + aa-exec cannot run, so the bwrap tests can never skip silently here.
       - name: Load AppArmor profiles
         run: |
-          sudo cp deploy/apparmor/clippyshot-bwrap deploy/apparmor/clippyshot-nsjail \
-            deploy/apparmor/clippyshot-soffice deploy/apparmor/clippyshot-runtime /etc/apparmor.d/
-          for p in clippyshot-bwrap clippyshot-nsjail clippyshot-soffice clippyshot-runtime; do
+          sudo cp deploy/apparmor/clippyshot-soffice deploy/apparmor/clippyshot-runtime /etc/apparmor.d/
+          for p in clippyshot-soffice clippyshot-runtime; do
             sudo apparmor_parser -r -W "/etc/apparmor.d/$p"
           done
           sudo aa-status | grep clippyshot
+          bwrap --unshare-user --die-with-parent --ro-bind / / -- \
+            aa-exec -p clippyshot-soffice -- /bin/true
       - name: Install
         run: python -m pip install -e ".[dev]"
       - name: Pytest (unit + cli + http)
