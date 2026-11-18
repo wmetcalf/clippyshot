@@ -249,4 +249,9 @@ def verify_attach() -> tuple[bool, list[str]]:
         probe = host_apparmor.probe_aa_exec(bwrap, aa_exec, SOFFICE_PROFILE, stock_state=stock)
         lines.append("aa-exec attach probe: OK" if probe.ok else probe.message())
         ok = ok and probe.ok
+    else:
+        missing = " and ".join(n for n, p in (("bwrap", bwrap), ("aa-exec", aa_exec)) if not p)
+        lines.append(f"aa-exec attach probe: not run ({missing} not installed; install "
+                     "bubblewrap/apparmor)")
+        ok = False
     return ok, lines

@@ -176,6 +176,12 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
     if disable_stock:
         print(f"\n{ha.STOCK_BWRAP_PROFILE}: not in conflict; nothing to disable.")
     if not rep.actions:
+        probe = rep.aa_probe
+        if probe is not None and not probe.ok:
+            # Nothing this command can load fixes it (e.g. docker-default confinement).
+            print(f"\nNo profile to load, but bwrap cannot attach {ss.SOFFICE_PROFILE}:\n"
+                  f"  {probe.message()}", file=sys.stderr)
+            return 1
         print("\nNothing to do — the namespace backends are usable (or unaffected).")
         return 0
     if not profile_dir.is_dir():

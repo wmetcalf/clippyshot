@@ -252,3 +252,21 @@ def test_fresh_host_schedules_the_soffice_profile_on_the_first_pass(monkeypatch)
         ABSENT, False, "failed", "bwrap: setting up uid map: Permission denied"))
     names = [a.profile_name for a in ss.diagnose().actions]
     assert "clippyshot-bwrap" in names and "clippyshot-soffice" in names
+
+
+def test_failed_attach_probe_with_nothing_to_load_is_not_success(monkeypatch, capsys):
+    monkeypatch.setattr(ss, "_restrict_active", lambda: True)
+    monkeypatch.setattr(ss.shutil, "which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr(ss, "_userns_ok", lambda b, p: True)
+    monkeypatch.setattr(ha, "stock_bwrap_profile_state", lambda: ABSENT)
+    monkeypatch.setattr(ha, "probe_aa_exec", lambda *a, stock_state=None, **k: _probe(
+        ABSENT, False, "change_profile_denied", "insufficient permissions to change"))
+    assert cli.main(["setup-sandbox"]) == 1
+    assert "cannot attach" in capsys.readouterr().err
+
+
+def test_verification_without_aa_exec_is_not_success(monkeypatch):
+    monkeypatch.setattr(ha, "stock_bwrap_profile_state", lambda: FIXED)
+    monkeypatch.setattr(ss.shutil, "which", lambda b: None if b == "aa-exec" else f"/usr/bin/{b}")
+    ok, lines = ss.verify_attach()
+    assert not ok and any("aa-exec" in line for line in lines)
