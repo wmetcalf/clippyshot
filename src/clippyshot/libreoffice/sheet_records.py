@@ -50,8 +50,12 @@ _FILEPASS = 0x002F
 _BIFF8_VERSION = 0x0600
 
 # XLSB record ids (MS-XLSB 2.3).
+_BRT_BEGIN_BOOK = 131
+_BRT_BEGIN_BUNDLE_SHS = 143
 _BRT_BUNDLE_SH = 156
 _BRT_END_BUNDLE_SHS = 144
+
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 XLS_SOURCE = "input_xls_boundsheet_records"
 XLSB_SOURCE = "input_xlsb_workbook_records"
@@ -64,15 +68,23 @@ class _Bad(Exception):
 def read_binary_sheet_records(path: Path) -> tuple[str, list[dict]] | None:
     """``(inventory_source, [{name, state, type}, ...])`` in workbook order, or ``None``.
 
-    ``type`` is ``worksheet`` / ``macro`` (XLM) / ``chartsheet`` / ``vba_module`` (xls) /
+    ``type`` is ``worksheet`` / ``macro`` (XLM) / ``chartsheet`` / ``vba_module`` /
     ``dialog`` (xlsb); ``state`` is ``visible`` / ``hidden`` / ``veryHidden``. Never raises.
     """
     try:
-        if zipfile.is_zipfile(path):
+        # Dispatch on the leading signature, never zipfile.is_zipfile(): that also accepts
+        # a zip END record anywhere in the last 64 KiB, which Excel 2007+ .xls files carry
+        # inside their Workbook stream (THEME / MSODRAWING), and which an attacker can
+        # append to an OLE workbook LibreOffice still imports as xls.
+        with open(path, "rb") as fh:
+            head = fh.read(8)
+        if head == _OLE_MAGIC:
+            sheets = _read_xls(path)
+            return (XLS_SOURCE, sheets) if sheets is not None else None
+        if head[:4] == b"PK\x03\x04":
             sheets = _read_xlsb(path)
             return (XLSB_SOURCE, sheets) if sheets is not None else None
-        sheets = _read_xls(path)
-        return (XLS_SOURCE, sheets) if sheets is not None else None
+        return None
     except Exception:  # noqa: BLE001 - best effort; the caller keeps the re-export inventory
         return None
 
@@ -88,6 +100,10 @@ def _read_xls(path: Path) -> list[dict] | None:
     with olefile.OleFileIO(str(path)) as ole:
         # "Book" is BIFF5 and older: different string encoding, not handled.
         if not ole.exists("Workbook") or ole.get_size("Workbook") > MAX_BIFF_STREAM_BYTES:
+            return None
+        # LibreOffice imports "Book" instead unless Workbook's BIFF version is strictly
+        # higher; with both present, which one it rendered is not ours to guess.
+        if ole.exists("Book"):
             return None
         with ole.openstream("Workbook") as stream:
             data = stream.read(MAX_BIFF_GLOBALS_BYTES)
@@ -117,7 +133,8 @@ def parse_biff8_globals(data: bytes) -> list[dict] | None:
         pos += 4 + rlen
         if first:
             # Must open with a BIFF8 workbook-globals BOF (vers 0x0600, dt 0x0005).
-            if rtype != _BOF or rlen < 4:
+            # LibreOffice's DetectBiffVersion only recognises a BOF of 4..16 bytes.
+            if rtype != _BOF or not 4 <= rlen <= 16:
                 return None
             vers, dt = struct.unpack_from("<HH", body, 0)
             if vers != _BIFF8_VERSION or dt != 0x0005:
@@ -226,6 +243,9 @@ def _read_xlsb(path: Path) -> list[dict] | None:
         return None
     out: list[dict] = []
     for name, state, rid in records:
+        if rid is None:
+            out.append({"name": name, "state": state, "type": "vba_module"})
+            continue
         kind = rel_types.get(rid)
         if kind is None or kind == "ambiguous":
             return None
@@ -259,14 +279,21 @@ def _wide_string(body: bytes, pos: int, *, nullable: bool) -> tuple[str | None, 
     return body[pos:end].decode("utf-16-le", errors="replace"), end
 
 
-def parse_xlsb_bundle_sheets(data: bytes) -> list[tuple[str, str, str]] | None:
+def parse_xlsb_bundle_sheets(data: bytes) -> list[tuple[str, str, str | None]] | None:
     """``(name, state, relationship id)`` per BrtBundleSh in ``xl/workbook.bin``.
 
     Record header: a 1-2 byte type and a 1-4 byte size, each 7 bits per byte (MS-XLSB
-    2.1.4). Returns ``None`` when no sheet list was found.
+    2.1.4). LibreOffice's BIFF12 import is context-driven (BrtBundleSh only counts inside
+    BrtBeginBook > BrtBeginBundleShs), so this reader only trusts the plain shape: the
+    stream opens with BrtBeginBook, holds exactly ONE BrtBeginBundleShs..BrtEndBundleShs
+    block, and no BrtBundleSh outside it. Anything else (a decoy block before the book,
+    a second block) returns ``None``; so does a stream with no sheets.
     """
     pos = 0
-    out: list[tuple[str, str, str]] = []
+    out: list[tuple[str, str, str | None]] = []
+    first = True
+    blocks = 0
+    inside = False
     for _ in range(MAX_RECORDS):
         if pos >= len(data):
             break
@@ -276,10 +303,26 @@ def parse_xlsb_bundle_sheets(data: bytes) -> list[tuple[str, str, str]] | None:
         if len(body) != size:
             raise _Bad("truncated record")
         pos += size
+        if first:
+            if rtype != _BRT_BEGIN_BOOK:
+                return None
+            first = False
+            continue
+        if rtype == _BRT_BEGIN_BUNDLE_SHS:
+            if inside or blocks:
+                return None
+            inside = True
+            blocks += 1
+            continue
         if rtype == _BRT_END_BUNDLE_SHS:
-            break
+            if not inside:
+                return None
+            inside = False
+            continue
         if rtype != _BRT_BUNDLE_SH:
             continue
+        if not inside:
+            return None
         if len(out) >= MAX_RECORD_SHEETS:
             return None
         if len(body) < 8:
@@ -289,10 +332,14 @@ def parse_xlsb_bundle_sheets(data: bytes) -> list[tuple[str, str, str]] | None:
             raise _Bad("unknown BrtBundleSh state")
         rid, p = _wide_string(body, 8, nullable=True)
         name, _ = _wide_string(body, p, nullable=False)
-        if not rid or not name:
-            raise _Bad("BrtBundleSh without relationship id or name")
+        if not name:
+            raise _Bad("BrtBundleSh without a name")
+        # A NULL strRelID is valid for a VBA module sheet (MS-XLSB BrtBundleSh): report
+        # it as such and let the name/order alignment decide.
         out.append((name, _STATES[hs], rid))
     else:
+        return None  # record cap hit before the end: the rest could hold another block
+    if inside:
         return None
     return out or None
 
@@ -303,10 +350,12 @@ def parse_xlsb_bundle_sheets(data: bytes) -> list[tuple[str, str, str]] | None:
 def overlay_binary_records(path: Path, sheets: list[dict]) -> tuple[list[dict], str] | None:
     """Re-export inventory ``sheets`` with type/state taken from ``path``'s own records.
 
-    Only when the two lists align exactly: the original's sheets LibreOffice imports (all
-    but xls VBA module sheets, which Calc never creates) must carry the same names, in the
-    same order, as the re-export. Anything else returns ``None`` and the caller keeps the
-    re-export inventory and its ``libreoffice_xlsx_reexport`` source.
+    Only when the two lists align exactly: the original's sheet records must carry the
+    same names, in the same order, as the re-export (LibreOffice creates a tab for every
+    BoundSheet8, hiding an xls VBA module sheet rather than dropping it, so module sheets
+    stay in the alignment and are reported as ``vba_module``). Anything else returns
+    ``None`` and the caller keeps the re-export inventory and its
+    ``libreoffice_xlsx_reexport`` source.
     """
     if not sheets:
         return None
@@ -314,8 +363,7 @@ def overlay_binary_records(path: Path, sheets: list[dict]) -> tuple[list[dict], 
     if got is None:
         return None
     source, records = got
-    imported = [r for r in records if r["type"] != "vba_module"]
-    if [r["name"] for r in imported] != [s.get("name") for s in sheets]:
+    if [r["name"] for r in records] != [s.get("name") for s in sheets]:
         return None
     return ([{**s, "state": r["state"], "type": r["type"]}
-             for s, r in zip(sheets, imported)], source)
+             for s, r in zip(sheets, records)], source)

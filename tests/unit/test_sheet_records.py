@@ -153,7 +153,7 @@ def _varint(v: int) -> bytes:
             return bytes(out)
 
 
-def _brt(rtype: int, body: bytes) -> bytes:
+def _brt(rtype: int, body: bytes = b"") -> bytes:
     return _varint(rtype) + _varint(len(body)) + body
 
 
@@ -199,7 +199,7 @@ def _xlsb(tmp_path: Path, records: bytes, rels: dict[str, str], name="book.xlsb"
 def _book(*sheets: bytes) -> bytes:
     # BrtBeginBook(131), BrtFileVersion(128, some payload), BrtBeginBundleShs(143) ...
     return (_brt(131, b"") + _brt(128, b"\x00" * 20) + _brt(143, b"") + b"".join(sheets)
-            + _brt(144, b"") + _bundle_sh("After", 2, "rId9") + _brt(132, b""))
+            + _brt(144, b"") + _brt(132, b""))
 
 
 def test_xlsb_bundle_sheets_with_types_from_rels(tmp_path):
@@ -217,13 +217,13 @@ def test_xlsb_bundle_sheets_with_types_from_rels(tmp_path):
 
 def test_xlsb_two_byte_record_types_are_decoded():
     # A 2-byte type (>127) before the sheets must not desync the walk.
-    data = _brt(2000, b"\x01" * 300) + _bundle_sh("S", 1, "rId1") + _brt(144, b"")
+    data = (_brt(131, b"") + _brt(2000, b"\x01" * 300) + _brt(143, b"")
+            + _bundle_sh("S", 1, "rId1") + _brt(144, b""))
     assert sr.parse_xlsb_bundle_sheets(data) == [("S", "hidden", "rId1")]
 
 
 @pytest.mark.parametrize("records,rels", [
     (_book(_bundle_sh("S", 0, "rId7")), {"rId1": _REL + "worksheet"}),   # unresolved rid
-    (_book(_bundle_sh("S", 0, None)), {"rId1": _REL + "worksheet"}),     # null rid
     (_book(_bundle_sh("S", 5, "rId1")), {"rId1": _REL + "worksheet"}),   # bad state
     (_book(), {"rId1": _REL + "worksheet"}),                             # no sheets
     (_brt(156, b"\0" * 4), {"rId1": _REL + "worksheet"}),                # short record
@@ -269,14 +269,18 @@ def test_overlay_takes_type_and_state_from_the_records(tmp_path):
                        "active": True}]
 
 
-def test_overlay_skips_vba_module_sheets_calc_never_creates(tmp_path, monkeypatch):
+def test_overlay_keeps_vba_module_sheets_libreoffice_hides(tmp_path, monkeypatch):
+    # LibreOffice creates a (hidden) tab for a VBA module BoundSheet8, so its re-export
+    # lists it: module sheets stay in the alignment.
     recs = [{"name": "A", "state": "visible", "type": "worksheet"},
             {"name": "Module1", "state": "visible", "type": "vba_module"},
             {"name": "M", "state": "veryHidden", "type": "macro"}]
     monkeypatch.setattr(sr, "read_binary_sheet_records", lambda p: (sr.XLS_SOURCE, recs))
-    sheets, _ = sr.overlay_binary_records(tmp_path / "x", _reexport("A", "M"))
+    sheets, _ = sr.overlay_binary_records(tmp_path / "x", _reexport("A", "Module1", "M"))
     assert [(s["name"], s["state"], s["type"]) for s in sheets] == [
-        ("A", "visible", "worksheet"), ("M", "veryHidden", "macro")]
+        ("A", "visible", "worksheet"), ("Module1", "visible", "vba_module"),
+        ("M", "veryHidden", "macro")]
+    assert sr.overlay_binary_records(tmp_path / "x", _reexport("A", "M")) is None
 
 
 @pytest.mark.parametrize("names", [("A",), ("A", "N"), ("M", "A"), ("A", "M", "X")])
@@ -384,3 +388,76 @@ def test_xlsb_absolute_package_target_is_accepted(tmp_path):
               {"rId1": _REL_MS + "xlMacrosheet"}, target="/xl/workbook.bin")
     assert sr.read_binary_sheet_records(p) == (
         sr.XLSB_SOURCE, [{"name": "S", "state": "veryHidden", "type": "macro"}])
+
+
+# ─── records only from what LibreOffice actually imports ────────────────────
+
+def test_xls_with_an_embedded_or_appended_zip_is_still_read_as_xls(tmp_path):
+    """Excel 2007+ .xls carry zips (THEME / MSODRAWING) in the Workbook stream, which
+    zipfile.is_zipfile() accepts; an attacker can also append a decoy xlsb package."""
+    import io
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        _package(z)
+        z.writestr("xl/workbook.bin", _book(_bundle_sh("fixture", 0, "rId1")))
+        z.writestr("xl/_rels/workbook.bin.rels",
+                   f'<Relationships xmlns="{_PKG_RELS}"><Relationship Id="rId1" '
+                   f'Type="{_REL}worksheet" Target="x"/></Relationships>')
+    src = _patched_fixture(tmp_path, hs=2, dt=1)
+    poly = tmp_path / "poly.xls"
+    poly.write_bytes(src.read_bytes() + buf.getvalue())
+    assert zipfile.is_zipfile(poly)
+    assert sr.read_binary_sheet_records(poly) == (
+        sr.XLS_SOURCE, [{"name": "fixture", "state": "veryHidden", "type": "macro"}])
+
+
+def test_xlsb_decoy_sheet_block_outside_the_book_is_declined():
+    real = (_brt(131) + _brt(143) + _bundle_sh("Alpha", 0, "rId1")
+            + _bundle_sh("Beta", 2, "rId2") + _brt(144) + _brt(132))
+    decoy = _brt(143) + _bundle_sh("Alpha", 0, "rId1") + _bundle_sh("Beta", 0, "rId1") + _brt(144)
+    assert sr.parse_xlsb_bundle_sheets(real) == [("Alpha", "visible", "rId1"),
+                                                 ("Beta", "veryHidden", "rId2")]
+    assert sr.parse_xlsb_bundle_sheets(decoy + real) is None
+    second = real[:-len(_brt(132))] + decoy + _brt(132)
+    assert sr.parse_xlsb_bundle_sheets(second) is None
+    stray = real[:-len(_brt(132))] + _bundle_sh("Gamma", 0, "rId3") + _brt(132)
+    assert sr.parse_xlsb_bundle_sheets(stray) is None
+
+
+def test_xls_with_both_book_and_workbook_streams_is_declined(tmp_path):
+    p = tmp_path / "two.xls"
+    shutil.copy(FIXTURE_XLS, p)
+    with olefile.OleFileIO(str(p)) as ole:
+        names = ["/".join(e) for e in ole.listdir()]
+    assert "Book" not in names
+    # Rename a same-length stream entry to "Book" in the directory (both are 4 chars:
+    # "\x01Ole" -> "Book" keeps the CFB valid).
+    raw = bytearray(p.read_bytes())
+    old = "\x01Ole".encode("utf-16-le")
+    i = raw.find(old)
+    assert i > 0
+    raw[i:i + len(old)] = "Book".encode("utf-16-le")
+    p.write_bytes(bytes(raw))
+    with olefile.OleFileIO(str(p)) as ole:
+        assert ole.exists("Book") and ole.exists("Workbook")
+    assert sr.read_binary_sheet_records(p) is None
+
+
+def test_biff8_bof_longer_than_libreoffice_accepts_is_declined():
+    data = (_rec(0x0809, struct.pack("<HHHHII", 0x0600, 0x0005, 0, 0, 0, 0) + b"\0" * 4)
+            + _boundsheet("A", 0, 0) + _rec(0x000A, b""))
+    assert sr.parse_biff8_globals(data) is None
+
+
+def test_xlsb_null_relationship_id_is_a_vba_module_sheet(tmp_path):
+    p = _xlsb(tmp_path, _book(_bundle_sh("M", 2, "rId1"), _bundle_sh("Module1", 2, None)),
+              {"rId1": _REL_MS + "xlMacrosheet"})
+    assert sr.read_binary_sheet_records(p) == (sr.XLSB_SOURCE, [
+        {"name": "M", "state": "veryHidden", "type": "macro"},
+        {"name": "Module1", "state": "veryHidden", "type": "vba_module"}])
+
+
+def test_xlsb_truncated_inside_the_sheet_block_is_declined():
+    data = _brt(131) + _brt(143) + _bundle_sh("A", 0, "rId1")  # no BrtEndBundleShs
+    assert sr.parse_xlsb_bundle_sheets(data) is None
