@@ -1,0 +1,130 @@
+# ClippyShot blastbox engine contract: what ClippyShotEngine.detonate() emits today.
+# Checked by tests/integration/test_blastbox_roundtrip.py and tests/unit/test_engine_contract.py.
+# Validate: python -m blastbox.contract.engine_contract validate blastbox-engine.toml
+schema = "blastbox-engine-contract/1"
+
+[engine]
+name = "clippyshot"
+formats = ["*"]
+network = ["none"]
+# clippyshot.limits.Limits.max_input_bytes default (CLIPPYSHOT_MAX_INPUT). Oversize -> status rejected.
+max_input_bytes = 104857600
+statuses = ["ok", "rejected", "engine_error"]
+
+# Families are disjoint: page paths are page-NNN.png (rasterizer/base.py pads to 3 digits,
+# so page 1000 at the max_pages ceiling is page-1000.png); derivatives add a suffix.
+[[artifacts]]
+id = "p*-trimmed"
+path = "page-*-trimmed.png"
+kind = "image"
+max_count = 1000
+role = "page_render_trimmed"
+description = "Bottom-trimmed copy of page N (trimmer.trim_bottom_solid). Only when trimming removed something; never for a blank page."
+
+[[artifacts]]
+id = "p*-focused"
+path = "page-*-focused.png"
+kind = "image"
+max_count = 1000
+role = "page_render_focused"
+description = "Content-focused crop of page N, spreadsheet inputs only (trimmer.focus_content_solid_bg), when a solid background was found."
+
+[[artifacts]]
+id = "p[1-9]*"
+path = "page-[0-9][0-9][0-9].png"
+kind = "image"
+max_count = 999
+role = "page_render"
+description = "Rendered page N (id pN, 1-based). One per non-blank page, at most Limits.max_pages (default 50, ceiling 1000). Zero on an all-blank document."
+
+[[artifacts]]
+id = "p1000"
+path = "page-1000.png"
+kind = "image"
+role = "page_render"
+description = "Page 1000, only reachable at the CLIPPYSHOT_MAX_PAGES=1000 ceiling."
+
+[[artifacts]]
+id = "document-pdf"
+path = "document.pdf"
+kind = "pdf"
+role = "intermediate_pdf"
+description = "The LibreOffice PDF export the pages were rasterized from. Declared when the copy succeeded (fail-open copy, so not guaranteed)."
+
+[payload]
+root = "embedded_resource"
+node_types = ["embedded_resource", "page", "record"]
+
+# altchunk_present / macro_enabled_format / extension_mismatch are envelope warnings with
+# stable codes. They are the only findings the output carries in a stable form.
+[[detections]]
+code = "altchunk_present"
+severity = "medium"
+source = "warnings[].code (one per <w:altChunk> part; part_name/content_type/size only in clippyshot_metadata.warnings[])"
+description = "DOCX-family input embeds an altChunk part, a common AV-evasion wrapper."
+
+[[detections]]
+code = "macro_enabled_format"
+severity = "low"
+source = "warnings[].code"
+description = "Input extension is macro-capable (.docm/.xlsm/...). Macros are not executed."
+
+[[detections]]
+code = "extension_mismatch"
+severity = "low"
+source = "warnings[].code"
+description = "Input extension disagrees with the detected type."
+
+[[gaps]]
+id = "root-not-record"
+description = "The root is an EmbeddedResource, so required_root_fields cannot be stated. On ok its metadata Record carries label, page_count_total, page_count_rendered, truncated, clippyshot_version, clippyshot_metadata; on rejected only label='rejected' and reason."
+
+[[gaps]]
+id = "evidence-in-opaque-json"
+description = "QR decoded values, full OCR text, per-page derivative stats, render timings, blank_pages and the sheets block live only in metadata.fields.clippyshot_metadata, a JSON string with no schema version. The typed tree carries just qr_count, qr_skipped, ocr_text (cut at 10000 chars), ocr_char_count and ocr_skipped per page."
+
+[[gaps]]
+id = "qr-not-a-detection"
+description = "Decoded QR payloads (often URLs) are IOC-bearing findings but have no detection code or typed node; consumers must parse clippyshot_metadata.pages[].qr[].value."
+
+[[gaps]]
+id = "warning-detail-dropped"
+description = "Warnings are flattened to code+message (<=2000 chars). resolution_clamped pages[] and altchunk_present part_name/content_type/size survive only in clippyshot_metadata.warnings[]."
+
+[[gaps]]
+id = "clippyshot-page-unused"
+description = "ClippyShotPage (_type clippyshot_page) is registered with register_node_type but never emitted: detonate() uses plain Page + Record children because nested children do not round-trip a registered subtype."
+
+[[gaps]]
+id = "no-artifact-byte-cap"
+description = "Page PNGs and document.pdf have no byte cap in the engine (pages are capped by pixel budget, max_width/height_px). max_input_bytes is the default; CLIPPYSHOT_MAX_INPUT can raise it to 64 GiB."
+
+[[gaps]]
+id = "undeclared-converter-metadata"
+description = "Converter.convert() writes its own metadata.json into outdir; it is undeclared and the harness overwrites it with the sealed envelope."
+
+[[gaps]]
+id = "rejected-is-not-error"
+description = "Unsupported, oversized or structurally bad input is status rejected with warning code rejected and the reason in payload.metadata.fields.reason, not engine_error."
+
+[[gaps]]
+id = "loadout-drops-warning-findings"
+description = "Loadout maps clippyshot to dets=[] (engines.py, 'format/render success ... not phishing findings'), so altchunk_present/macro_enabled_format/extension_mismatch never become detections although the manifest lists emits=detection."
+
+[[gaps]]
+id = "loadout-reads-unemitted-sheet-fields"
+description = "document_outputs.render_coverage reads clippyshot_metadata.sheets.inventory, export_mode and page_mapping_verified. ClippyShot master emits only sheets.total/rendered/non_rendered, so those evidence fields are always null/empty."
+
+[[gaps]]
+id = "loadout-byte-and-count-limits"
+description = "document_outputs.map_outputs refuses an ok envelope with zero artifacts (all-blank document whose PDF copy failed), any artifact over 50 MiB and a combined output over 100 MiB; the engine caps none of these in bytes."
+
+[[gaps]]
+id = "loadout-rejected-as-unavailable"
+description = "Loadout turns status rejected into EngineUnavailable (engines.py), so a legitimate 'input rejected' verdict is reported as an engine failure rather than a result."
+
+[[consumers]]
+name = "loadout"
+engine = "clippyshot"
+mapper = "backend/loadout/document_outputs.py:map_outputs"
+emits = ["file", "text_message", "screenshot", "qr_code", "url", "detection"]

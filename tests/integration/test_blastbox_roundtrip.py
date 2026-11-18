@@ -181,6 +181,49 @@ def test_roundtrip_wrong_sha256_raises(detonation_output):
         )
 
 
+_SAFE_FIXTURES = sorted((_FIXTURE_DOCX.parent).iterdir())
+
+
+def _assert_conforms(envelope) -> None:
+    """Check a host-validated envelope against ``blastbox-engine.toml``.
+
+    Skips on a released blastbox that predates ``blastbox.contract.engine_contract``."""
+    ec = pytest.importorskip("blastbox.contract.engine_contract")
+    ec.assert_conforms(ec.load_contract(ec.find_contract(__file__)), envelope)
+
+
+def test_roundtrip_conforms_to_engine_contract(detonation_output):
+    """The host-accepted envelope is what ``blastbox-engine.toml`` promises."""
+    out, input_sha256 = detonation_output
+    env = validate_worker_output(
+        output_dir=out,
+        input_sha256=input_sha256,
+        engine="clippyshot",
+        limits=Limits(),
+    )
+    _assert_conforms(env)
+
+
+@pytest.mark.parametrize("fixture", _SAFE_FIXTURES, ids=lambda p: p.name)
+def test_every_safe_fixture_conforms_to_engine_contract(fixture, tmp_path):
+    """Every safe fixture, ok or rejected, yields a contract-conforming envelope.
+
+    Covers the spreadsheet (focused), trimmed-derivative and rejected (PDF input) paths
+    the single-docx fixture above never reaches."""
+    pytest.importorskip("blastbox.contract.engine_contract")
+    out = tmp_path / "out"
+    out.mkdir()
+    assert run_detonation(ClippyShotEngine(), input_path=fixture, output_dir=out,
+                          limits=Limits()) == 0
+    env = validate_worker_output(
+        output_dir=out,
+        input_sha256=_sha256_file(fixture),
+        engine="clippyshot",
+        limits=Limits(),
+    )
+    _assert_conforms(env)
+
+
 def test_clippyshot_page_in_process():
     """ClippyShotPage can be constructed and carries qr / ocr fields (in-process API).
 
