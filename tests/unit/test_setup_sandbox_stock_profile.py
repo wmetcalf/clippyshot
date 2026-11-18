@@ -363,3 +363,8 @@ def test_an_insecure_nsjail_is_not_reported_as_a_usable_backend(monkeypatch, cap
     host = Host(monkeypatch, [LOADED]).with_nsjail(blocked_until_loaded=True)
     host.nsjail_secure = False
     assert cli.main(["setup-sandbox", "--apply"]) == 1
+
+
+def test_a_forced_other_backend_is_not_rescued_by_nsjail(monkeypatch):
+    monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "bwrap")
+    assert cli._nsjail_selectable() is False

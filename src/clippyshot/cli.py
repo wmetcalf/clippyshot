@@ -107,6 +107,10 @@ def _nsjail_selectable() -> bool:
     refused unless CLIPPYSHOT_WARN_ON_INSECURE is set."""
     import os
 
+    forced = os.environ.get("CLIPPYSHOT_SANDBOX", "").strip().lower()
+    if forced and forced != "nsjail":
+        print(f"  CLIPPYSHOT_SANDBOX={forced} forces another backend; nsjail will not be used")
+        return False
     try:
         from clippyshot.sandbox.nsjail import NsjailSandbox
 
