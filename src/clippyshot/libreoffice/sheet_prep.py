@@ -91,6 +91,15 @@ def read_sheet_list(xlsx_path: Path) -> list[dict]:
     root_ns = root.tag[: root.tag.index("}") + 1] if root.tag.startswith("{") else ""
     if root_ns not in _SPREADSHEETML_NS:
         return []
+    # LibreOffice forces the active tab visible on import even if the file marks it hidden,
+    # so a paginated export renders it; record which sheet that is.
+    active_tab = 0
+    view = root.find(f"{root_ns}bookViews/{root_ns}workbookView")
+    if view is not None:
+        try:
+            active_tab = int(view.attrib.get("activeTab", "0"))
+        except ValueError:
+            active_tab = 0
     out: list[dict] = []
     for sheets in root.findall(f"{root_ns}sheets"):
         for sheet in sheets.findall(f"{root_ns}sheet"):
@@ -103,7 +112,8 @@ def read_sheet_list(xlsx_path: Path) -> list[dict]:
             # type attribute: when missing it's a worksheet by convention. Only
             # Excel 4 macro sheets set this explicitly.
             sheet_type = sheet.attrib.get("type", "worksheet")
-            out.append({"name": name, "state": state, "type": sheet_type})
+            out.append({"name": name, "state": state, "type": sheet_type,
+                        "active": len(out) == active_tab})
     return out
 
 

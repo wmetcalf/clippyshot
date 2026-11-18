@@ -166,3 +166,20 @@ def test_convert_bounds_attacker_sheet_attributes(tmp_path):
     sheets = [{"name": "S", "state": "visible", "type": "t" * 5_000_000}]
     meta = _convert(tmp_path, _SheetRunner(3, sheets), Limits())
     assert len(meta["sheets"]["inventory"][0]["type"]) <= 32
+
+
+def test_paginated_export_does_not_claim_the_active_or_odd_state_sheet_was_dropped():
+    """LO forces the active tab visible and treats non-spec state values as visible."""
+    sheets = [{"name": "Active", "state": "hidden", "type": "worksheet", "active": True},
+              {"name": "Odd", "state": "Visible", "type": "worksheet", "active": False},
+              {"name": "Gone", "state": "veryHidden", "type": "worksheet", "active": False}]
+    c = _sheet_provenance(sheets, 2, False, [{"index": 1}, {"index": 2}], [],
+                          paginated_calc=True)
+    assert [s["capture_status"] for s in c["inventory"]] == [
+        "unverified", "unverified", "not_captured"]
+
+
+def test_reader_records_the_active_tab(tmp_path):
+    p = _workbook(tmp_path, '<bookViews><workbookView activeTab="1"/></bookViews>'
+                            '<sheets><sheet name="A"/><sheet name="B" state="hidden"/></sheets>')
+    assert [(s["name"], s["active"]) for s in read_sheet_list(p)] == [("A", False), ("B", True)]

@@ -92,7 +92,8 @@ def _sheets_from_runner(runner) -> list[dict]:
             sheet_type = "worksheet"
         # Attacker-written attributes: bound them like the name.
         cleaned.append({"name": name, "state": state[:_MAX_SHEET_ATTR_CHARS],
-                        "type": sheet_type[:_MAX_SHEET_ATTR_CHARS]})
+                        "type": sheet_type[:_MAX_SHEET_ATTR_CHARS],
+                        "active": s.get("active") is True})
         if len(cleaned) > MAX_SHEETS:
             break  # one past the cap: _sheet_provenance reports the inventory truncated
     return cleaned
@@ -119,7 +120,8 @@ def _sheet_provenance(sheets: list[dict], total_pages: int, single_page_sheets: 
     ``sheets`` may carry one entry past MAX_SHEETS (the reader's truncation signal); the
     inventory then keeps MAX_SHEETS entries, ``inventory_truncated`` is true and the mapping
     is unverified. ``paginated_calc``: the export was plain ``calc_pdf_Export``, which never
-    emits hidden/veryHidden sheets, so those are ``not_captured`` even without a mapping.
+    emits hidden/veryHidden sheets (other than the active tab, which LO forces visible), so
+    those are ``not_captured`` even without a mapping.
     """
     truncated = len(sheets) > MAX_SHEETS
     if truncated:
@@ -132,7 +134,9 @@ def _sheet_provenance(sheets: list[dict], total_pages: int, single_page_sheets: 
         if mapped:
             status = ('captured' if index in captured else
                       'blank_skipped' if index in blanks else 'not_captured')
-        elif paginated_calc and not single_page_sheets and sheet.get('state') != 'visible':
+        elif (paginated_calc and not single_page_sheets and not sheet.get('active')
+              and sheet.get('state') in ('hidden', 'veryHidden')):
+            # LO's importer only hides the spec values, and forces the active tab visible.
             status = 'not_captured'
         else:
             status = 'unverified'
