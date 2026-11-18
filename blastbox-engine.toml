@@ -73,8 +73,10 @@ schema_version = "1"
 # true on a page where any were dropped), ocr_text (<= 10000 chars) and effective_dpi (set only
 # on a page clamped below the requested DPI). qr_values is ZXingReader's text rendering: with
 # the 2.2.x plain-text output it is '-mode escaped' (newlines and control bytes appear as
-# '<LF>', '<NUL>', ...; qr.py), so one symbol is always one record; the raw bytes are only
-# raw_bytes_hex inside clippyshot_metadata.
+# '<LF>', '<HT>', '<NUL>', ...; qr.py; the parser splits on "\n" only), so one symbol is
+# always one record; the raw bytes are only raw_bytes_hex inside clippyshot_metadata. A
+# consumer building URLs from the value (Loadout does) sees e.g. 'evil.exa<HT>mple' where a
+# browser would strip the tab; exact URLs need raw_bytes_hex.
 [[detections]]
 code = "altchunk_present"
 severity = "medium"
@@ -102,8 +104,8 @@ description = "A QR code decoded from a rendered page (often a URL). Values are 
 [[detections]]
 code = "qr_decoded_truncated"
 severity = "info"
-source = "warnings[].code (once, when the next distinct value would exceed the count or character cap)"
-description = "More distinct QR payloads were decoded than the warning cap; the rest are in qr_values (within its budget) and in clippyshot_metadata."
+source = "warnings[].code (once, when the next distinct value would exceed the 256-value cap or the sealed-byte budget, which shrinks to the envelope's remaining headroom; with no room even for this marker, no QR warnings are emitted)"
+description = "Not every distinct decoded QR value became a qr_decoded finding (possibly none, on a nearly full envelope); the rest are in qr_values (within its budget) and in clippyshot_metadata."
 
 [[gaps]]
 id = "root-fields-ok-only"

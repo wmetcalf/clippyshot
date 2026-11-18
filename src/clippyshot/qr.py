@@ -22,6 +22,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from clippyshot._argv import assert_positional as _assert_positional
+from clippyshot.observability import get_logger
+
+_log = get_logger("clippyshot.qr")
 
 # Internal zxing format tokens are lowercase snake_case (``qr_code``,
 # ``data_matrix``, ``ean_13``, ``pdf417``), separated by ``,`` and/or ``|``.
@@ -262,18 +265,25 @@ def _zxing_supports_escaped_mode(bin_path: str, runner=None) -> bool:
     """
     if bin_path in _zxing_escaped_mode_cache:
         return _zxing_escaped_mode_cache[bin_path]
+    # Escaping is a security control here, so only a probe that ran to completion is
+    # cached; a failed one (spawn error, timeout) is logged and retried on the next scan.
     try:
         if runner is not None:
             exit_code, stdout, stderr = runner([bin_path, "-help"], 5)
-            result = exit_code == 0 and "escaped" in (stdout + stderr)
+            help_text = stdout + stderr
         else:
             proc = subprocess.run(
                 [bin_path, "-help"],
                 capture_output=True, text=True, timeout=5, check=False,
             )
-            result = "escaped" in (proc.stdout or "") + (proc.stderr or "")
-    except Exception:
-        result = False
+            exit_code, help_text = proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    except Exception as e:  # noqa: BLE001
+        _log.warning("zxing_escaped_mode_probe_failed", error=str(e)[:200])
+        return False
+    if exit_code != 0 and not help_text:
+        _log.warning("zxing_escaped_mode_probe_failed", exit_code=exit_code)
+        return False
+    result = "escaped" in help_text
     _zxing_escaped_mode_cache[bin_path] = result
     return result
 
@@ -456,7 +466,8 @@ def scan_qr(
         )
     if use_json:
         return parse_zxing_output(stdout)
-    # 2.2.x: "No barcode found" on stdout means empty result
-    if "No barcode found" in stdout:
-        return []
+    # 2.2.x prints "No barcode found" when nothing decodes; that line has no Format: and
+    # parses to no record. Do NOT short-circuit on the substring: decoded Text: lines are
+    # attacker-controlled, and a decoy QR reading "No barcode found" would erase every
+    # other code on the page.
     return parse_zxing_plaintext_output(stdout)

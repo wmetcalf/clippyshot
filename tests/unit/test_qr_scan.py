@@ -169,3 +169,33 @@ def test_unicode_line_separators_in_a_payload_cannot_forge_records():
                        ensure_ascii=False)
     out = parse_zxing_output(line + "\n")
     assert [o.value for o in out] == ["x " + fake + " y"]
+
+
+def test_a_decoy_no_barcode_found_payload_does_not_erase_the_page(monkeypatch, tmp_path):
+    png = tmp_path / "p.png"
+    png.write_bytes(b"fake")
+    bin_path = "/usr/bin/ZXingReader"
+    monkeypatch.setitem(qr_mod._zxing_json_support_cache, bin_path, False)
+    monkeypatch.setitem(qr_mod._zxing_escaped_mode_cache, bin_path, True)
+    monkeypatch.setattr(qr_mod, "_zxing_binary", lambda: bin_path)
+    out = ('Text:       "https://evil.example/login"\nFormat:     QRCode\n\n'
+           'Text:       "No barcode found"\nFormat:     QRCode\n')
+    res = scan_qr(png, argv_runner=lambda argv, t: (0, out, ""))
+    assert [r.value for r in res] == ["https://evil.example/login", "No barcode found"]
+    assert scan_qr(png, argv_runner=lambda argv, t: (0, "No barcode found\n", "")) == []
+
+
+def test_a_failed_escaped_mode_probe_is_retried_not_cached(monkeypatch):
+    bin_path = "/x/ZXingReader"
+    monkeypatch.delitem(qr_mod._zxing_escaped_mode_cache, bin_path, raising=False)
+    calls = []
+
+    def flaky(argv, t):
+        calls.append(argv)
+        if len(calls) == 1:
+            raise OSError("EAGAIN")
+        return 0, "  -mode <plain|eci|hri|escaped>", ""
+
+    assert qr_mod._zxing_supports_escaped_mode(bin_path, runner=flaky) is False
+    assert bin_path not in qr_mod._zxing_escaped_mode_cache
+    assert qr_mod._zxing_supports_escaped_mode(bin_path, runner=flaky) is True
