@@ -38,9 +38,12 @@ class Host:
         self.commands: list[list[str]] = []
         self.fail_on: str | None = None
         monkeypatch.setattr(ss, "_restrict_active", lambda: True)
-        monkeypatch.setattr(ss.shutil, "which", lambda b: f"/usr/bin/{b}")
+        # A bwrap-only host by default (no nsjail to fall back on); tests that need nsjail
+        # say so with with_nsjail().
+        monkeypatch.setattr(ss.shutil, "which", lambda b: None if b == "nsjail" else f"/usr/bin/{b}")
         monkeypatch.setattr(ss, "_userns_ok", lambda b, p: True)
         monkeypatch.setattr(ss, "default_profile_dir", lambda: PROFILE_DIR)
+        self._mp = monkeypatch
 
         def state():
             return self.states.pop(0) if len(self.states) > 1 else self.states[0]
@@ -64,6 +67,18 @@ class Host:
         self.applied: list = []
         monkeypatch.setattr(ha, "loaded_profile_names", lambda *a, **k: frozenset(ss.ALL_PROFILES))
         monkeypatch.setattr(ss, "apply", lambda actions, d: self.applied.extend(actions) or 0)
+
+    def with_nsjail(self, *, blocked_until_loaded: bool):
+        """nsjail installed; optionally its userns works only once clippyshot-nsjail loads."""
+        self._mp.setattr(ss.shutil, "which", lambda b: f"/usr/bin/{b}")
+
+        def ok(binary, path):
+            if binary != "nsjail" or not blocked_until_loaded:
+                return True
+            return any(a.profile_name == "clippyshot-nsjail" for a in self.applied)
+
+        self._mp.setattr(ss, "_userns_ok", ok)
+        return self
 
 
 def _four_profile_cmds() -> list[list[str]]:
@@ -223,14 +238,11 @@ def test_it_states_the_host_wide_cost_before_anyone_opts_in(monkeypatch, capsys)
 def test_apply_on_a_conflicted_host_still_loads_the_nsjail_profile(monkeypatch, capsys):
     """The stock profile only attaches to /usr/bin/bwrap: an nsjail host keeps the distro's
     bwrap hardening and still gets clippyshot-nsjail, without touching bwrap policy."""
-    host = Host(monkeypatch, [LOADED])
-    monkeypatch.setattr(ss, "_userns_ok", lambda b, p: b != "nsjail")
-    applied: list = []
-    monkeypatch.setattr(ss, "apply", lambda actions, d: applied.extend(actions) or 0)
+    host = Host(monkeypatch, [LOADED]).with_nsjail(blocked_until_loaded=True)
     rc = cli.main(["setup-sandbox", "--apply"])
-    assert rc == 0  # the non-destructive path succeeds; bwrap's remaining step is printed
+    assert rc == 0  # nsjail now works; bwrap's remaining step is printed
     assert "bwrap hardening is untouched" in capsys.readouterr().out
-    assert [a.profile_name for a in applied] == ["clippyshot-nsjail"]
+    assert [a.profile_name for a in host.applied] == ["clippyshot-nsjail"]
     assert host.commands == []  # no stock-profile / bwrap policy change
 
 
@@ -281,12 +293,9 @@ def test_verification_without_aa_exec_is_not_success(monkeypatch):
 
 
 def test_unmanaged_stock_profile_still_lets_apply_load_nsjail(monkeypatch, capsys):
-    host = Host(monkeypatch, [UNMANAGED])
-    monkeypatch.setattr(ss, "_userns_ok", lambda b, p: b != "nsjail")
-    applied: list = []
-    monkeypatch.setattr(ss, "apply", lambda actions, d: applied.extend(actions) or 0)
+    host = Host(monkeypatch, [UNMANAGED]).with_nsjail(blocked_until_loaded=True)
     assert cli.main(["setup-sandbox", "--apply"]) == 0
-    assert [a.profile_name for a in applied] == ["clippyshot-nsjail"] and host.commands == []
+    assert [a.profile_name for a in host.applied] == ["clippyshot-nsjail"] and host.commands == []
 
 
 def test_apply_on_a_conflicted_host_loads_the_soffice_profile_too(monkeypatch, capsys):
@@ -319,8 +328,7 @@ def test_apply_rechecks_a_failed_attach_probe(monkeypatch, capsys):
 
 
 def test_plain_run_on_a_conflicted_host_offers_the_non_destructive_apply(monkeypatch, capsys):
-    Host(monkeypatch, [LOADED])
-    monkeypatch.setattr(ss, "_userns_ok", lambda b, p: b != "nsjail")
+    Host(monkeypatch, [LOADED]).with_nsjail(blocked_until_loaded=True)
     assert cli.main(["setup-sandbox"]) == 1
     out = capsys.readouterr().out
     assert "clippyshot setup-sandbox --apply" in out and "clippyshot-nsjail" in out
@@ -334,3 +342,16 @@ def test_conflicted_apply_that_only_loads_soffice_is_not_success(monkeypatch, ca
     assert cli.main(["setup-sandbox", "--apply"]) == 1
     assert [a.profile_name for a in host.applied] == ["clippyshot-soffice"]
     assert "No backend is usable yet" in capsys.readouterr().out
+
+
+def test_conflicted_host_with_a_working_nsjail_is_success(monkeypatch, capsys):
+    """Success is a usable backend: nsjail already works, only soffice gets loaded."""
+    host = Host(monkeypatch, [ENABLED_UNLOADED]).with_nsjail(blocked_until_loaded=False)
+    monkeypatch.setattr(ha, "probe_aa_exec", lambda *a, stock_state=None, **k: _probe(
+        ENABLED_UNLOADED, False, "profile_not_loaded", "profile 'clippyshot-soffice' does not exist"))
+    assert cli.main(["setup-sandbox", "--apply"]) == 0
+    assert [a.profile_name for a in host.applied] == ["clippyshot-soffice"]
+    # Re-run on the now-fixed host (soffice loaded, probe passes): still green.
+    monkeypatch.setattr(ha, "probe_aa_exec", lambda *a, stock_state=None, **k: _probe(
+        ENABLED_UNLOADED, True))
+    assert cli.main(["setup-sandbox"]) == 0
