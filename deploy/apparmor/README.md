@@ -40,14 +40,33 @@ and `unpriv_bwrap`): that stock profile also attaches to `/usr/bin/bwrap`. With 
 `clippyshot-bwrap` loaded, bwrap fails with `setting up uid map: Permission denied`; with
 only the stock one, bwrap's children are stacked into `unpriv_bwrap`, so attaching
 `clippyshot-soffice` fails with `aa-exec: ERROR: insufficient permissions to change to the
-profile`. Unload it before loading the ClippyShot profiles:
+profile`.
+
+**Know what unloading it costs before you do it.** `bwrap-userns-restrict` is host-wide
+hardening: it lets bwrap create a user namespace but stacks every bwrap child into
+`unpriv_bwrap`, which denies capabilities, so bwrap cannot be used to bypass Ubuntu's
+unprivileged-userns restriction. `clippyshot-bwrap` is `flags=(unconfined) { userns, }` and
+attaches by path to every `/usr/bin/bwrap` on the host (and in containers on it). With the stock
+profile unloaded, ANY local user or bwrap consumer can get a capability-bearing user namespace
+through `/usr/bin/bwrap` (e.g. `bwrap --unshare-user --uid 0 --cap-add ALL ... mount ...`
+succeeds). ClippyShot still confines its own children with `clippyshot-soffice`, but the
+host-wide control is gone. Only do this on a host (or VM) dedicated to ClippyShot, with no
+untrusted local users; on a shared host, run ClippyShot in its own VM instead.
+
+On such a dedicated host, unload it before loading the ClippyShot profiles:
 
 ```sh
 sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict
 ```
 
-To keep it unloaded across reboots, also move it out of `/etc/apparmor.d` (or into
-`/etc/apparmor.d/disable/`). CI (`.github/workflows/ci.yml`) does exactly this.
+To keep it unloaded across reboots, also disable it (otherwise `apparmor.service` reloads it
+next to `clippyshot-bwrap` at boot and bwrap fails with `setting up uid map: Permission denied`):
+
+```sh
+sudo ln -s /etc/apparmor.d/bwrap-userns-restrict /etc/apparmor.d/disable/
+```
+
+CI (`.github/workflows/ci.yml`) runs only the unload, because its runner is ephemeral.
 
 ### Containers on Ubuntu 24.04+ hosts
 

@@ -45,8 +45,9 @@ def test_cli_convert_unknown_input_returns_exit_2(tmp_path: Path):
     bad = tmp_path / "garbage.bin"
     bad.write_bytes(b"\x00" * 16)
     # This checks the exit-code mapping for an unsupported input, not sandbox policy. A host
-    # whose only backend is a degraded bwrap (no libseccomp binding, no --cgroup-pids: the
-    # hosted CI runner) is correctly refused as insecure with exit 3 before detection runs, so
+    # whose only backend is bwrap is refused as insecure with exit 3 before detection runs
+    # (pid_limit_missing: the --cgroup-pids probe finds no such flag in released bubblewrap; plus
+    # seccomp_missing where the libseccomp binding is absent, as on the hosted CI runner), so
     # accept the degraded backend here; select_sandbox's refusal has its own tests.
     env = {**os.environ, "CLIPPYSHOT_WARN_ON_INSECURE": "1"}
     r = subprocess.run(

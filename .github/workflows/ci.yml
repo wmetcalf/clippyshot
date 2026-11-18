@@ -56,7 +56,11 @@ jobs:
       # unload bwrap-userns-restrict (it and clippyshot-bwrap both attach /usr/bin/bwrap, and
       # with both loaded bwrap cannot even write its uid map), then load the ClippyShot
       # profiles. The final probe fails this step unless sandboxed bwrap + aa-exec runs, so the
-      # bwrap tests can never pass here by skipping.
+      # bwrap tests can never pass here by skipping. It mounts a fresh /proc as BwrapSandbox does
+      # (bwrap.py `--proc /proc`): under the inherited read-only host /proc, aa-exec cannot write
+      # /proc/self/attr/exec on some libapparmor versions (24.04: "Read-only file system").
+      # The runner is ephemeral, so the unload is not made persistent here; on a real host see
+      # deploy/apparmor/README.md for that step and for what unloading the stock profile costs.
       - name: Load AppArmor profiles
         run: |
           if [ -f /etc/apparmor.d/bwrap-userns-restrict ]; then
@@ -68,7 +72,7 @@ jobs:
             sudo apparmor_parser -r -W "/etc/apparmor.d/$p"
           done
           sudo aa-status | grep clippyshot
-          bwrap --unshare-user --die-with-parent --ro-bind / / -- \
+          bwrap --unshare-user --die-with-parent --ro-bind / / --proc /proc -- \
             aa-exec -p clippyshot-soffice -- /bin/true
       - name: Install
         run: python -m pip install -e ".[dev]"
