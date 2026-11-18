@@ -388,3 +388,25 @@ def test_looks_like_safe_xml_does_not_recount_a_marker_ending_at_a_read_boundary
     p = tmp_path / "edge.xml"
     p.write_bytes(body)
     assert _looks_like_safe_xml(p) is True
+
+
+def test_entity_heavy_file_magika_cannot_classify_is_still_counted(tmp_path, monkeypatch):
+    """The 'unknown' label routes an allowlisted extension straight to LibreOffice; the
+    entity count must apply there too, not only on the magika='xml' branch (codex on #65)."""
+    from types import SimpleNamespace
+
+    entities = "".join(f'<!ENTITY e{i} "x">' for i in range(65))
+    bomb = tmp_path / "bomb.odt"
+    bomb.write_bytes(f'<?xml version="1.0"?><!DOCTYPE r [{entities}]><r/>'.encode("utf-16"))
+    detector = Detector()
+    monkeypatch.setattr(
+        detector._magika,
+        "identify_path",
+        lambda p: SimpleNamespace(
+            output=SimpleNamespace(label="unknown", mime_type="application/octet-stream"),
+            score=0.0,
+        ),
+    )
+    with pytest.raises(DetectionError) as ei:
+        detector.detect(bomb)
+    assert ei.value.reason == "xml_safety_check_failed"

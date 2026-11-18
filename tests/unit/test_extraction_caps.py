@@ -226,7 +226,7 @@ def test_safe_fromstring_rejects_utf32_dtd(codec):
 
 def test_safe_fromstring_rejects_dtd_via_declared_single_byte_encoding():
     # A declared non-UTF-8 encoding must not hide the DTD from the PARSER guard either
-    # (called directly: in single-byte encodings the ASCII fast path fires first).
+    # (also called directly, so the test pins the parser-level refusal itself).
     from clippyshot.libreoffice._safexml import _reject_dtd
 
     payload = '<?xml version="1.0" encoding="ISO-8859-1"?><!DOCTYPE a [<!ENTITY e "x">]><a>&e;</a>'
@@ -294,3 +294,13 @@ def test_safe_fromstring_rejects_declaration_free_wide_doctype(codec):
     payload = '<!DOCTYPE a SYSTEM "http://127.0.0.1:1/x.dtd"><a/>'.encode(codec)
     with pytest.raises(ET.ParseError):
         safe_fromstring(payload)
+
+
+@pytest.mark.parametrize("xml", [
+    b"<a><![CDATA[<!DOCTYPE x>]]></a>",
+    b"<a><!-- <!ENTITY e 'x'> --></a>",
+])
+def test_safe_fromstring_accepts_declaration_text_outside_markup(xml):
+    # Literal "<!DOCTYPE"/"<!ENTITY" in a CDATA section or comment is not a DTD; the old
+    # byte pre-scan refused such clean parts (codex on #65).
+    assert safe_fromstring(xml).tag == "a"

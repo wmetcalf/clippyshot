@@ -692,6 +692,13 @@ class Detector:
                         "ooxml_structural_check_failed",
                         f"magika=unknown ext={ext} failed OOXML bomb/entry/ratio check",
                     )
+                # Same reasoning for the XML entity-count gate: an XML flavour Magika can't
+                # classify (unusual encodings are a cause) reaches LibreOffice by extension.
+                if not _looks_like_safe_xml(path):
+                    raise DetectionError(
+                        "xml_safety_check_failed",
+                        f"magika=unknown ext={ext} failed XML entity-count check",
+                    )
                 return DetectedType(
                     label=canonical,
                     mime=mime,

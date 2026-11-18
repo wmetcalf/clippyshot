@@ -15,19 +15,15 @@ stream, so the guard holds whatever the document's encoding. A byte-level
 scan for ``<!DOCTYPE`` is blind to UTF-16 input (BOM or autodetected), where
 those bytes are interleaved with NULs; expat refuses UTF-32 and declared
 multi-byte encodings outright, and keeps ``<!DOCTYPE`` as ASCII bytes in every
-single-byte encoding it accepts. The cheap ASCII byte pre-scan is kept as a
-fast path for those common cases.
+single-byte encoding it accepts. There is deliberately no byte-level
+pre-scan: it added no protection and refused clean parts carrying the literal
+text in a comment or CDATA section.
 """
 from __future__ import annotations
 
-import re
 from typing import NoReturn
 import xml.etree.ElementTree as ET
 from xml.parsers import expat
-
-# Fast path: reject an ASCII/UTF-8 DOCTYPE/ENTITY before building a parser. NOT
-# the security boundary (it cannot see other encodings) — the parser handlers are.
-_DTD_RE = re.compile(rb"<!DOCTYPE|<!ENTITY", re.IGNORECASE)
 
 _DTD_REFUSED = "XML DOCTYPE/ENTITY declarations are not permitted"
 
@@ -79,7 +75,5 @@ def safe_fromstring(data: bytes) -> ET.Element:
     if not isinstance(data, (bytes, bytearray)):
         raise ET.ParseError("safe_fromstring requires bytes")
     data = bytes(data)
-    if _DTD_RE.search(data):
-        raise ET.ParseError(_DTD_REFUSED)
     _reject_dtd(data)
     return ET.fromstring(data)
