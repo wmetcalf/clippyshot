@@ -488,7 +488,7 @@ corresponding `tesseract-ocr-<lang>` package.
 emits: the artifact families (page PNGs `pN`, `pN-trimmed`, `pN-focused`, `document-pdf`),
 the payload tree (`embedded_resource` root with `page` and `record` nodes, root
 `schema_version`), the warning codes a consumer can treat as findings (including one
-`qr_decoded` per decoded QR payload), the known gaps, and the Loadout mapper that consumes it.
+`qr_decoded` per distinct decoded QR value, capped), the known gaps, and the Loadout mapper that consumes it.
 
 ```bash
 python -m blastbox.contract.engine_contract validate blastbox-engine.toml

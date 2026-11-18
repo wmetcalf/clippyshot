@@ -101,6 +101,39 @@ def test_qr_findings_are_capped_with_a_marker(tmp_path):
     assert len(_scanner(res.payload.children[0])["qr_values"]) == 300
 
 
+def test_typed_qr_values_share_a_document_budget(tmp_path):
+    """qr_values duplicates every payload already in clippyshot_metadata, and the host refuses
+    a sealed envelope over its metadata cap (4 MiB by default). A hostile document full of
+    near-capacity QR codes must not turn a conversion that sealed before into one that fails."""
+    from clippyshot.engine import _QR_VALUES_BUDGET_CHARS
+
+    pages = [
+        {"index": i, "file": f"page-{i:03d}.png", "width_mm": 210.0, "height_mm": 297.0,
+         "qr": [{"format": "qr_code", "value": f"{i}-{j}-" + "q" * 2900, "position": []}
+                for j in range(16)],
+         "ocr": {}}
+        for i in range(1, 51)
+    ]
+    res, _ = _detonate(tmp_path, _meta(pages=pages))
+    records = [_scanner(p) for p in res.payload.children]
+    kept = sum(len(v) for r in records for v in r["qr_values"])
+    assert kept <= _QR_VALUES_BUDGET_CHARS
+    assert all(r["qr_count"] == 16 for r in records)
+    assert records[0]["qr_values_truncated"] is False
+    assert records[-1]["qr_values_truncated"] is True
+    assert records[-1]["qr_values"] == []
+
+
+def test_altchunk_detail_with_non_ascii_content_type_keeps_its_context(tmp_path):
+    meta = _meta()
+    meta["warnings"][0]["content_type"] = "\U0001F600" * 64
+    res, _ = _detonate(tmp_path, meta)
+    (alt,) = [w for w in res.warnings if w.code == "altchunk_present"]
+    assert alt.context is not None and len(alt.context) <= 255
+    detail = json.loads(alt.context)
+    assert detail["size"] == 1234 and detail["part_name"] == "/word/afchunk.mht"
+
+
 def test_warning_detail_survives_in_typed_form(tmp_path):
     res, _ = _detonate(tmp_path)
     (alt,) = [w for w in res.warnings if w.code == "altchunk_present"]
@@ -120,6 +153,71 @@ def test_oversized_altchunk_detail_still_fits_the_context_cap(tmp_path):
     assert len(alt.context) <= 255
     assert detail["size"] == 1234 and detail["content_type"] == "message/rfc822"
     assert detail["part_name"].startswith("/word/aaa")
+
+
+def test_non_ascii_altchunk_part_name_is_shortened_not_erased(tmp_path):
+    meta = _meta()
+    meta["warnings"][0]["part_name"] = "/word/" + "\u00e9" * 300
+    res, _ = _detonate(tmp_path, meta)
+    (alt,) = [w for w in res.warnings if w.code == "altchunk_present"]
+    detail = json.loads(alt.context)
+    assert len(alt.context) <= 255
+    assert detail["part_name"].startswith("/word/\u00e9\u00e9")
+    assert len(detail["part_name"]) > 100
+
+
+def test_repeated_qr_value_does_not_spend_the_finding_cap(tmp_path):
+    meta = _meta()
+    meta["pages"][0]["qr"] = [{"format": "qr_code", "value": "https://benign.example/",
+                               "position": []}] * 300
+    meta["pages"][1]["qr"] = [{"format": "qr_code", "value": "https://evil.example/login",
+                               "position": []}]
+    res, _ = _detonate(tmp_path, meta)
+    qr = [(w.message, w.context) for w in res.warnings if w.code == "qr_decoded"]
+    assert qr == [("https://benign.example/", "page 1"), ("https://evil.example/login", "page 2")]
+    assert not [w for w in res.warnings if w.code == "qr_decoded_truncated"]
+
+
+def test_qr_finding_messages_share_a_character_budget(tmp_path):
+    from clippyshot.engine import _QR_WARNING_BUDGET_CHARS
+
+    meta = _meta()
+    meta["pages"][0]["qr"] = [{"format": "qr_code", "value": f"{i:04d}" + "z" * 2500,
+                               "position": []} for i in range(200)]
+    res, _ = _detonate(tmp_path, meta)
+    qr = [w for w in res.warnings if w.code == "qr_decoded"]
+    assert sum(len(w.message) for w in qr) <= _QR_WARNING_BUDGET_CHARS
+    assert [w.code for w in res.warnings].count("qr_decoded_truncated") == 1
+
+
+def test_derivative_pages_conform_to_contract(tmp_path):
+    """The p*-trimmed / p*-focused families are only produced by real renders that no safe
+    fixture triggers; drive them through the stub so a drifted id or path fails here."""
+    ec = pytest.importorskip("blastbox.contract.engine_contract")
+    meta = _meta()
+    meta["pages"][0]["trimmed"] = {"file": "page-001-trimmed.png", "removed_percent": 10}
+    meta["pages"][0]["focused"] = {"file": "page-001-focused.png", "removed_percent": 20}
+    stub = _StubConverter(meta)
+    orig = stub.convert
+
+    def convert(input_path, output_dir, options):
+        r = orig(input_path, output_dir, options)
+        (output_dir / "page-001-trimmed.png").write_bytes(_PNG)
+        (output_dir / "page-001-focused.png").write_bytes(_PNG)
+        return r
+
+    stub.convert = convert
+    eng = ClippyShotEngine()
+    eng._converter = stub
+    inp = tmp_path / "in.xlsx"
+    inp.write_bytes(b"x")
+    out = tmp_path / "out"
+    out.mkdir()
+    res = eng.detonate(inp, out, BlastboxLimits(timeout_s=30))
+    ids = {a.id for a in res.artifacts}
+    assert {"p1-trimmed", "p1-focused"} <= ids
+    contract = ec.load_contract(ec.find_contract(__file__))
+    ec.assert_conforms(contract, res, out)
 
 
 def test_root_carries_a_metadata_schema_version(tmp_path):

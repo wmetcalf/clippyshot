@@ -168,6 +168,13 @@ METADATA_SCHEMA_VERSION = "1"
 # per-page `qr_values` list is not capped by this; it only bounds the warning list.
 _MAX_QR_WARNINGS = 256
 _MAX_WARNING_CONTEXT = 255
+# Total characters of typed per-page ``qr_values`` across the whole document. Every value is
+# already in clippyshot_metadata; this copy must not push a hostile QR-dense document past the
+# host's sealed-envelope metadata cap (blastbox Limits.max_metadata_bytes, 4 MiB by default).
+# A page whose values did not fit carries ``qr_values_truncated: true``; ``qr_count`` stays exact.
+_QR_VALUES_BUDGET_CHARS = 256 * 1024
+# Total message characters across all ``qr_decoded`` warnings (each message is cut at 2000).
+_QR_WARNING_BUDGET_CHARS = 64 * 1024
 
 
 def _qr_values(page_rec: dict) -> list[str]:
@@ -175,7 +182,33 @@ def _qr_values(page_rec: dict) -> list[str]:
             if isinstance(q, dict) and isinstance(q.get("value"), str)]
 
 
-def _scanner_record(page_rec: dict, effective_dpi: int | None = None) -> Record:
+def _budgeted_qr_values(pages: list) -> dict[int, tuple[list[str], bool]]:
+    """Per page index: the ``qr_values`` that fit the document budget, and whether any were cut.
+
+    Values are kept whole, in page order; once one does not fit, every later value is dropped
+    so the typed list never silently skips a middle value.
+    """
+    out: dict[int, tuple[list[str], bool]] = {}
+    remaining = _QR_VALUES_BUDGET_CHARS
+    exhausted = False
+    for page_rec in pages:
+        if not isinstance(page_rec, dict) or type(page_rec.get("index")) is not int:
+            continue
+        kept: list[str] = []
+        cut = False
+        for value in _qr_values(page_rec):
+            if exhausted or len(value) > remaining:
+                exhausted = True
+                cut = True
+                continue
+            kept.append(value)
+            remaining -= len(value)
+        out[page_rec["index"]] = (kept, cut)
+    return out
+
+
+def _scanner_record(page_rec: dict, effective_dpi: int | None = None,
+                    qr_budgeted: tuple[list[str], bool] | None = None) -> Record:
     """Build a Record summarising QR and OCR scanner results for a page.
 
     This is a ``Record`` child of the ``Page`` node so that scanner data
@@ -186,13 +219,16 @@ def _scanner_record(page_rec: dict, effective_dpi: int | None = None) -> Record:
     qr_list = page_rec.get("qr") or []
     qr_skipped = page_rec.get("qr_skipped")
     ocr_obj = page_rec.get("ocr") or {}
-    qr_values: list[str | int | float | bool | None] = list(_qr_values(page_rec))
+    values, qr_truncated = (qr_budgeted if qr_budgeted is not None
+                            else (_qr_values(page_rec), False))
+    qr_values: list[str | int | float | bool | None] = list(values)
 
     return Record(
         fields={
             "scanner": "clippyshot",
             "qr_count": len(qr_list),
             "qr_values": qr_values,
+            "qr_values_truncated": qr_truncated,
             "qr_skipped": qr_skipped,
             "ocr_text": (ocr_obj.get("text") or "")[:10000],
             "ocr_char_count": ocr_obj.get("char_count", 0),
@@ -220,41 +256,63 @@ def _warning_context(w: dict) -> str | None:
 
     Only ``altchunk_present`` carries scalar detail (part_name/content_type/size);
     ``resolution_clamped``'s per-page list goes on each Page's scanner Record instead.
-    part_name is attacker-chosen, so it is the field shortened to fit the cap.
+    Both strings are attacker-chosen: part_name is shortened first, then content_type.
     """
     if w.get("code") != "altchunk_present":
         return None
-    detail = {
-        "part_name": str(w.get("part_name") or ""),
-        "content_type": str(w.get("content_type") or "")[:64],
-        "size": w.get("size") if isinstance(w.get("size"), int) else None,
-    }
-    text = json.dumps(detail, separators=(",", ":"))
-    while len(text) > _MAX_WARNING_CONTEXT and detail["part_name"]:
-        over = len(text) - _MAX_WARNING_CONTEXT
-        detail["part_name"] = detail["part_name"][: max(0, len(detail["part_name"]) - over)]
-        text = json.dumps(detail, separators=(",", ":"))
+    def clean(v: object) -> str:
+        # Lone surrogates would survive ensure_ascii=False and break UTF-8 sealing later.
+        return str(v or "").encode("utf-8", "replace").decode("utf-8")
+
+    strings = {"part_name": clean(w.get("part_name")),
+               "content_type": clean(w.get("content_type"))[:64]}
+    size = w.get("size") if isinstance(w.get("size"), int) else None
+
+    # ensure_ascii=False: Warning.context is capped in characters, and \uXXXX escapes would
+    # inflate a non-ASCII value up to 12x past the cap.
+    def dump() -> str:
+        return json.dumps({**strings, "size": size}, separators=(",", ":"), ensure_ascii=False)
+
+    text = dump()
+    for key in ("part_name", "content_type"):
+        while len(text) > _MAX_WARNING_CONTEXT and strings[key]:
+            over = len(text) - _MAX_WARNING_CONTEXT
+            strings[key] = strings[key][: max(0, len(strings[key]) - over)]
+            text = dump()
     return text if len(text) <= _MAX_WARNING_CONTEXT else None
 
 
 def _qr_warnings(pages: list) -> list[Warning]:
-    """One ``qr_decoded`` finding per decoded QR payload (often a URL), capped."""
+    """One ``qr_decoded`` finding per DISTINCT decoded QR payload (often a URL), capped.
+
+    A value repeated on many pages (or many times on one page) is reported once, at its first
+    page, so a flood of one benign code cannot spend the cap and hide a later distinct payload.
+    The cap bounds both the count and the total message characters.
+    """
     out: list[Warning] = []
+    seen: set[str] = set()
+    chars = 0
     for page_rec in pages:
         if not isinstance(page_rec, dict):
             continue
         for value in _qr_values(page_rec):
-            if len(out) >= _MAX_QR_WARNINGS:
+            if value in seen:
+                continue
+            message = value[:2000]
+            if len(out) >= _MAX_QR_WARNINGS or chars + len(message) > _QR_WARNING_BUDGET_CHARS:
                 out.append(Warning(
                     code="qr_decoded_truncated",
-                    message=f"qr_decoded findings capped at {_MAX_QR_WARNINGS}; every value "
-                            "remains in its page's scanner record (qr_values)",
+                    message=f"qr_decoded findings capped at {_MAX_QR_WARNINGS} distinct values "
+                            f"/ {_QR_WARNING_BUDGET_CHARS} chars; the rest are in the pages' "
+                            "scanner records (qr_values) and clippyshot_metadata",
                 ))
                 return out
+            seen.add(value)
+            chars += len(message)
             ctx = f"page {page_rec.get('index')}"
             if len(value) > 2000:
                 ctx += " (value truncated)"
-            out.append(Warning(code="qr_decoded", message=value[:2000], context=ctx))
+            out.append(Warning(code="qr_decoded", message=message, context=ctx))
     return out
 
 
@@ -769,6 +827,7 @@ class ClippyShotEngine:
         page_nodes: list[Page] = []
         artifacts: list[DeclaredArtifact] = []
         clamped_dpi = _clamped_dpi_by_page(meta.get("warnings", []))
+        qr_budgeted = _budgeted_qr_values(meta.get("pages", []))
 
         for page_rec in meta.get("pages", []):
             idx: int = page_rec["index"]
@@ -811,7 +870,7 @@ class ClippyShotEngine:
                     artifacts.append(DeclaredArtifact(id=fid, path=ff, kind="image"))
 
             # QR / OCR scanner data as a Record child so it survives JSON round-trip.
-            scanner_record = _scanner_record(page_rec, clamped_dpi.get(idx))
+            scanner_record = _scanner_record(page_rec, clamped_dpi.get(idx), qr_budgeted.get(idx))
 
             page_node = Page(
                 index=idx,
