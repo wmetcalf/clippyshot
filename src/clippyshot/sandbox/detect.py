@@ -125,7 +125,10 @@ def select_sandbox(
 
     Order: nsjail → bwrap → container. Each candidate is constructed AND
     smoketest-verified before being accepted. A backend that constructs
-    successfully but fails /bin/true is skipped in favour of the next.
+    successfully but fails /bin/true is skipped in favour of the next. With the
+    inner nono layer requested, the chosen backend is then smoketested THROUGH
+    nono; a failure there raises InnerSandboxLayerUnavailable rather than falling
+    through to a later (weaker) backend.
 
     CLIPPYSHOT_SANDBOX env var (nsjail|bwrap|container) forces a specific
     backend; no silent fallback if forced.

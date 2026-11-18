@@ -238,6 +238,11 @@ class NonoWrappedSandbox:
     def insecurity_reasons(self) -> list[str]:
         return list(getattr(self.inner, "insecurity_reasons", []))
 
+    @property
+    def seccomp_source(self) -> str:
+        # The base's syscall filter still applies under nono; report it, not "none".
+        return str(getattr(self.inner, "seccomp_source", "none"))
+
     def run(self, request: SandboxRequest) -> SandboxResult:
         return self.inner.run(self.wrap.apply(request))
 

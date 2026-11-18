@@ -117,9 +117,9 @@ def test_missing_binary_raises_only_at_build() -> None:
         wrap.build_argv(_req())
 
 
-def test_decorator_delegates_transformed_request() -> None:
+def test_decorator_delegates_transformed_request(tmp_path: Path) -> None:
     inner = _FakeSandbox()
-    deco = NonoWrappedSandbox(inner, NonoWrap(bin=_BIN, state_dir=Path("/tmp/cs-nono-test")))
+    deco = NonoWrappedSandbox(inner, NonoWrap(bin=_BIN, state_dir=tmp_path / "state"))
     assert deco.name == "fake+nono"
     assert deco.secure is True
     deco.run(_req())
@@ -132,7 +132,9 @@ def test_decorator_delegates_transformed_request() -> None:
     assert inner.last.argv[-1] == "/bin/true"
 
 
-def test_select_sandbox_wraps_only_when_requested(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_select_sandbox_wraps_only_when_requested(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "container")
     monkeypatch.delenv("CLIPPYSHOT_INNER_NONO", raising=False)
     fake = _FakeSandbox()
@@ -142,7 +144,7 @@ def test_select_sandbox_wraps_only_when_requested(monkeypatch: pytest.MonkeyPatc
     assert plain is fake  # default: untouched, zero cost
 
     wrapped = select_sandbox(
-        inner_wrap=NonoWrap(bin=_BIN, state_dir=Path("/tmp/cs-nono-test")),
+        inner_wrap=NonoWrap(bin=_BIN, state_dir=tmp_path / "state"),
         _container_factory=lambda: _FakeSandbox(),
     )
     assert isinstance(wrapped, NonoWrappedSandbox)
@@ -509,3 +511,11 @@ def test_state_dir_under_a_granted_dir_is_refused(monkeypatch: pytest.MonkeyPatc
     with pytest.raises(InnerSandboxLayerUnavailable, match="grants"):
         select_sandbox(inner_wrap=NonoWrap(bin=_BIN, state_dir=Path(state)),
                        _container_factory=lambda: _FakeSandbox())
+
+
+def test_wrapped_selection_reports_the_base_seccomp_source() -> None:
+    class _Base(_FakeSandbox):
+        seccomp_source = "clippyshot-nsjail"
+
+    deco = NonoWrappedSandbox(_Base(), NonoWrap(bin=_BIN))
+    assert deco.seccomp_source == "clippyshot-nsjail"

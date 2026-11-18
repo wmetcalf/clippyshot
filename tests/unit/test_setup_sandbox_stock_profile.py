@@ -442,3 +442,18 @@ def test_runtime_nono_failure_is_seen_by_setup_sandbox(monkeypatch):
     assert "smoketest" in (cli._inner_layer_problem() or "")
     monkeypatch.delenv("CLIPPYSHOT_INNER_NONO")
     assert cli._inner_layer_problem() is None
+
+
+def test_nono_failure_seen_only_after_apply_is_not_blamed_on_bwrap(monkeypatch, capsys):
+    """final prosecutor on #66: before --apply loads clippyshot-nsjail no base runs, so the
+    nono check is inconclusive; after it, selection reaches nono and fails. The advice
+    must name nono, not the stock bwrap profile."""
+    host = Host(monkeypatch, [LOADED]).with_nsjail(blocked_until_loaded=True)
+    host.nsjail_secure = False  # _runtime_backend -> None after the apply
+    calls = iter([None, "inner nono layer smoketest under nsjail failed"])
+    monkeypatch.setattr(cli, "_inner_layer_problem", lambda: next(calls, None))
+    rc = cli.main(["setup-sandbox", "--apply"])
+    out = capsys.readouterr().out
+    assert rc != 0 and host.commands == []
+    assert "smoketest under nsjail failed" in out
+    assert "clippyshot setup-sandbox --disable-stock-bwrap-profile" not in out

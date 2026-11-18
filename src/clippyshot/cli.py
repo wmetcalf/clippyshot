@@ -218,6 +218,13 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
                           "hardening kept. Only the bwrap backend still needs "
                           f"`{ha.FIX_COMMAND}` (dedicated hosts only).")
                     return 0
+                late_inner = _inner_layer_problem() if args.apply else None
+                if late_inner is not None:
+                    # Selection could only reach nono once the profiles above loaded.
+                    print(f"\nNo backend can be selected until the requested inner nono "
+                          f"layer can run:\n  {late_inner}\nFix that (or unset "
+                          f"CLIPPYSHOT_INNER_NONO); disabling {stock} would not help.")
+                    return 1
                 if args.apply:
                     print("\nNo backend is selectable yet; bwrap still needs "
                           f"`{ha.FIX_COMMAND}` (dedicated hosts only), or make nsjail usable.")
