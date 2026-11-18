@@ -113,7 +113,7 @@ def stock_bwrap_profile_state(
 def aa_exec_probe_argv(bwrap: str, aa_exec: str, profile: str) -> list[str]:
     """The probe CI runs (`.github/workflows/ci.yml`), argv for argv.
 
-    The fresh ``--proc /proc`` matters: aa-exec writes /proc/self/attr/exec, and the
+    The ``--proc /proc`` matters: aa-exec writes /proc/self/attr/exec, and the
     host's /proc inherited through ``--ro-bind / /`` is read-only on some libapparmor
     versions (Ubuntu 24.04: "Read-only file system"), which would fail the probe for a
     reason unrelated to AppArmor policy. ``BwrapSandbox._build_argv`` mounts it too.
