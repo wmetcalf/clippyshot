@@ -500,7 +500,8 @@ async function loadResult(jobId, opts) {
             trimmed: hasTrim(c.index) ? { phash: h.phash } : null,
             focused: hasFocus(c.index) ? {} : null,
             phash: h.phash, colorhash: h.colorhash, sha256: h.sha256,
-            qr: (sf.qr_count > 0) ? { count: sf.qr_count } : null,
+            // The typed record's qr_values (budgeted) are the only QR text this envelope has.
+            qr: Array.isArray(sf.qr_values) ? sf.qr_values.map(v => ({ value: String(v), format: '' })) : [],
             ocr: (sf.ocr_text || sf.ocr_char_count) ? { text: sf.ocr_text, char_count: sf.ocr_char_count } : null,
           };
         });
@@ -623,7 +624,9 @@ async function loadResult(jobId, opts) {
       const decoded = warnings.filter(w => w.code === 'qr_decoded');
       wb.innerHTML = warnings.filter(w => w.code !== 'qr_decoded').map(line).join('')
         + (decoded.length
-          ? '<details><summary class="warn" style="font-size:.82rem">qr_decoded: '
+          // Open when the page QR lists were cut: these may be the only copy of a value.
+          ? '<details' + (warnings.some(w => w.code === 'qr_truncated') ? ' open' : '')
+            + '><summary class="warn" style="font-size:.82rem">qr_decoded: '
             + decoded.length + ' decoded QR value(s)</summary>' + decoded.map(line).join('')
             + '</details>'
           : '');
@@ -991,7 +994,11 @@ function mergeWarnings(...lists) {
     }
     for (const [k, items] of counts) {
       const prev = best.get(k);
-      if (!prev || items.length > prev.items.length) best.set(k, {items, order: prev ? prev.order : best.size});
+      // On a tie keep the copy that carries context (the envelope's re-sealed one does).
+      const hasCtx = l => l.some(w => w.context);
+      if (!prev || items.length > prev.items.length
+          || (items.length === prev.items.length && hasCtx(items) && !hasCtx(prev.items)))
+        best.set(k, {items, order: prev ? prev.order : best.size});
     }
   }
   return [...best.values()].sort((a, b) => a.order - b.order).flatMap(e => e.items);

@@ -183,3 +183,18 @@ def test_job_list_qr_badge_is_added_once_per_row():
     code = _outside_helpers()
     assert "!cell.querySelector('.badge-qr')" in code
     assert "typedQrCounts(meta)).some(n => n > 0)" in code
+
+
+def test_ui_merge_keeps_the_envelope_context_on_a_tie():
+    got = _run_helpers("""
+      const m = mergeWarnings([{code: 'altchunk_present', message: 'same'}],
+                              [{code: 'altchunk_present', message: 'same', context: 'part=/a.mht'}]);
+      console.log(JSON.stringify(m.map(w => w.context || null)));
+    """)
+    assert got == ["part=/a.mht"]
+
+
+def test_ui_thin_envelope_fallback_shows_typed_qr_values():
+    code = _outside_helpers()
+    assert "sf.qr_values.map(v => ({ value: String(v)" in code
+    assert "{ count: sf.qr_count }" not in code
