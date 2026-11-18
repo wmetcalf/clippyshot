@@ -95,6 +95,55 @@ def _sheet_types_by_rid(zf: zipfile.ZipFile) -> dict[str, str] | None:
 
 
 def read_sheet_inventory(xlsx_path: Path) -> tuple[list[dict], list[str]]:
+    """See :func:`_read_sheet_inventory`; never raises.
+
+    Any parse failure on a zip that does carry ``xl/workbook.xml`` (a DOCTYPE the safe
+    parser refuses, a multi-byte encoding expat can't take, ...) is reported as the
+    ``unreadable_workbook`` anomaly rather than an empty, anomaly-free result, so the
+    converter still emits an unverified sheets block for a workbook LO may import fine.
+    """
+    try:
+        return _read_sheet_inventory(xlsx_path)
+    except _Unreadable:
+        return [], ["unreadable_workbook"]
+    except Exception:  # noqa: BLE001
+        try:
+            with zipfile.ZipFile(xlsx_path) as zf:
+                zf.getinfo("xl/workbook.xml")
+        except Exception:  # noqa: BLE001
+            return [], []
+        return [], ["unreadable_workbook"]
+
+
+class _Unreadable(Exception):
+    pass
+
+
+_OFFICE_DOC_REL = "/officeDocument"
+_ESCAPED_XSTRING = re.compile(r"_x[0-9A-Fa-f]{4}_")
+
+
+def _package_anomalies(zf: zipfile.ZipFile) -> set[str]:
+    """Is xl/workbook.xml the part LibreOffice imports? LO follows _rels/.rels'
+    officeDocument relationship, not a fixed path: a package pointing elsewhere (or with a
+    case-variant twin of the part) can show this reader a decoy workbook."""
+    out: set[str] = set()
+    names = zf.namelist()
+    if sum(1 for n in names if n.lower() == "xl/workbook.xml") != 1:
+        out.add("nonstandard_package_part")
+    try:
+        root = safe_fromstring(bounded_read(zf, "_rels/.rels"))
+    except Exception:  # noqa: BLE001
+        out.add("nonstandard_package_part")
+        return out
+    targets = [r.attrib.get("Target", "") for r in root.findall(f"{_PKG_REL_NS}Relationship")
+               if r.attrib.get("Type", "").endswith(_OFFICE_DOC_REL)]
+    if len(targets) != 1 or targets[0] not in ("xl/workbook.xml", "/xl/workbook.xml"):
+        out.add("nonstandard_package_part")
+    return out
+
+
+def _read_sheet_inventory(xlsx_path: Path) -> tuple[list[dict], list[str]]:
     """Parse ``xl/workbook.xml``: (per-sheet metadata in workbook order, anomalies).
 
     Each entry is ``{name, state, type, active}``; ``type`` comes from the sheet's workbook
@@ -118,16 +167,19 @@ def read_sheet_inventory(xlsx_path: Path) -> tuple[list[dict], list[str]]:
         with zipfile.ZipFile(xlsx_path) as zf:
             try:
                 data = bounded_read(zf, "xl/workbook.xml")
-            except (KeyError, ExtractionLimitExceeded):
+            except KeyError:
                 return [], []
+            except ExtractionLimitExceeded:
+                raise _Unreadable from None
             rel_types = _sheet_types_by_rid(zf)
+            package = _package_anomalies(zf)
     except (zipfile.BadZipFile, OSError):
         return [], []
     try:
         root = safe_fromstring(data)
-    except ET.ParseError:
-        return [], []
-    anomalies: set[str] = set()
+    except Exception:  # noqa: BLE001 — DOCTYPE refused, unsupported encoding, malformed
+        raise _Unreadable from None
+    anomalies: set[str] = set(package)
     root_ns = root.tag[: root.tag.index("}") + 1] if root.tag.startswith("{") else ""
     if root_ns not in _SPREADSHEETML_NS or _local(root.tag) != "workbook":
         anomalies.add("unsupported_root")
@@ -136,10 +188,11 @@ def read_sheet_inventory(xlsx_path: Path) -> tuple[list[dict], list[str]]:
     active_tab = 0
     view = root.find(f"{root_ns}bookViews/{root_ns}workbookView")
     if view is not None:
-        try:
-            active_tab = int(view.attrib.get("activeTab", "0"))
-        except ValueError:
-            anomalies.add("bad_active_tab")
+        raw_tab = view.attrib.get("activeTab", "0")
+        if re.fullmatch(r"[0-9]{1,9}", raw_tab):
+            active_tab = int(raw_tab)
+        else:
+            anomalies.add("bad_active_tab")  # LO's toInt32 reads '0_1' etc. differently
     canonical_blocks = root.findall(f"{root_ns}sheets")
     if len(canonical_blocks) > 1:
         anomalies.add("multiple_sheets_blocks")
@@ -155,7 +208,7 @@ def read_sheet_inventory(xlsx_path: Path) -> tuple[list[dict], list[str]]:
         node, in_ac = stack.pop()
         local = _local(node.tag)
         in_ac = in_ac or local == "AlternateContent"
-        if local in ("sheet", "sheets"):
+        if local in ("sheet", "sheets", "bookViews", "workbookView"):
             if in_ac:
                 anomalies.add("markup_compatibility")
             if local == "sheet":
@@ -172,13 +225,18 @@ def read_sheet_inventory(xlsx_path: Path) -> tuple[list[dict], list[str]]:
             continue
         if _CALC_BAD_NAME.search(name) or name.startswith("'") or name.endswith("'"):
             anomalies.add("invalid_sheet_name")
+        if _ESCAPED_XSTRING.search(name):
+            anomalies.add("escaped_sheet_name")  # LO decodes _xHHHH_; the names differ
         if name.casefold() in seen:
             anomalies.add("duplicate_sheet_name")
         seen.add(name.casefold())
         state = el.attrib.get("state", "visible")
         if state not in _SPEC_STATES:
             anomalies.add("nonstandard_sheet_state")
-        rid = next((el.attrib[k + "id"] for k in _REL_NS if k + "id" in el.attrib), None)
+        rids = [el.attrib[k + "id"] for k in _REL_NS if k + "id" in el.attrib]
+        if len(rids) > 1:
+            anomalies.add("multiple_relationship_ids")  # LO takes the first in document order
+        rid = rids[0] if rids else None
         if rel_types is not None and (rid is None or rid not in rel_types
                                       or rel_types[rid] == "ambiguous"):
             anomalies.add("unresolved_sheet_relationship")

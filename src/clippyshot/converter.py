@@ -1098,7 +1098,10 @@ class Converter:
                 # Sheet sidecar is spreadsheet-only; keep the top-level
                 # metadata lean and only attach the block when at least
                 # one sheet (rendered or not) was discovered.
-                if detected.label in _SPREADSHEET_LABELS and _sheets_discovered:
+                # Also when the reader found no usable sheet but reported why (unreadable
+                # workbook, all sheets unnamed, ...): an unverified block, not silence.
+                if detected.label in _SPREADSHEET_LABELS and (
+                        _sheets_discovered or _sheet_anomalies):
                     metadata["sheets"] = _sheet_provenance(
                         _sheets_discovered, total_pages, single_page_sheets, page_records,
                         blank_indices if options.limits.skip_blanks else [],

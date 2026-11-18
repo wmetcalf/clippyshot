@@ -51,6 +51,10 @@ def _workbook(tmp_path, body: str, name: str = "book.xlsx", rels: bool = False) 
         z.writestr("xl/workbook.xml",
                    f'<workbook xmlns="{_MAIN}" xmlns:r="{_RELS_NS}">{body}</workbook>')
         if rels:
+            z.writestr("_rels/.rels",
+                       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/'
+                       f'relationships"><Relationship Id="rId1" Type="{_REL_T}officeDocument" '
+                       'Target="xl/workbook.xml"/></Relationships>')
             z.writestr("xl/_rels/workbook.xml.rels",
                        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/'
                        f'relationships"><Relationship Id="rId1" Type="{_REL_T}worksheet" '
@@ -154,8 +158,11 @@ class _SheetDetector:
 
 
 class _SheetRunner:
-    def __init__(self, pages, sheets, single=True, export_filter="calc_pdf_Export"):
+    def __init__(self, pages, sheets, single=True, export_filter="calc_pdf_Export",
+                 anomalies=()):
         self.pages, self.sheets, self.single, self.filter = pages, sheets, single, export_filter
+        self.anomalies = list(anomalies)
+        self.last_run_sheet_anomalies: list = []
         self.last_run_sheets: list = []
         self.last_run_single_page_sheets = False
         self.last_run_export_filter = ""
@@ -165,6 +172,7 @@ class _SheetRunner:
         imgs = [Image.new("RGB", (612, 792), (255, 255, 255)) for _ in range(self.pages)]
         imgs[0].save(out, "PDF", save_all=True, append_images=imgs[1:], resolution=72.0)
         self.last_run_sheets = list(self.sheets)
+        self.last_run_sheet_anomalies = list(self.anomalies)
         self.last_run_single_page_sheets = self.single
         self.last_run_export_filter = self.filter
         return out
@@ -296,3 +304,65 @@ def test_nested_alternate_content_is_scanned_linearly(tmp_path):
     t0 = time.monotonic()
     read_sheet_inventory(p)
     assert time.monotonic() - t0 < 2.0
+
+
+def test_convert_reports_reader_anomalies_and_never_verifies(tmp_path):
+    meta = _convert(tmp_path, _SheetRunner(3, SHEETS, anomalies=["nonstandard_package_part"]),
+                    Limits())
+    sh = meta["sheets"]
+    assert sh["page_mapping_verified"] is False
+    assert sh["reader_anomalies"] == ["nonstandard_package_part"]
+    assert all(p.get("sheet_name") is None for p in meta["pages"])
+
+
+def test_convert_emits_an_unverified_block_when_the_reader_found_no_sheet(tmp_path):
+    meta = _convert(tmp_path, _SheetRunner(2, [], anomalies=["unreadable_workbook"]), Limits())
+    assert meta["sheets"]["page_mapping_verified"] is False
+    assert meta["sheets"]["reader_anomalies"] == ["unreadable_workbook"]
+
+
+def test_reader_failures_are_anomalies_not_silence(tmp_path):
+    p = tmp_path / "book.xlsx"
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("xl/workbook.xml", '<!DOCTYPE workbook><workbook xmlns="' + _MAIN + '">'
+                   '<sheets><sheet name="A"/></sheets></workbook>')
+    assert read_sheet_inventory(p) == ([], ["unreadable_workbook"])
+    q = tmp_path / "sjis.xlsx"
+    with zipfile.ZipFile(q, "w") as z:
+        z.writestr("xl/workbook.xml", '<?xml version="1.0" encoding="Shift_JIS"?><workbook '
+                   f'xmlns="{_MAIN}"><sheets><sheet name="A"/></sheets></workbook>')
+    assert read_sheet_inventory(q)[1] == ["unreadable_workbook"]
+
+
+@pytest.mark.parametrize("rels_target,anomaly", [
+    ("xl/real.xml", "nonstandard_package_part"),
+    (None, "nonstandard_package_part"),
+])
+def test_reader_flags_a_package_whose_office_document_is_elsewhere(tmp_path, rels_target, anomaly):
+    p = _workbook(tmp_path, '<sheets><sheet name="A" r:id="rId1"/></sheets>', rels=True)
+    with zipfile.ZipFile(p) as z:
+        items = {n: z.read(n) for n in z.namelist() if n != "_rels/.rels"}
+    with zipfile.ZipFile(p, "w") as z:
+        for n, b in items.items():
+            z.writestr(n, b)
+        if rels_target:
+            z.writestr("_rels/.rels", '<Relationships xmlns="http://schemas.openxmlformats.org/'
+                       f'package/2006/relationships"><Relationship Id="rId1" '
+                       f'Type="{_REL_T}officeDocument" Target="{rels_target}"/></Relationships>')
+    assert anomaly in read_sheet_inventory(p)[1]
+
+
+@pytest.mark.parametrize("body,anomaly", [
+    ('<sheets><sheet name="M" r:id="rId2" s:id="rId1" '
+     'xmlns:s="http://purl.oclc.org/ooxml/officeDocument/relationships"/></sheets>',
+     "multiple_relationship_ids"),
+    ('<sheets><sheet name="A_x0042_C" r:id="rId1"/></sheets>', "escaped_sheet_name"),
+    ('<bookViews><workbookView activeTab="0_1"/></bookViews>'
+     '<sheets><sheet name="A" r:id="rId1"/></sheets>', "bad_active_tab"),
+    ('<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/'
+     '2006"><mc:Choice Requires="x15"><bookViews><workbookView activeTab="0"/></bookViews>'
+     '</mc:Choice></mc:AlternateContent><sheets><sheet name="A" r:id="rId1"/></sheets>',
+     "markup_compatibility"),
+])
+def test_reader_flags_more_libreoffice_divergences(tmp_path, body, anomaly):
+    assert anomaly in read_sheet_inventory(_workbook(tmp_path, body, rels=True))[1]
