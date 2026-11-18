@@ -255,6 +255,8 @@ def test_fresh_host_schedules_the_soffice_profile_on_the_first_pass(monkeypatch)
 
 
 def test_failed_attach_probe_with_nothing_to_load_is_not_success(monkeypatch, capsys):
+    monkeypatch.setattr(ha, "loaded_profile_names",
+                        lambda *a, **k: frozenset({"clippyshot-soffice"}))
     monkeypatch.setattr(ss, "_restrict_active", lambda: True)
     monkeypatch.setattr(ss.shutil, "which", lambda b: f"/usr/bin/{b}")
     monkeypatch.setattr(ss, "_userns_ok", lambda b, p: True)
@@ -270,3 +272,12 @@ def test_verification_without_aa_exec_is_not_success(monkeypatch):
     monkeypatch.setattr(ss.shutil, "which", lambda b: None if b == "aa-exec" else f"/usr/bin/{b}")
     ok, lines = ss.verify_attach()
     assert not ok and any("aa-exec" in line for line in lines)
+
+
+def test_unmanaged_stock_profile_still_lets_apply_load_nsjail(monkeypatch, capsys):
+    host = Host(monkeypatch, [UNMANAGED])
+    monkeypatch.setattr(ss, "_userns_ok", lambda b, p: b != "nsjail")
+    applied: list = []
+    monkeypatch.setattr(ss, "apply", lambda actions, d: applied.extend(actions) or 0)
+    assert cli.main(["setup-sandbox", "--apply"]) == 1
+    assert [a.profile_name for a in applied] == ["clippyshot-nsjail"] and host.commands == []

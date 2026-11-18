@@ -119,7 +119,7 @@ def run_selftest() -> int:
         # Only point at disabling host hardening when bwrap could be the backend at all:
         # a forced nsjail/container deployment never runs bwrap.
         forced = os.environ.get("CLIPPYSHOT_SANDBOX", "").strip().lower()
-        bwrap_possible = forced in ("", "auto", "bwrap")
+        bwrap_possible = forced == "bwrap" or (forced == "" and shutil.which("bwrap") is not None)
         if (isinstance(e, AppArmorAttachUnavailable)
                 and e.probe.cause == "stock_profile_conflict") or (
                     bwrap_possible and stock.conflict):

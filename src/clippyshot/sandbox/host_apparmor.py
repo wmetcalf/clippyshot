@@ -85,6 +85,8 @@ class StockBwrapProfileState:
         return self.loaded is True or (self.installed and not self.disabled)
 
     def describe(self) -> str:
+        if not self.installed and self.loaded is None:
+            return "not visible here (no file in /etc/apparmor.d; kernel state unknown)"
         if not self.installed and self.loaded is not True:
             return "absent"
         if self.loaded is True:
@@ -169,6 +171,11 @@ class AaExecProbe:
                 f"Fix: run `{LOAD_COMMAND}` (see {README})."
             )
         tail = ""
+        if self.stock.loaded is None and not self.stock.conflict:
+            tail = (
+                f" The host kernel's profile list is not readable here (e.g. in a container), "
+                f"so a host-side {STOCK_BWRAP_PROFILE!r} cannot be ruled out."
+            )
         if self.stock.conflict:
             tail = (
                 f" The stock {STOCK_BWRAP_PROFILE!r} profile is also present "
@@ -200,8 +207,10 @@ def probe_aa_exec(
     stock = stock_state if stock_state is not None else stock_bwrap_profile_state()
     if exit_code == 0:
         cause = "ok"
-    elif stock.conflict and (any(sig in stderr for sig in _STOCK_SIGNATURES)
-                             or stock.loaded is True):
+    elif stock.conflict:
+        # Visibly present (loaded, or enabled to return at boot). Whatever the exact
+        # failure, the fix that applies is the one that disables it and loads all four
+        # profiles; pointing at --apply would hit setup-sandbox's conflict refusal.
         cause = "stock_profile_conflict"
     elif _STOCK_SIGNATURES[0] in stderr:
         # aa-exec refused, but not by a stock profile we can see: the process running bwrap

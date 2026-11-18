@@ -88,9 +88,10 @@ clippyshot setup-sandbox                                # reports the conflict, 
 clippyshot setup-sandbox --disable-stock-bwrap-profile  # fixes it (sudo, interactive)
 ```
 
-The flag is the explicit opt-in to change distro policy; `--apply` alone will not touch a
-host in this state (loading `clippyshot-bwrap` next to the stock profile only swaps one
-failure for the other). With the flag, setup runs, skipping any step already done:
+The flag is the explicit opt-in to change distro policy; `--apply` alone will not touch
+bwrap policy on a host in this state (loading `clippyshot-bwrap` next to the stock profile
+only swaps one failure for the other). It still loads profiles the stock profile does not
+affect, such as `clippyshot-nsjail`, so an nsjail host can keep the distro hardening. With the flag, setup runs, skipping any step already done:
 
 ```sh
 sudo ln -sf /etc/apparmor.d/bwrap-userns-restrict /etc/apparmor.d/disable/bwrap-userns-restrict

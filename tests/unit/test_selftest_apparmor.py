@@ -180,3 +180,16 @@ def test_no_disable_hint_for_a_forced_non_bwrap_backend(host, capsys, monkeypatc
     assert st.run_selftest() == 1
     err = _events(capsys.readouterr().err)["sandbox_unavailable"]
     assert "fix" not in err and err["stock_bwrap_profile"].startswith("loaded")
+
+
+def test_no_disable_hint_without_bwrap_or_with_an_invalid_backend(host, capsys, monkeypatch):
+    monkeypatch.setattr(st.shutil, "which", lambda n: None if n == "bwrap" else f"/usr/bin/{n}")
+    host(error=SandboxUnavailable("no sandbox backend available"), stock=_LOADED)
+    assert st.run_selftest() == 1
+    assert "fix" not in _events(capsys.readouterr().err)["sandbox_unavailable"]
+    monkeypatch.setattr(st.shutil, "which", lambda n: f"/usr/bin/{n}")
+    monkeypatch.setenv("CLIPPYSHOT_SANDBOX", "auto")
+    host(error=SandboxUnavailable("CLIPPYSHOT_SANDBOX='auto' is not a valid backend"),
+         stock=_LOADED)
+    assert st.run_selftest() == 1
+    assert "fix" not in _events(capsys.readouterr().err)["sandbox_unavailable"]

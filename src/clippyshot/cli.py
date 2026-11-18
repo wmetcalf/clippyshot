@@ -129,11 +129,6 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
             "  to ClippyShot with no untrusted local users; otherwise run ClippyShot in its own VM\n"
             "  or a gVisor/Firecracker tier, which never runs bwrap (deploy/apparmor/README.md)."
         )
-        try:
-            plan = ss.stock_fix_plan(rep.stock, profile_dir)
-        except ss.StockProfileUnmanaged as e:
-            print(f"\n{e}", file=sys.stderr)
-            return 1
         if not disable_stock:
             # The stock profile only affects /usr/bin/bwrap. Profiles for other backends
             # (clippyshot-nsjail) are still loaded on --apply, so an nsjail host can keep the
@@ -149,6 +144,12 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
                 rc = ss.apply(other, profile_dir)
                 if rc != 0:
                     return rc
+        try:
+            plan = ss.stock_fix_plan(rep.stock, profile_dir)
+        except ss.StockProfileUnmanaged as e:
+            print(f"\n{e}", file=sys.stderr)
+            return 1
+        if not disable_stock:
             print(f"\nTo fix on a dedicated host, run:\n\n  {ha.FIX_COMMAND}\n\n"
                   f"which disables {stock} persistently and loads the four ClippyShot "
                   "profiles via sudo:\n")
