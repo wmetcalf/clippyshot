@@ -82,9 +82,11 @@ _BILLION_LAUGHS = b"""<?xml version="1.0"?>
 ]>
 <root>&lol2;</root>"""
 
+# Declared but not referenced: bare ET.fromstring accepts this, so only the DTD guard
+# can refuse it (a referenced external entity already fails in ET as "undefined entity").
 _XXE = b"""<?xml version="1.0"?>
 <!DOCTYPE foo [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]>
-<foo>&xxe;</foo>"""
+<foo/>"""
 
 
 @pytest.mark.parametrize("payload", [_BILLION_LAUGHS, _XXE])
@@ -166,7 +168,8 @@ def test_inspect_altchunks_rejects_dtd_document(tmp_path: Path):
     )
     p = tmp_path / "xxe.docx"
     p.write_bytes(raw)
-    # safe_fromstring raises ParseError on the DOCTYPE → graceful empty result.
+    # safe_fromstring refuses the DOCTYPE (the entity is unreferenced, so only the guard
+    # can) → graceful empty result.
     assert altchunk.inspect_altchunks(p) == []
 
 
