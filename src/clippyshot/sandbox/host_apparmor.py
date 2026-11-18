@@ -111,13 +111,12 @@ def stock_bwrap_profile_state(
 
 
 def aa_exec_probe_argv(bwrap: str, aa_exec: str, profile: str) -> list[str]:
-    """CI's probe (`.github/workflows/ci.yml`), plus a fresh /proc.
+    """The probe CI runs (`.github/workflows/ci.yml`), argv for argv.
 
-    aa-exec writes /proc/self/attr/exec; a recursive ``--ro-bind / /`` carries the
-    host's /proc in read-only on some hosts (bubblewrap 0.9 on Ubuntu 24.04 answers
-    "Read-only file system"), which would fail the probe for a reason unrelated to
-    AppArmor policy. The real sandbox (``BwrapSandbox._build_argv``) mounts ``--proc``
-    too.
+    The fresh ``--proc /proc`` matters: aa-exec writes /proc/self/attr/exec, and the
+    host's /proc inherited through ``--ro-bind / /`` is read-only on some libapparmor
+    versions (Ubuntu 24.04: "Read-only file system"), which would fail the probe for a
+    reason unrelated to AppArmor policy. ``BwrapSandbox._build_argv`` mounts it too.
     """
     return [
         bwrap, "--unshare-user", "--die-with-parent", "--ro-bind", "/", "/",

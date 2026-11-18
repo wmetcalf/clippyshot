@@ -121,7 +121,12 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
             f"{ss.SOFFICE_PROFILE}` fails\n"
             "  (\"insufficient permissions to change to the profile\"). Loading clippyshot-bwrap\n"
             "  next to it breaks bwrap's uid map instead. ClippyShot's bwrap backend refuses\n"
-            "  to start (fail closed) until it is disabled."
+            "  to start (fail closed) until it is disabled.\n"
+            f"\n  COST: {stock} is host-wide hardening. Disabling it lets ANY local user or\n"
+            "  bwrap consumer get a capability-bearing user namespace through /usr/bin/bwrap\n"
+            "  (clippyshot-bwrap is unconfined + userns). Only do this on a host or VM dedicated\n"
+            "  to ClippyShot with no untrusted local users; otherwise run ClippyShot in its own VM\n"
+            "  or a gVisor/Firecracker tier, which never runs bwrap (deploy/apparmor/README.md)."
         )
         try:
             plan = ss.stock_fix_plan(rep.stock, profile_dir)
@@ -129,7 +134,7 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
             print(f"\n{e}", file=sys.stderr)
             return 1
         if not disable_stock:
-            print(f"\nTo fix, run:\n\n  {ha.FIX_COMMAND}\n\n"
+            print(f"\nTo fix on a dedicated host, run:\n\n  {ha.FIX_COMMAND}\n\n"
                   f"which disables {stock} persistently and loads the four ClippyShot "
                   "profiles via sudo:\n")
             for c in plan:
@@ -218,10 +223,11 @@ def build_parser() -> argparse.ArgumentParser:
                      help="load the needed profiles via sudo (interactive); default just prints them")
     pss.add_argument(
         "--disable-stock-bwrap-profile", action="store_true",
-        help="disable Ubuntu's stock bwrap-userns-restrict AppArmor profile persistently "
-             "(symlink into /etc/apparmor.d/disable/ + apparmor_parser -R), then load all four "
-             "ClippyShot profiles via sudo and re-probe; implies --apply. Without it, a host "
-             "where that profile is active is reported and setup exits non-zero",
+        help="dedicated hosts only (removes host-wide bwrap hardening): disable Ubuntu's stock "
+             "bwrap-userns-restrict AppArmor profile persistently (symlink into "
+             "/etc/apparmor.d/disable/ + apparmor_parser -R), then load all four ClippyShot "
+             "profiles via sudo and re-probe; implies --apply. Without it, a host where that "
+             "profile is active is reported and setup exits non-zero",
     )
     pss.add_argument("--profile-dir", default=None,
                      help="directory holding the clippyshot-{bwrap,nsjail} profiles (default: repo deploy/apparmor)")

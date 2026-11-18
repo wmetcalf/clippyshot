@@ -547,7 +547,11 @@ host prep for the blastbox runtimes themselves (KVM, runsc, Docker) is in blastb
   aa-exec. **No host or guest-image prep for the stock bwrap profile.**
 - **Bare host, or plain `docker run` where ClippyShot itself selects bwrap.** bwrap runs
   under the host kernel's AppArmor policy, so the stock profile conflicts. ClippyShot
-  refuses to start with an error naming `bwrap-userns-restrict`. Fix it once, on the host:
+  refuses to start with an error naming `bwrap-userns-restrict`. Disabling that profile
+  removes host-wide hardening (any local user can then get a capability-bearing user
+  namespace through `/usr/bin/bwrap`), so do it only on a host or VM dedicated to
+  ClippyShot; on a shared host use a VM or the gVisor/Firecracker tiers. On a dedicated
+  host, fix it once:
 
   ```sh
   clippyshot setup-sandbox                                # reports the conflict, exits 1

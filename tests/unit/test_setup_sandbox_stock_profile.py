@@ -204,3 +204,12 @@ def test_unmanaged_loaded_profile_is_refused_with_instructions(monkeypatch, caps
     assert rc != 0
     assert host.commands == []
     assert "unpriv_bwrap" in capsys.readouterr().err
+
+
+def test_it_states_the_host_wide_cost_before_anyone_opts_in(monkeypatch, capsys):
+    """Disabling the stock profile lets any bwrap user get a capability-bearing userns."""
+    Host(monkeypatch, [LOADED])
+    cli.main(["setup-sandbox"])
+    out = capsys.readouterr().out
+    assert "host-wide" in out
+    assert "dedicated" in out
