@@ -724,3 +724,26 @@ def test_xlsb_part_caps_each_apply(tmp_path, monkeypatch):
     parts = {n for n, cap in seen if cap == sr.MAX_XLSB_PART_BYTES}
     assert {"_rels/.rels", "[Content_Types].xml", "xl/workbook.bin",
             "xl/_rels/workbook.bin.rels"} <= parts
+
+
+def test_spare_fat_sectors_are_not_refused(tmp_path):
+    """CFB allows more FAT sectors than coverage needs (codex on #68): a modest surplus is
+    accepted; only counts absurd for the file size are refused."""
+    p = tmp_path / "spare.xls"
+    raw = bytearray(FIXTURE_XLS.read_bytes())
+    struct.pack_into("<I", raw, 0x2C, 3)  # header claims 3 FAT sectors; the file needs 1
+    p.write_bytes(bytes(raw))
+    # olefile may or may not accept the claim; the header pre-check must not be the refuser.
+    sr._check_cfb_header(p)
+
+
+def test_xlsb_part_named_in_another_case_is_read(tmp_path):
+    p = tmp_path / "case.xlsb"
+    with zipfile.ZipFile(p, "w") as z:
+        _package(z, target="XL/WORKBOOK.BIN")
+        z.writestr("xl/workbook.bin", _book(_bundle_sh("S", 2, "rId1")))
+        z.writestr("xl/_rels/workbook.bin.rels",
+                   f'<Relationships xmlns="{_PKG_RELS}"><Relationship Id="rId1" '
+                   f'Type="{_REL_MS}xlMacrosheet" Target="m.bin"/></Relationships>')
+    assert sr.read_binary_sheet_records(p) == (
+        sr.XLSB_SOURCE, [{"name": "S", "state": "veryHidden", "type": "macro"}])

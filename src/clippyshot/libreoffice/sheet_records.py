@@ -150,8 +150,11 @@ def _check_cfb_header(path: Path) -> None:
         raise _Declined("unreadable")
     sectors = -(-max(0, size - sector) // sector)  # sectors after the header
     per_fat = sector // 4
-    if (n_fat > sectors // per_fat + 1 or n_mini > sectors
-            or n_difat > n_fat // (per_fat - 1) + 1):
+    # Spare FAT sectors are legal, so allow generous slack over what the file needs; the
+    # bound only has to stop counts that are absurd for the file's size.
+    needed_fat = sectors // per_fat + 1
+    if (n_fat > 2 * needed_fat + 16 or n_mini > sectors
+            or n_difat > n_fat // (per_fat - 1) + 2):
         raise _Declined("unreadable")
 
 
@@ -169,6 +172,8 @@ def _stream_entry(ole, lo_name: str):
     if not ole_view and not lo_view:
         return None
     if len(ole_view) != 1 or len(lo_view) != 1 or ole_view[0] is not lo_view[0]:
+        raise _Declined("unreadable")
+    if ole_view[0].entry_type != 2:  # STGTY_STREAM; a storage by that name is no stream
         raise _Declined("unreadable")
     return ole_view[0]
 
@@ -359,10 +364,12 @@ def _xlsb_workbook_part(zf: zipfile.ZipFile) -> str | None:
         return None  # an xlsx/xlsm main part: not a binary workbook
     if "\\" in part or ".." in part.split("/") or not part:
         raise _Declined("unreadable")
-    if sum(1 for n in zf.namelist() if n.lower() == part.lower()) != 1:
+    members = [n for n in zf.namelist() if n.lower() == part.lower()]
+    if len(members) != 1:
         raise _Declined("unreadable")  # missing, or a case-variant twin LO might read
+    # OPC part names compare case-insensitively.
     overrides = [o for o in ct.findall(f"{_CT_NS}Override")
-                 if o.attrib.get("PartName", "") == "/" + part]
+                 if o.attrib.get("PartName", "").lower() == "/" + part.lower()]
     if overrides:
         ok = all(o.attrib.get("ContentType", "") == _XLSB_WORKBOOK_CT for o in overrides)
     else:
@@ -371,7 +378,7 @@ def _xlsb_workbook_part(zf: zipfile.ZipFile) -> str | None:
                  for d in ct.findall(f"{_CT_NS}Default"))
     if not ok:
         raise _Declined("unreadable")
-    return part
+    return members[0]  # the zip member's own spelling (zipfile lookups are case-exact)
 
 
 def _read_xlsb(path: Path) -> list[dict] | None:
