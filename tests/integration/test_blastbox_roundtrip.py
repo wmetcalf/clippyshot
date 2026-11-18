@@ -195,8 +195,9 @@ def test_roundtrip_conforms_to_engine_contract(detonation_output):
 def test_every_safe_fixture_conforms_to_engine_contract(fixture, tmp_path):
     """Every safe fixture, ok or rejected, yields a contract-conforming envelope.
 
-    Covers the spreadsheet (focused), trimmed-derivative and rejected (PDF input) paths
-    the single-docx fixture above never reaches."""
+    Covers the spreadsheet, trimmed-derivative and rejected (PDF input) paths the
+    single-docx fixture above never reaches. No safe fixture yields a focused crop; that
+    family is checked by tests/unit/test_engine_mapping.py's stub instead."""
     pytest.importorskip("blastbox.contract.engine_contract")
     out = tmp_path / "out"
     out.mkdir()

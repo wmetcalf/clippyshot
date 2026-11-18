@@ -15,8 +15,9 @@ statuses = ["ok", "rejected", "engine_error"]
 # so page 1000 at the max_pages ceiling is page-1000.png); derivatives add a suffix.
 # max_count is per family. The sum can exceed what the host seals: blastbox
 # Limits.max_artifacts (default 1000) caps the TOTAL, and Loadout refuses more than 1000
-# declarations (gap loadout-byte-and-count-limits), so max_pages near the 1000 ceiling with
-# derivatives is not a configuration that round-trips.
+# declarations (gap loadout-byte-and-count-limits). Page PNGs + derivatives + document.pdf
+# must stay <= 1000: with one derivative per page (every spreadsheet page gets a focused crop)
+# that fails from max_pages=500, with both from ~333, and at 1000 pages even with none.
 [[artifacts]]
 id = "p*-trimmed"
 path = "page-*-trimmed.png"
@@ -66,11 +67,14 @@ required_root_fields = ["label", "page_count_total", "page_count_rendered", "tru
 schema_version = "1"
 
 # Findings are envelope warnings with stable codes. Per page, the scanner Record child of each
-# Page carries qr_count (exact), qr_values (decoded QR text, whole values in page order within a
-# document-wide 256 KiB-char budget; qr_values_truncated is true on a page where any were
-# dropped), ocr_text (<= 10000 chars) and effective_dpi (set only on a page clamped below the
-# requested DPI). qr_values is ZXingReader's text rendering (control bytes appear as e.g.
-# '<NUL>'); the raw bytes are only raw_bytes_hex inside clippyshot_metadata.
+# Page carries qr_count (symbols decoded), qr_values (decoded QR text, whole values in page
+# order within a document-wide budget of at most 256 KiB of sealed JSON and only the headroom
+# the rest of the envelope leaves under the host's max_metadata_bytes; qr_values_truncated is
+# true on a page where any were dropped), ocr_text (<= 10000 chars) and effective_dpi (set only
+# on a page clamped below the requested DPI). qr_values is ZXingReader's text rendering: with
+# the 2.2.x plain-text output it is '-mode escaped' (newlines and control bytes appear as
+# '<LF>', '<NUL>', ...; qr.py), so one symbol is always one record; the raw bytes are only
+# raw_bytes_hex inside clippyshot_metadata.
 [[detections]]
 code = "altchunk_present"
 severity = "medium"
@@ -92,7 +96,7 @@ description = "Input extension disagrees with the detected type."
 [[detections]]
 code = "qr_decoded"
 severity = "info"
-source = "warnings[].code (one per DISTINCT decoded QR value, at its first page; at most 256 per document and 64 KiB-chars of messages in total; message is the value cut at 2000 chars, context 'page N' plus ' (value truncated)' when cut)"
+source = "warnings[].code (one per DISTINCT decoded QR value, at its first page; at most 256 per document and at most 64 KiB of sealed JSON (less when the envelope has less headroom); message is the value cut at 2000 chars, context 'page N' plus ' (value truncated)' when cut)"
 description = "A QR code decoded from a rendered page (often a URL). Values are also on the page's scanner Record (qr_values, budgeted) and all of them in clippyshot_metadata."
 
 [[detections]]
@@ -127,7 +131,7 @@ description = "document_outputs.render_coverage reads clippyshot_metadata.sheets
 
 [[gaps]]
 id = "loadout-byte-and-count-limits"
-description = "document_outputs.map_outputs refuses the WHOLE ok envelope (EngineUnavailable) on: zero or more than 1000 artifact declarations, any artifact over 50 MiB, a combined output over 100 MiB, clippyshot_metadata over 5 MiB, a page with more than 256 QR codes, or a QR value over 65536 chars; engines.py also caps clippyshot input at 50 MiB (engine default 100 MiB). The engine bounds none of these: in particular a page with 257 small QR codes is a valid ok result that Loadout discards wholesale, so an attacker can suppress the render evidence. Fix belongs consumer-side (degrade, not refuse) or as an engine per-page QR cap; owner decision."
+description = "document_outputs.map_outputs refuses the WHOLE ok envelope (EngineUnavailable) on: zero or more than 1000 artifact declarations, any artifact over 50 MiB, a combined output over 100 MiB, clippyshot_metadata over 5 MiB, a page with more than 256 QR codes, more than 10000 PDF-text/URL rows in total (one URL row per QR code on every page), or a QR value over 65536 chars; engines.py also caps clippyshot input at 50 MiB (engine default 100 MiB). The engine bounds none of these: in particular a page with 257 small QR codes is a valid ok result that Loadout discards wholesale, so an attacker can suppress the render evidence. An engine per-page QR cap alone would not close it (256 x 50 default pages > 10000 rows). Fix belongs consumer-side (degrade, not refuse); owner decision."
 
 [[gaps]]
 id = "loadout-rejected-as-unavailable"

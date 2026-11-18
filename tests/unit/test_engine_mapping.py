@@ -105,7 +105,7 @@ def test_typed_qr_values_share_a_document_budget(tmp_path):
     """qr_values duplicates every payload already in clippyshot_metadata, and the host refuses
     a sealed envelope over its metadata cap (4 MiB by default). A hostile document full of
     near-capacity QR codes must not turn a conversion that sealed before into one that fails."""
-    from clippyshot.engine import _QR_VALUES_BUDGET_CHARS
+    from clippyshot.engine import _QR_VALUES_BUDGET_BYTES
 
     pages = [
         {"index": i, "file": f"page-{i:03d}.png", "width_mm": 210.0, "height_mm": 297.0,
@@ -117,11 +117,47 @@ def test_typed_qr_values_share_a_document_budget(tmp_path):
     res, _ = _detonate(tmp_path, _meta(pages=pages))
     records = [_scanner(p) for p in res.payload.children]
     kept = sum(len(v) for r in records for v in r["qr_values"])
-    assert kept <= _QR_VALUES_BUDGET_CHARS
+    assert kept <= _QR_VALUES_BUDGET_BYTES
     assert all(r["qr_count"] == 16 for r in records)
     assert records[0]["qr_values_truncated"] is False
     assert records[-1]["qr_values_truncated"] is True
     assert records[-1]["qr_values"] == []
+
+
+def test_qr_copies_only_use_the_headroom_the_envelope_leaves(tmp_path):
+    """A document that sealed without the typed QR copies must still seal with them: the
+    copies get only the room the rest of the envelope leaves under max_metadata_bytes."""
+    pages = [
+        {"index": i, "file": f"page-{i:03d}.png", "width_mm": 210.0, "height_mm": 297.0,
+         "qr": [{"format": "qr_code", "value": f"{i}-{j}-" + "\U0001F600" * 700,
+                 "position": []} for j in range(4)],
+         "ocr": {}}
+        for i in range(1, 21)
+    ]
+    meta = _meta(pages=pages)
+    eng = ClippyShotEngine()
+    eng._converter = _StubConverter(meta)
+    inp = tmp_path / "in.docx"
+    inp.write_bytes(b"x")
+    out = tmp_path / "out"
+    out.mkdir()
+    cap = 1_000_000
+    res = eng.detonate(inp, out, BlastboxLimits(timeout_s=30, max_metadata_bytes=cap))
+    sealed = len(res.payload.model_dump_json(by_alias=True).encode()) + sum(
+        len(w.model_dump_json().encode()) for w in res.warnings) + 512 * len(res.artifacts)
+    assert sealed < cap
+    records = [_scanner(p) for p in res.payload.children]
+    assert any(r["qr_values_truncated"] for r in records)
+
+
+def test_qr_value_budget_never_skips_a_middle_value():
+    from clippyshot.engine import _budgeted_qr_values
+
+    pages = [{"index": 1, "qr": [{"value": "a" * 900}]},
+             {"index": 2, "qr": [{"value": "b" * 2000}, {"value": "c" * 10}]}]
+    out = _budgeted_qr_values(pages, 1000)
+    assert out[1] == (["a" * 900], False)
+    assert out[2] == ([], True)
 
 
 def test_altchunk_detail_with_non_ascii_content_type_keeps_its_context(tmp_path):
@@ -179,20 +215,20 @@ def test_repeated_qr_value_does_not_spend_the_finding_cap(tmp_path):
 
 
 def test_qr_finding_messages_share_a_character_budget(tmp_path):
-    from clippyshot.engine import _QR_WARNING_BUDGET_CHARS
+    from clippyshot.engine import _QR_WARNING_BUDGET_BYTES
 
     meta = _meta()
     meta["pages"][0]["qr"] = [{"format": "qr_code", "value": f"{i:04d}" + "z" * 2500,
                                "position": []} for i in range(200)]
     res, _ = _detonate(tmp_path, meta)
     qr = [w for w in res.warnings if w.code == "qr_decoded"]
-    assert sum(len(w.message) for w in qr) <= _QR_WARNING_BUDGET_CHARS
+    assert sum(len(w.message) for w in qr) <= _QR_WARNING_BUDGET_BYTES
     assert [w.code for w in res.warnings].count("qr_decoded_truncated") == 1
 
 
 def test_derivative_pages_conform_to_contract(tmp_path):
-    """The p*-trimmed / p*-focused families are only produced by real renders that no safe
-    fixture triggers; drive them through the stub so a drifted id or path fails here."""
+    """No safe fixture produces a p*-focused crop (trimmed ones come from most real renders);
+    drive both families through the stub so a drifted id or path fails here."""
     ec = pytest.importorskip("blastbox.contract.engine_contract")
     meta = _meta()
     meta["pages"][0]["trimmed"] = {"file": "page-001-trimmed.png", "removed_percent": 10}

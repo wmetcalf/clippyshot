@@ -246,6 +246,36 @@ def _zxing_supports_json(bin_path: str, runner=None) -> bool:
     return result
 
 
+_zxing_escaped_mode_cache: dict[str, bool] = {}
+
+
+def _zxing_supports_escaped_mode(bin_path: str, runner=None) -> bool:
+    """True if this ZXingReader accepts ``-mode escaped`` (2.2.x plain-text output).
+
+    The plain-text output is line-structured, but ZXing prints the decoded text raw, so a
+    payload containing a newline would be cut at it, and one containing a blank line plus
+    ``Text:``/``Format:`` lines would forge extra records. ``-mode escaped`` renders
+    non-graphical characters as ``<LF>``, ``<NUL>`` ... so every payload stays on its line.
+    Probed like :func:`_zxing_supports_json` (through ``runner`` when given) and cached.
+    """
+    if bin_path in _zxing_escaped_mode_cache:
+        return _zxing_escaped_mode_cache[bin_path]
+    try:
+        if runner is not None:
+            exit_code, stdout, stderr = runner([bin_path, "-help"], 5)
+            result = exit_code == 0 and "escaped" in (stdout + stderr)
+        else:
+            proc = subprocess.run(
+                [bin_path, "-help"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            result = "escaped" in (proc.stdout or "") + (proc.stderr or "")
+    except Exception:
+        result = False
+    _zxing_escaped_mode_cache[bin_path] = result
+    return result
+
+
 # Format name map: ZXingReader 2.2.x plain-text → normalized internal name
 _PLAINTEXT_FORMAT_MAP: dict[str, str] = {
     "qrcode": "qr_code",
@@ -398,6 +428,8 @@ def scan_qr(
         # ZXingReader 2.2.x: uses -format (singular) with PascalCase names
         v2_formats = _translate_formats_for_v2(formats)
         argv = [bin_path, "-fast", "-norotate", "-noscale"]
+        if _zxing_supports_escaped_mode(bin_path, runner=runner):
+            argv += ["-mode", "escaped"]
         if v2_formats:
             argv += ["-format", v2_formats]
         argv.append(str(png_path))

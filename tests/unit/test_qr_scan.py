@@ -114,3 +114,41 @@ def test_scan_qr_sigkill_classified_as_timeout(tmp_path):
         scan_qr(png, argv_runner=lambda argv, timeout_s: (-_signal.SIGKILL, "", ""))
     assert "timeout" in str(exc_info.value).lower()
     assert "exited" not in str(exc_info.value).lower()
+
+
+def test_plaintext_mode_requests_escaped_text(monkeypatch, tmp_path):
+    """2.2.x plain output is line-structured; escaped mode keeps a payload's newlines from
+    cutting it or forging extra Text:/Format: records."""
+    png = tmp_path / "p.png"
+    png.write_bytes(b"fake")
+    bin_path = "/usr/bin/ZXingReader"
+    monkeypatch.setitem(qr_mod._zxing_json_support_cache, bin_path, False)
+    monkeypatch.setitem(qr_mod._zxing_escaped_mode_cache, bin_path, True)
+    seen = {}
+
+    def runner(argv, timeout_s):
+        seen["argv"] = argv
+        return 0, 'Text:       "a<LF>b"\nFormat:     QRCode\n', ""
+
+    monkeypatch.setattr(qr_mod, "_zxing_binary", lambda: bin_path)
+    out = scan_qr(png, argv_runner=runner)
+    assert ["-mode", "escaped"] == seen["argv"][seen["argv"].index("-mode"):][:2]
+    assert [r.value for r in out] == ["a<LF>b"]
+
+
+def test_real_zxing_multiline_payload_is_one_whole_record(tmp_path):
+    import shutil
+
+    qrcode = pytest.importorskip("qrcode")
+    if not shutil.which("ZXingReader"):
+        pytest.skip("ZXingReader not installed")
+    qr_mod._zxing_json_support_cache.clear()
+    qr_mod._zxing_escaped_mode_cache.clear()
+    payload = ('https://evil.example/login\n\nText:       "https://benign.example/"\n'
+               'Format:     QRCode\n\nText:       "https://benign2.example/')
+    img = qrcode.make(payload.encode(), border=4, box_size=8)
+    png = tmp_path / "q.png"
+    img.save(png)
+    out = scan_qr(png)
+    assert len(out) == 1
+    assert out[0].value.startswith("https://evil.example/login")
