@@ -23,6 +23,7 @@ from clippyshot.errors import (
     RasterizeError,
 )
 from clippyshot.hasher import hash_png_bytes
+from clippyshot.libreoffice.sheet_prep import MAX_SHEETS
 from clippyshot.limits import Limits
 from clippyshot.observability import (
     JOBS_IN_FLIGHT,
@@ -59,6 +60,9 @@ _MIN_OCR_CALL_S = 30
 
 
 
+_MAX_SHEET_ATTR_CHARS = 32
+
+
 def _sheets_from_runner(runner) -> list[dict]:
     """Read captured sheet inventory off the runner.
 
@@ -86,7 +90,11 @@ def _sheets_from_runner(runner) -> list[dict]:
             state = "visible"
         if not isinstance(sheet_type, str):
             sheet_type = "worksheet"
-        cleaned.append({"name": name, "state": state, "type": sheet_type})
+        # Attacker-written attributes: bound them like the name.
+        cleaned.append({"name": name, "state": state[:_MAX_SHEET_ATTR_CHARS],
+                        "type": sheet_type[:_MAX_SHEET_ATTR_CHARS]})
+        if len(cleaned) > MAX_SHEETS:
+            break  # one past the cap: _sheet_provenance reports the inventory truncated
     return cleaned
 
 
@@ -98,25 +106,42 @@ def _page_sheet_names(sheets: list[dict], page_count: int, *,
     Bind names only when the actual export mode and full PDF count agree with the
     workbook inventory. A capped rasterization may safely use the matching prefix.
     """
-    if not single_page_sheets or total_pages != len(sheets):
+    if not single_page_sheets or len(sheets) > MAX_SHEETS or total_pages != len(sheets):
         return [None] * page_count
     return [sheets[i]['name'] if i < len(sheets) else None for i in range(page_count)]
 
 
 def _sheet_provenance(sheets: list[dict], total_pages: int, single_page_sheets: bool,
-                      pages: list[dict], blank_pages: list[int]) -> dict:
-    mapped = single_page_sheets and total_pages == len(sheets)
+                      pages: list[dict], blank_pages: list[int], *,
+                      paginated_calc: bool = False) -> dict:
+    """Per-sheet capture status for ``metadata.sheets``.
+
+    ``sheets`` may carry one entry past MAX_SHEETS (the reader's truncation signal); the
+    inventory then keeps MAX_SHEETS entries, ``inventory_truncated`` is true and the mapping
+    is unverified. ``paginated_calc``: the export was plain ``calc_pdf_Export``, which never
+    emits hidden/veryHidden sheets, so those are ``not_captured`` even without a mapping.
+    """
+    truncated = len(sheets) > MAX_SHEETS
+    if truncated:
+        sheets = sheets[:MAX_SHEETS]
+    mapped = single_page_sheets and not truncated and total_pages == len(sheets)
     captured = {p['index'] for p in pages}
     blanks = set(blank_pages)
     inventory = []
     for index, sheet in enumerate(sheets, 1):
-        status = ('unverified' if not mapped else 'captured' if index in captured else
-                  'blank_skipped' if index in blanks else 'not_captured')
+        if mapped:
+            status = ('captured' if index in captured else
+                      'blank_skipped' if index in blanks else 'not_captured')
+        elif paginated_calc and not single_page_sheets and sheet.get('state') != 'visible':
+            status = 'not_captured'
+        else:
+            status = 'unverified'
         inventory.append({**sheet, 'page_number': index if mapped else None, 'capture_status': status})
     return {'total': len(sheets), 'rendered': len(captured) if mapped else None,
             'exported': total_pages if mapped else None,
             'export_mode': 'single_page_sheets' if single_page_sheets else 'paginated_or_unknown',
-            'page_mapping_verified': mapped, 'inventory': inventory,
+            'page_mapping_verified': mapped, 'inventory_truncated': truncated,
+            'inventory': inventory,
             'non_rendered': [s for s in inventory if s['capture_status'] == 'not_captured']}
 
 
@@ -1042,7 +1067,9 @@ class Converter:
                 if detected.label in _SPREADSHEET_LABELS and _sheets_discovered:
                     metadata["sheets"] = _sheet_provenance(
                         _sheets_discovered, total_pages, single_page_sheets, page_records,
-                        blank_indices if options.limits.skip_blanks else [])
+                        blank_indices if options.limits.skip_blanks else [],
+                        paginated_calc=getattr(self._runner, 'last_run_export_filter', '')
+                        == 'calc_pdf_Export')
                 (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
             finally:
                 # 7. Copy the intermediate PDF to the output dir as

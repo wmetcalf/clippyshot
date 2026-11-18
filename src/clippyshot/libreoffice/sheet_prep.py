@@ -42,6 +42,15 @@ def is_spreadsheet(path: Path) -> bool:
 # OOXML spreadsheet namespace used in xl/workbook.xml. Hardcoded because
 # this namespace is frozen in the OPC/OOXML spec (ECMA-376 part 1).
 _OOXML_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+# Transitional, Strict, and unqualified (some non-Microsoft writers) workbook roots.
+_SPREADSHEETML_NS = (
+    _OOXML_NS,
+    "{http://purl.oclc.org/ooxml/spreadsheetml/main}",
+    "",
+)
+# Sheets kept in the inventory. A workbook with more is reported truncated and its page
+# mapping unverified; this bounds the metadata a crafted workbook can make us emit.
+MAX_SHEETS = 512
 
 
 def read_sheet_list(xlsx_path: Path) -> list[dict]:
@@ -75,26 +84,26 @@ def read_sheet_list(xlsx_path: Path) -> list[dict]:
         root = safe_fromstring(data)
     except ET.ParseError:
         return []
-    sheets = root.find(f"{_OOXML_NS}sheets")
-    if sheets is None:
-        # Some non-Microsoft writers emit without a namespace; try unqualified.
-        sheets = root.find("sheets")
-    if sheets is None:
+    # Read the sheet list the way LibreOffice's importer does, so a page-count match can be
+    # trusted as a positional mapping: only <sheet> elements in the workbook's own
+    # SpreadsheetML namespace (a foreign-namespace <x:sheet> is ignored by LO), across EVERY
+    # <sheets> block (LO imports them all, not just the first).
+    root_ns = root.tag[: root.tag.index("}") + 1] if root.tag.startswith("{") else ""
+    if root_ns not in _SPREADSHEETML_NS:
         return []
     out: list[dict] = []
-    for sheet in sheets:
-        # Accept both namespaced and bare tag names.
-        tag = sheet.tag.rsplit("}", 1)[-1]
-        if tag != "sheet":
-            continue
-        name = sheet.attrib.get("name")
-        if not isinstance(name, str) or not name:
-            continue
-        state = sheet.attrib.get("state", "visible")
-        # type attribute: when missing it's a worksheet by convention. Only
-        # Excel 4 macro sheets set this explicitly.
-        sheet_type = sheet.attrib.get("type", "worksheet")
-        out.append({"name": name, "state": state, "type": sheet_type})
+    for sheets in root.findall(f"{root_ns}sheets"):
+        for sheet in sheets.findall(f"{root_ns}sheet"):
+            if len(out) > MAX_SHEETS:
+                return out  # the caller sees > MAX_SHEETS and marks the list truncated
+            name = sheet.attrib.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            state = sheet.attrib.get("state", "visible")
+            # type attribute: when missing it's a worksheet by convention. Only
+            # Excel 4 macro sheets set this explicitly.
+            sheet_type = sheet.attrib.get("type", "worksheet")
+            out.append({"name": name, "state": state, "type": sheet_type})
     return out
 
 

@@ -439,3 +439,72 @@ def test_successful_export_records_actual_sheet_mode_and_resets_between_jobs(tmp
     doc.write_bytes(b'fixture')
     runner.convert_to_pdf(doc,tmp_path/'word-out',Limits(),'docx')
     assert runner.last_run_single_page_sheets is False and runner.last_run_sheets==[]
+
+
+def _ooxml_book(path):
+    import zipfile
+    with zipfile.ZipFile(path, 'w') as z:
+        z.writestr('xl/workbook.xml', '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets><sheet name="Visible" sheetId="1"/><sheet name="Payload" state="hidden" sheetId="2"/></sheets></workbook>')
+
+
+class _FilterSandbox:
+    """Fails every attempt whose --convert-to matches ``fail_if``; succeeds otherwise."""
+    name = "fake-filter"
+
+    def __init__(self, fail_if):
+        self.fail_if = fail_if
+        self.requests: list = []
+
+    def run(self, request):
+        self.requests.append(request)
+        conv = request.argv[request.argv.index("--convert-to") + 1]
+        name = Path(request.argv[-1]).name
+        if self.fail_if(conv, name):
+            return SandboxResult(exit_code=1, stdout=b"",
+                                 stderr=b"Error: source file could not be loaded\n",
+                                 duration_ms=5, killed=False)
+        out_dir_host = next(m.host_path for m in request.rw_mounts
+                            if m.sandbox_path == Path("/sandbox/out"))
+        (out_dir_host / f"{Path(name).stem}.pdf").write_bytes(b"%PDF-1.4\nfake\n%%EOF\n")
+        return SandboxResult(exit_code=0, stdout=b"", stderr=b"", duration_ms=5, killed=False)
+
+    def smoketest(self):
+        return SandboxResult(0, b"", b"", 1, False)
+
+
+def test_failed_job_does_not_inherit_the_previous_sheet_mode(tmp_path):
+    from clippyshot.errors import LibreOfficeError
+
+    src = tmp_path / 'book.xlsx'
+    _ooxml_book(src)
+    runner = LibreOfficeRunner(sandbox=FakeSandbox(), uno_server=None)
+    runner.convert_to_pdf(src, tmp_path / 'a', Limits(), 'xlsx')
+    assert runner.last_run_single_page_sheets is True and runner.last_run_sheets
+    runner._sandbox = FailingSandbox()
+    with pytest.raises(LibreOfficeError):
+        runner.convert_to_pdf(src, tmp_path / 'b', Limits(), 'xlsx')
+    assert runner.last_run_single_page_sheets is False
+    assert runner.last_run_sheets == [] and runner.last_run_export_filter == ""
+
+
+def test_cold_paginated_fallback_is_recorded_as_not_single_page(tmp_path):
+    src = tmp_path / 'book.xlsx'
+    _ooxml_book(src)
+    sb = _FilterSandbox(lambda conv, name: "SinglePageSheets" in conv)
+    runner = LibreOfficeRunner(sandbox=sb, uno_server=None)
+    runner.convert_to_pdf(src, tmp_path / 'out', Limits(), 'xlsx')
+    assert runner.last_run_single_page_sheets is False
+    assert runner.last_run_export_filter == "calc_pdf_Export"
+    assert [s['name'] for s in runner.last_run_sheets] == ['Visible', 'Payload']
+
+
+def test_original_name_retry_still_captures_the_sheet_inventory(tmp_path):
+    """An OOXML workbook named .xls: the .xlsx rewrite is refused, the original-name retry
+    exports the same workbook, so its sheet list must still be read."""
+    src = tmp_path / 'book.xls'
+    _ooxml_book(src)
+    sb = _FilterSandbox(lambda conv, name: name.endswith('.xlsx'))
+    runner = LibreOfficeRunner(sandbox=sb, uno_server=None)
+    runner.convert_to_pdf(src, tmp_path / 'out', Limits(), 'xlsx')
+    assert Path(sb.requests[-1].argv[-1]).name == 'book.xls'
+    assert [s['name'] for s in runner.last_run_sheets] == ['Visible', 'Payload']
