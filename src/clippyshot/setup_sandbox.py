@@ -113,9 +113,11 @@ def _diagnose_attach(rep: SetupReport) -> None:
         return
     rep.notes.append(f"aa-exec attach probe ({SOFFICE_PROFILE} inside bwrap): FAILED "
                      f"[{probe.cause}] {probe.stderr}")
-    if probe.cause == "profile_not_loaded" and not rep.stock_conflict:
+    # clippyshot-soffice does not conflict with the stock profile, so it is scheduled (and
+    # loaded by --apply) whether or not the stock profile is present.
+    if probe.cause == "profile_not_loaded":
         rep.actions.append(ProfileAction("aa-exec", aa_exec, SOFFICE_PROFILE))
-    elif not rep.stock_conflict:
+    else:
         # The probe stops at the first failure: on a fresh host bwrap's own userns fails
         # before aa-exec runs, so a missing clippyshot-soffice would only show on a second
         # pass. Schedule it now when the kernel's profile list says it is not loaded.

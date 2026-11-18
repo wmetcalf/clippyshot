@@ -247,13 +247,14 @@ def test_uid_map_failure_without_a_stock_profile_is_a_plain_failure():
     assert p.cause == "failed" and ha.FIX_COMMAND not in p.message()
 
 
-def test_any_failure_under_a_visible_stock_profile_names_the_disable_fix():
-    """--apply is refused on a conflicted host, so pointing at it would be a dead end."""
+def test_missing_soffice_with_an_unloaded_stock_profile_names_the_load_fix():
+    """The unloaded stock profile cannot cause this; --apply loads clippyshot-soffice even
+    on a host where the stock profile is enabled."""
     enabled = ha.StockBwrapProfileState(installed=True, disabled=False, loaded=False)
     p = ha.probe_aa_exec("/b", "/a", "clippyshot-soffice",
                          runner=_Runner(1, "aa-exec: ERROR: profile 'clippyshot-soffice' does not exist"),
                          stock_state=enabled)
-    assert p.cause == "stock_profile_conflict" and ha.FIX_COMMAND in p.message()
+    assert p.cause == "profile_not_loaded" and ha.LOAD_COMMAND in p.message()
 
 
 def test_unknown_kernel_state_is_not_reported_as_absent():

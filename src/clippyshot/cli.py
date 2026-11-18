@@ -130,10 +130,11 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
             "  or a gVisor/Firecracker tier, which never runs bwrap (deploy/apparmor/README.md)."
         )
         if not disable_stock:
-            # The stock profile only affects /usr/bin/bwrap. Profiles for other backends
-            # (clippyshot-nsjail) are still loaded on --apply, so an nsjail host can keep the
+            # The stock profile only conflicts with clippyshot-bwrap (both attach
+            # /usr/bin/bwrap). Every other scheduled profile (clippyshot-nsjail,
+            # clippyshot-soffice) is still loaded on --apply, so a host can keep the
             # distro's bwrap hardening.
-            other = [a for a in rep.actions if a.binary not in ("bwrap", "aa-exec")]
+            other = [a for a in rep.actions if a.binary != "bwrap"]
             if args.apply and other:
                 if not profile_dir.is_dir():
                     print(f"\nprofile dir not found: {profile_dir} (pass --profile-dir)",

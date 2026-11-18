@@ -210,9 +210,6 @@ def probe_aa_exec(
     elif stock.conflict and (
         stock.loaded is True
         or any(sig in stderr for sig in _STOCK_SIGNATURES)
-        # A missing clippyshot-soffice on a host where the stock profile is enabled: the
-        # disable flag loads it (setup-sandbox --apply refuses a conflicted host).
-        or _NOT_LOADED_SIGNATURE in stderr
     ):
         cause = "stock_profile_conflict"
     elif _STOCK_SIGNATURES[0] in stderr:

@@ -281,3 +281,14 @@ def test_unmanaged_stock_profile_still_lets_apply_load_nsjail(monkeypatch, capsy
     monkeypatch.setattr(ss, "apply", lambda actions, d: applied.extend(actions) or 0)
     assert cli.main(["setup-sandbox", "--apply"]) == 1
     assert [a.profile_name for a in applied] == ["clippyshot-nsjail"] and host.commands == []
+
+
+def test_apply_on_a_conflicted_host_loads_the_soffice_profile_too(monkeypatch, capsys):
+    host = Host(monkeypatch, [ENABLED_UNLOADED])
+    monkeypatch.setattr(ha, "probe_aa_exec", lambda *a, stock_state=None, **k: _probe(
+        ENABLED_UNLOADED, False, "profile_not_loaded", "profile 'clippyshot-soffice' does not exist"))
+    applied: list = []
+    monkeypatch.setattr(ss, "apply", lambda actions, d: applied.extend(actions) or 0)
+    cli.main(["setup-sandbox", "--apply"])
+    assert "clippyshot-soffice" in [a.profile_name for a in applied]
+    assert host.commands == [] and "clippyshot-bwrap" not in [a.profile_name for a in applied]
