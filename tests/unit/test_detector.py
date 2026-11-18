@@ -325,3 +325,93 @@ def test_addin_extensions_are_accepted_via_family_fallback(fixture_name: str, su
         assert dt.agreed_with_extension is True
     finally:
         path.unlink()
+
+
+@pytest.mark.parametrize("codec", ["utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"])
+def test_looks_like_safe_xml_counts_entities_in_wide_encodings(tmp_path: Path, codec):
+    # The entity counter used to look only for the ASCII bytes; a UTF-16/32
+    # bomb interleaves them with NULs and sailed through.
+    from clippyshot.detector import _looks_like_safe_xml
+
+    entities = "".join(f'<!ENTITY e{i} "x">' for i in range(65))
+    text = f'<?xml version="1.0" encoding="{codec[:6].upper()}"?><!DOCTYPE root [{entities}]><root/>'
+    bomb = tmp_path / f"bomb-{codec}.xml"
+    bomb.write_bytes(text.encode(codec))
+    assert _looks_like_safe_xml(bomb) is False
+
+    safe = tmp_path / f"safe-{codec}.xml"
+    safe.write_bytes('<?xml version="1.0"?><root/>'.encode(codec))
+    assert _looks_like_safe_xml(safe) is True
+
+
+@pytest.mark.parametrize("codec", ["utf-16-le", "utf-32-be"])
+def test_looks_like_safe_xml_wide_split_across_chunks(tmp_path: Path, codec):
+    from clippyshot.detector import _looks_like_safe_xml
+
+    marker = "<!ENTITY".encode(codec)
+    entities = "".join(f'<!ENTITY e{i} "x">' for i in range(64)).encode(codec)
+    head = entities + b" " * 0
+    # Pad so the 65th declaration straddles the 8192-byte read boundary.
+    pad = (8192 - (len(head) % 8192)) - len(marker) // 2
+    unit = len(" ".encode(codec))
+    pad -= pad % unit
+    body = head + " ".encode(codec) * (pad // unit) + marker + ' e64 "x">'.encode(codec)
+    bomb = tmp_path / "split.xml"
+    bomb.write_bytes(body)
+    assert _looks_like_safe_xml(bomb) is False
+
+
+@pytest.mark.parametrize("codec", ["utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"])
+def test_looks_like_safe_xml_counts_each_wide_declaration_once(tmp_path: Path, codec):
+    # The LE and BE markers overlap on the same declaration one byte apart (the
+    # neighbouring NULs complete both), so summing them double-counted: a benign
+    # document with 33..64 declarations was refused (codex on #65).
+    from clippyshot.detector import _looks_like_safe_xml
+
+    entities = "".join(f'<!ENTITY e{i} "x">' for i in range(64))
+    text = f'<?xml version="1.0"?><!DOCTYPE root [{entities}]><root/>'
+    ok = tmp_path / f"ok-{codec}.xml"
+    ok.write_bytes(text.encode(codec))
+    assert _looks_like_safe_xml(ok) is True
+
+
+def test_looks_like_safe_xml_does_not_recount_a_marker_ending_at_a_read_boundary(tmp_path: Path):
+    # The carry is len(marker)-1 bytes: a marker that ENDS exactly at 8192 must not be
+    # counted again in the next read (a full-length carry would push 64 to 65).
+    from clippyshot.detector import _looks_like_safe_xml
+
+    marker = b"<!ENTITY"
+    decls = b"".join(f'<!ENTITY e{i} "x">'.encode() for i in range(63))
+    pad = 8192 - len(decls) - len(marker)
+    body = decls + b" " * pad + marker + b' e63 "x">' + b" " * 100
+    assert body.index(marker, len(decls)) + len(marker) == 8192
+    p = tmp_path / "edge.xml"
+    p.write_bytes(body)
+    assert _looks_like_safe_xml(p) is True
+
+
+def test_entity_heavy_file_magika_cannot_classify_is_still_counted(tmp_path, monkeypatch):
+    """The 'unknown' label routes an allowlisted extension straight to LibreOffice; the
+    entity count must apply there too, not only on the magika='xml' branch (codex on #65)."""
+    from types import SimpleNamespace
+
+    entities = "".join(f'<!ENTITY e{i} "x">' for i in range(65))
+    content = f'<?xml version="1.0"?><!DOCTYPE r [{entities}]><r/>'.encode("utf-16")
+    bomb = tmp_path / "bomb.fodt"
+    bomb.write_bytes(content)
+    detector = Detector()
+    monkeypatch.setattr(
+        detector._magika,
+        "identify_path",
+        lambda p: SimpleNamespace(
+            output=SimpleNamespace(label="unknown", mime_type="application/octet-stream"),
+            score=0.0,
+        ),
+    )
+    with pytest.raises(DetectionError) as ei:
+        detector.detect(bomb)
+    assert ei.value.reason == "xml_safety_check_failed"
+    # The same bytes as plain text are documentation, not declarations (codex on #65).
+    txt = tmp_path / "notes.txt"
+    txt.write_bytes(content)
+    assert detector.detect(txt).label == "txt"

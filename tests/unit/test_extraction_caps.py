@@ -82,9 +82,11 @@ _BILLION_LAUGHS = b"""<?xml version="1.0"?>
 ]>
 <root>&lol2;</root>"""
 
+# Declared but not referenced: bare ET.fromstring accepts this, so only the DTD guard
+# can refuse it (a referenced external entity already fails in ET as "undefined entity").
 _XXE = b"""<?xml version="1.0"?>
 <!DOCTYPE foo [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]>
-<foo>&xxe;</foo>"""
+<foo/>"""
 
 
 @pytest.mark.parametrize("payload", [_BILLION_LAUGHS, _XXE])
@@ -166,5 +168,142 @@ def test_inspect_altchunks_rejects_dtd_document(tmp_path: Path):
     )
     p = tmp_path / "xxe.docx"
     p.write_bytes(raw)
-    # safe_fromstring raises ParseError on the DOCTYPE → graceful empty result.
+    # Smoke check only (no altChunk in this package, so [] either way): the DTD refusal at
+    # this caller is pinned by test_altchunk.py's UTF-8/UTF-16 altChunk package tests.
     assert altchunk.inspect_altchunks(p) == []
+
+
+# --------------------------------------------------------------------------
+# safe_fromstring must reject DTDs regardless of the document encoding. The old
+# guard was a byte regex for ASCII ``<!DOCTYPE`` and expat happily decodes a
+# UTF-16/UTF-32 document whose DTD bytes are interleaved with NULs.
+# --------------------------------------------------------------------------
+
+def _encode(xml_text: str, codec: str, *, bom: bool) -> bytes:
+    boms = {
+        "utf-16-le": b"\xff\xfe",
+        "utf-16-be": b"\xfe\xff",
+        "utf-32-le": b"\xff\xfe\x00\x00",
+        "utf-32-be": b"\x00\x00\xfe\xff",
+        "utf-8": b"\xef\xbb\xbf",
+    }
+    return (boms[codec] if bom else b"") + xml_text.encode(codec)
+
+
+# The XXE body here declares but never references its entity: bare ET.fromstring
+# accepts it, so only the guard can refuse it (a referenced external entity already
+# fails in ET as "undefined entity").
+_ENCODED_DTD_PAYLOADS = [
+    ('<?xml version="1.0" encoding="UTF-16"?>' + _BILLION_LAUGHS.decode().split("?>", 1)[1]),
+    ('<?xml version="1.0" encoding="UTF-16"?>'
+     '<!DOCTYPE foo [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]><foo/>'),
+]
+
+
+@pytest.mark.parametrize("text", _ENCODED_DTD_PAYLOADS)
+@pytest.mark.parametrize(
+    "codec,bom",
+    [
+        ("utf-16-le", True),
+        ("utf-16-be", True),
+        # No BOM: expat autodetects UTF-16 from the '<?' byte pattern.
+        ("utf-16-le", False),
+        ("utf-16-be", False),
+    ],
+)
+def test_safe_fromstring_rejects_dtd_in_utf16(text, codec, bom):
+    payload = _encode(text, codec, bom=bom)
+    assert b"<!DOCTYPE" not in payload  # the old byte pre-scan cannot see it
+    with pytest.raises(ET.ParseError):
+        safe_fromstring(payload)
+
+
+@pytest.mark.parametrize("codec", ["utf-32-le", "utf-32-be"])
+def test_safe_fromstring_rejects_utf32_dtd(codec):
+    # expat cannot decode UTF-32 at all, so this is refused as malformed whatever the
+    # guard does; pinned so a future parser that CAN decode it still refuses the DTD.
+    text = _ENCODED_DTD_PAYLOADS[1].replace("UTF-16", "UTF-32")
+    with pytest.raises(ET.ParseError):
+        safe_fromstring(_encode(text, codec, bom=True))
+
+
+def test_safe_fromstring_rejects_dtd_via_declared_single_byte_encoding():
+    # A declared non-UTF-8 encoding must not hide the DTD from the PARSER guard either
+    # (also called directly, so the test pins the parser-level refusal itself).
+    from clippyshot.libreoffice._safexml import _reject_dtd
+
+    payload = '<?xml version="1.0" encoding="ISO-8859-1"?><!DOCTYPE a [<!ENTITY e "x">]><a>&e;</a>'
+    with pytest.raises(ET.ParseError):
+        safe_fromstring(payload.encode("latin-1"))
+    with pytest.raises(ET.ParseError):
+        _reject_dtd(payload.encode("latin-1"))
+
+
+def test_safe_fromstring_rejects_unparsed_and_parameter_entities():
+    payload = (
+        b'<?xml version="1.0"?><!DOCTYPE a [<!ENTITY % p "x">'
+        b'<!NOTATION n SYSTEM "x"><!ENTITY u SYSTEM "x" NDATA n>]><a/>'
+    )
+    with pytest.raises(ET.ParseError):
+        safe_fromstring(payload.decode().encode("utf-16"))
+
+
+@pytest.mark.parametrize("codec", ["utf-16-le", "utf-16-be", "utf-8"])
+def test_safe_fromstring_parses_clean_utf16_xml(codec):
+    text = '<?xml version="1.0" encoding="UTF-16"?><a><b>hé</b></a>'
+    if codec == "utf-8":
+        text = text.replace("UTF-16", "UTF-8")
+    el = safe_fromstring(_encode(text, codec, bom=True))
+    assert el.find("b").text == "hé"
+
+
+def test_safe_fromstring_rejects_utf16_entity_bomb():
+    # A UTF-16 workbook.xml carrying an internal entity bomb must be refused
+    # before any expansion, like any other DTD.
+    bomb = (
+        '<?xml version="1.0" encoding="UTF-16"?>'
+        '<!DOCTYPE w [<!ENTITY a "aaaaaaaaaa"><!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">]>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<sheets><sheet name="&b;" sheetId="1"/></sheets></workbook>'
+    ).encode("utf-16")
+    with pytest.raises(ET.ParseError):
+        safe_fromstring(bomb)
+
+
+@pytest.mark.parametrize("codec,declared", [
+    ("utf-16-le", "utf_16_le"),  # expat refuses a DECLARED multi-byte codec it can't map
+    ("utf-7", "utf-7"),
+])
+def test_safe_fromstring_raises_only_parse_error_on_unsupported_encoding(codec, declared):
+    # Callers catch ET.ParseError; expat's "multi-byte encodings are not supported"
+    # surfaced as ValueError and escaped them (altchunk inspection silently aborted).
+    payload = f'<?xml version="1.0" encoding="{declared}"?><a/>'.encode(codec)
+    with pytest.raises(ET.ParseError):
+        safe_fromstring(payload)
+
+
+@pytest.mark.parametrize("enc", ["Shift_JIS", "bogus", "rot13"])
+def test_safe_fromstring_unknown_or_multibyte_declared_encoding_is_parse_error(enc):
+    # ValueError (multi-byte codec) / LookupError (unknown or non-text codec) used to
+    # escape callers that only catch ParseError.
+    with pytest.raises(ET.ParseError):
+        safe_fromstring(f'<?xml version="1.0" encoding="{enc}"?><a/>'.encode())
+
+
+@pytest.mark.parametrize("codec", ["utf-16", "utf-16-le", "utf-16-be"])
+def test_safe_fromstring_rejects_declaration_free_wide_doctype(codec):
+    # No <!ENTITY at all: only the DOCTYPE handler can refuse this (an external
+    # subset is a fetch target for a parser that resolves it).
+    payload = '<!DOCTYPE a SYSTEM "http://127.0.0.1:1/x.dtd"><a/>'.encode(codec)
+    with pytest.raises(ET.ParseError):
+        safe_fromstring(payload)
+
+
+@pytest.mark.parametrize("xml", [
+    b"<a><![CDATA[<!DOCTYPE x>]]></a>",
+    b"<a><!-- <!ENTITY e 'x'> --></a>",
+])
+def test_safe_fromstring_accepts_declaration_text_outside_markup(xml):
+    # Literal "<!DOCTYPE"/"<!ENTITY" in a CDATA section or comment is not a DTD; the old
+    # byte pre-scan refused such clean parts (codex on #65).
+    assert safe_fromstring(xml).tag == "a"

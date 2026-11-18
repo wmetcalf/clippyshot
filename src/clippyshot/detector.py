@@ -105,29 +105,54 @@ def _looks_like_ooxml(
         return False
 
 
+# ``<!ENTITY`` in every encoding expat (and LibreOffice's parser) will decode
+# from BOM / byte-pattern autodetection. Counting only the ASCII form let a
+# UTF-16/UTF-32 file with any number of declarations (bytes interleaved with
+# NULs) through the count.
+_ENTITY_MARKERS: tuple[bytes, ...] = tuple(
+    "<!ENTITY".encode(codec)
+    for codec in ("utf-8", "utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be")
+)
+
+
 def _looks_like_safe_xml(
     path: Path, *, max_entity_count: int = _MAX_XML_ENTITY_COUNT
 ) -> bool:
     """Sanity-check that a file labeled 'xml' is not a billion-laughs bomb.
 
-    Streaming scan: count <!ENTITY occurrences; abort as soon as the limit is
-    exceeded. This is a cheap heuristic sufficient to block the classic entity
-    expansion attack without pulling in a real XML parser (expat already has a
-    CVE track record on this).
+    Streaming scan: count <!ENTITY occurrences per encoding (UTF-8 and the
+    UTF-16/32 byte forms); abort as soon as any one count exceeds the limit.
+    A cheap heuristic that bounds the number of literal ``<!ENTITY`` markers
+    (not declarations: a parameter entity can define more through character
+    references) without pulling in a real XML parser (expat already has a CVE track record on this). It does
+    not stop a compact expansion bomb under the limit (the classic lol9 needs
+    only 10 declarations): that file still reaches LibreOffice, which renders
+    inside the sandbox with its own entity-expansion limits.
+
+    Counts are per encoding, never summed: a document is decoded in one
+    encoding, and the LE and BE markers overlap on the SAME wide declaration one
+    byte apart (the neighbouring NULs complete both), so a sum double-counted.
     """
     try:
-        ent_count = 0
+        counts = [0] * len(_ENTITY_MARKERS)
+        # Per-marker carry of the last len(marker)-1 bytes: long enough to catch
+        # a marker straddling a read boundary, too short to re-count one.
+        tails = [b""] * len(_ENTITY_MARKERS)
         with open(path, "rb") as f:
-            overlap = b""
             for chunk in iter(lambda: f.read(8192), b""):
-                buf = overlap + chunk
-                ent_count += buf.count(b"<!ENTITY")
-                if ent_count > max_entity_count:
+                for i, marker in enumerate(_ENTITY_MARKERS):
+                    buf = tails[i] + chunk
+                    counts[i] += buf.count(marker)
+                    tails[i] = buf[-(len(marker) - 1):]
+                if max(counts) > max_entity_count:
                     return False
-                overlap = chunk[-7:] if len(chunk) >= 7 else chunk
         return True
     except OSError:
         return False
+
+
+# Allowlisted extensions LibreOffice imports with its XML (flat ODF) importer.
+_FLAT_XML_EXTS = frozenset({"fodt", "fods", "fodp", "fodg"})
 
 
 # Extension allowlist used as fallback. Maps lowercase ext → (canonical label, mime).
@@ -670,6 +695,14 @@ class Detector:
                     raise DetectionError(
                         "ooxml_structural_check_failed",
                         f"magika=unknown ext={ext} failed OOXML bomb/entry/ratio check",
+                    )
+                # Same reasoning for the XML entity-count gate: a flat-ODF (XML) document
+                # Magika can't classify (unusual encodings are a cause) reaches LibreOffice's
+                # XML importer by extension. Other formats' bytes are not XML declarations.
+                if ext in _FLAT_XML_EXTS and not _looks_like_safe_xml(path):
+                    raise DetectionError(
+                        "xml_safety_check_failed",
+                        f"magika=unknown ext={ext} failed XML entity-count check",
                     )
                 return DetectedType(
                     label=canonical,

@@ -1,6 +1,8 @@
 import zipfile
 from pathlib import Path
 
+import pytest
+
 from clippyshot.libreoffice.altchunk import inspect_altchunks
 
 
@@ -52,3 +54,24 @@ def test_inspect_altchunks_returns_only_referenced_parts_in_document_order(
     assert [a.content_type for a in found] == ["text/html", "message/rfc822"]
     assert found[0].data == b"<html>payload</html>"
     assert found[1].data == b"mime payload"
+
+
+@pytest.mark.parametrize("codec", ["utf-8", "utf-16"])
+def test_inspect_altchunks_refuses_a_document_with_a_dtd(tmp_path: Path, codec: str):
+    """An altChunk docx whose document.xml carries a DTD (an unreferenced external entity,
+    which bare ElementTree would accept) yields nothing: the guard refused it."""
+    src = tmp_path / "ok.docx"
+    _make_docx_with_altchunks(src)
+    assert inspect_altchunks(src)  # control: the same package without a DTD is read
+    with zipfile.ZipFile(src) as zf:
+        items = {n: zf.read(n) for n in zf.namelist()}
+    doc = items["word/document.xml"].decode().replace(
+        '<?xml version="1.0" encoding="UTF-8"?>\n',
+        f'<?xml version="1.0" encoding="{codec.upper()}"?>'
+        '<!DOCTYPE w:document [<!ENTITY x SYSTEM "file:///etc/passwd">]>')
+    items["word/document.xml"] = doc.encode(codec)
+    bad = tmp_path / "dtd.docx"
+    with zipfile.ZipFile(bad, "w") as zf:
+        for n, b in items.items():
+            zf.writestr(n, b)
+    assert inspect_altchunks(bad) == []
