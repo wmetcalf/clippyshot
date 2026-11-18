@@ -47,6 +47,35 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             tesseract-ocr tesseract-ocr-eng zxing-cpp-tools bubblewrap
+      # ubuntu-latest moved to ubuntu-26.04, which ships aa-exec (package `apparmor`) and Ubuntu's
+      # stock bwrap-userns-restrict profile. BwrapSandbox finds `aa-exec` and attaches the
+      # clippyshot-soffice profile to its sandboxed children by default; by design it fails
+      # closed when it cannot ("profile ... does not exist", then "insufficient permissions to change to the profile" once loaded, because
+      # bwrap-userns-restrict stacks bwrap's children into `unpriv_bwrap`, which may not change
+      # profile). Configure the host the way deploy/apparmor/README.md tells an operator to:
+      # unload bwrap-userns-restrict (it and clippyshot-bwrap both attach /usr/bin/bwrap, and
+      # with both loaded bwrap cannot even write its uid map), then load the ClippyShot
+      # profiles. The final probe fails this step unless sandboxed bwrap + aa-exec runs, so the
+      # bwrap tests can never pass here by skipping. It passes `--proc /proc` like BwrapSandbox
+      # (bwrap.py): without a pid namespace that is a writable bind of the host procfs rather
+      # than the fresh one --unshare-all gives, but either way aa-exec can write
+      # /proc/self/attr/exec; under the inherited read-only /proc it cannot on some libapparmor
+      # versions (24.04: "Read-only file system").
+      # The runner is ephemeral, so the unload is not made persistent here; on a real host see
+      # deploy/apparmor/README.md for that step and for what unloading the stock profile costs.
+      - name: Load AppArmor profiles
+        run: |
+          if [ -f /etc/apparmor.d/bwrap-userns-restrict ]; then
+            sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict
+          fi
+          sudo cp deploy/apparmor/clippyshot-bwrap deploy/apparmor/clippyshot-nsjail \
+            deploy/apparmor/clippyshot-soffice deploy/apparmor/clippyshot-runtime /etc/apparmor.d/
+          for p in clippyshot-bwrap clippyshot-nsjail clippyshot-soffice clippyshot-runtime; do
+            sudo apparmor_parser -r -W "/etc/apparmor.d/$p"
+          done
+          sudo aa-status | grep clippyshot
+          bwrap --unshare-user --die-with-parent --ro-bind / / --proc /proc -- \
+            aa-exec -p clippyshot-soffice -- /bin/true
       - name: Install
         run: python -m pip install -e ".[dev]"
       - name: Pytest (unit + cli + http)

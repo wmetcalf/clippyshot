@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -43,11 +44,19 @@ def test_cli_serve_and_worker_are_gone():
 def test_cli_convert_unknown_input_returns_exit_2(tmp_path: Path):
     bad = tmp_path / "garbage.bin"
     bad.write_bytes(b"\x00" * 16)
+    # This checks the exit-code mapping for an unsupported input, not sandbox policy. A host
+    # whose only backend is bwrap is refused as insecure with exit 3 before detection runs
+    # (pid_limit_missing: the --cgroup-pids probe finds no such flag in released bubblewrap; plus
+    # seccomp_missing where the libseccomp binding is absent, as on the hosted CI runner), so
+    # accept the degraded backend here; select_sandbox's refusal has its own tests.
+    env = {**os.environ, "CLIPPYSHOT_WARN_ON_INSECURE": "1"}
     r = subprocess.run(
         CLI + ["convert", str(bad), "-o", str(tmp_path / "out")],
-        capture_output=True, text=True,
+        capture_output=True, text=True, env=env,
     )
-    assert r.returncode == 2
+    assert r.returncode == 2, r.stderr
+    # Exit 2 is also argparse's usage error and the missing-input code: pin the reason.
+    assert "rejected" in r.stderr, r.stderr
 
 
 def test_cli_convert_missing_input_returns_nonzero(tmp_path: Path):
