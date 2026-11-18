@@ -474,3 +474,22 @@ def test_a_smaller_later_copy_stands_in_for_an_oversized_first_one():
     out, omitted = _budget_metadata_qr({"pages": pages}, 20_000)
     assert omitted == 1
     assert out["pages"][1]["qr"] == [{"value": "u", "raw_bytes_hex": "75"}]
+
+
+def test_byte_distinct_payloads_with_the_same_text_are_distinct():
+    from clippyshot.engine import _budget_metadata_qr
+
+    a = {"value": "same", "raw_bytes_hex": "00" * 1000}
+    b = {"value": "same", "raw_bytes_hex": "ff" * 1000}
+    out, omitted = _budget_metadata_qr({"pages": [{"index": 1, "qr": [a, a, b]}]}, 5000)
+    assert omitted == 1
+    assert [q["raw_bytes_hex"][:2] for q in out["pages"][0]["qr"]] == ["00", "ff"]
+
+
+def test_bookkeeping_reserve_is_not_wastefully_large():
+    """Two ~300-byte entries plus their real bookkeeping fit 1000 bytes: keep them."""
+    from clippyshot.engine import _budget_metadata_qr
+
+    e = [{"value": str(i) + "x" * 280} for i in range(4)]
+    out, omitted = _budget_metadata_qr({"pages": [{"index": 1, "qr": e}]}, 1000)
+    assert omitted == 2 and len(out["pages"][0]["qr"]) == 2

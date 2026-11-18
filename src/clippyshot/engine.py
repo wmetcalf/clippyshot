@@ -188,10 +188,7 @@ _QR_TRUNCATED_MARKER_BYTES = 320
 # the first entry of each DISTINCT value is kept before any repeat (so a flood of one benign code
 # cannot push a later distinct payload out), each pass in page order; the rest are dropped and
 # counted (page ``qr_omitted``, root ``qr_truncated``, warning ``qr_metadata_truncated``).
-# Charged up front for that bookkeeping, all doubly escaped inside the sealed string:
-_QR_OMITTED_PAGE_BYTES = 40      # "qr_omitted": N, per page
-_QR_TRUNCATED_ROOT_BYTES = 256   # root "qr_truncated": {...}
-_QR_META_WARNING_BYTES = 512     # the qr_metadata_truncated warning
+# The bookkeeping is reserved up front at its measured worst case (see _budget_metadata_qr).
 
 
 def _json_bytes(text: str) -> int:
@@ -265,15 +262,26 @@ def _budget_metadata_qr(meta: dict, budget_bytes: int) -> tuple[dict, int]:
         if not isinstance(qr, list):
             continue
         for ei, entry in enumerate(qr):
-            value = entry.get("value") if isinstance(entry, dict) else None
-            key = value if isinstance(value, str) else repr(entry)
+            # Distinct = same decoded text AND same raw bytes: the text is ZXing's lossy
+            # rendering, so two byte-distinct payloads can share it.
+            if isinstance(entry, dict) and isinstance(entry.get("value"), str):
+                key = repr((entry["value"], entry.get("raw_bytes_hex")))
+            else:
+                key = repr(entry)
             entries.append((pi, ei, _meta_qr_entry_cost(entry), key))
     total = sum(c for _, _, c, _ in entries)
     if total <= budget_bytes:
         return meta, 0
-    qr_pages = len({pi for pi, _, _, _ in entries})
-    overhead = (_QR_TRUNCATED_ROOT_BYTES + _QR_META_WARNING_BYTES
-                + _QR_OMITTED_PAGE_BYTES * qr_pages)
+    # Reserve the bookkeeping at its worst case, measured: every entry omitted, on every page.
+    n, budget_shown = len(entries), max(0, budget_bytes)
+    qr_page_counts: dict[int, int] = {}
+    for pi, _, _, _ in entries:
+        qr_page_counts[pi] = qr_page_counts.get(pi, 0) + 1
+    overhead = (
+        _nested_json_bytes(', "qr_truncated": '
+                           + json.dumps({"omitted": n, "budget_bytes": budget_shown}))
+        + len(_meta_qr_warning(n, budget_bytes).model_dump_json()) + 1
+        + sum(_nested_json_bytes(f', "qr_omitted": {c}') for c in qr_page_counts.values()))
     remaining = budget_bytes - overhead
     kept: set[tuple[int, int]] = set()
     kept_keys: set[str] = set()
