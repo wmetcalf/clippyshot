@@ -303,8 +303,8 @@ def _qr_warnings(pages: list) -> list[Warning]:
                 out.append(Warning(
                     code="qr_decoded_truncated",
                     message=f"qr_decoded findings capped at {_MAX_QR_WARNINGS} distinct values "
-                            f"/ {_QR_WARNING_BUDGET_CHARS} chars; the rest are in the pages' "
-                            "scanner records (qr_values) and clippyshot_metadata",
+                            f"/ {_QR_WARNING_BUDGET_CHARS} chars; the rest are in clippyshot_metadata "
+                            "(and in qr_values, within its own budget)",
                 ))
                 return out
             seen.add(value)
