@@ -568,3 +568,27 @@ def test_runner_records_the_status_when_names_do_not_align(tmp_path):
     runner = LibreOfficeRunner(sandbox=_TwoPassSandbox("Renamed"), uno_server=None)
     runner.convert_to_pdf(src, tmp_path / "out", Limits(), "xls")
     assert runner.last_run_sheet_records_status == "unaligned"
+
+
+def test_nested_workbook_stream_of_an_embedded_object_is_not_a_decoy(tmp_path):
+    """codex on #68: an embedded workbook keeps its own Workbook/Book stream inside a
+    sub-storage; only root-level look-alikes compete with the document's stream."""
+    p = tmp_path / "embedded.xls"
+    raw = bytearray(FIXTURE_XLS.read_bytes())
+
+    def entry(name: str) -> int:
+        i = raw.find(name.encode("utf-16-le") + b"\0\0")
+        assert i > 0
+        return i
+
+    compobj, ole_ = entry("\x01CompObj"), entry("\x01Ole")
+    # "\x01Ole" (sid 3, left child of "\x01CompObj") becomes "Book" nested UNDER
+    # "\x01CompObj", which becomes a storage: unlink it from the root tree first.
+    raw[ole_:ole_ + 8] = "Book".encode("utf-16-le")
+    struct.pack_into("<I", raw, compobj + 68, 0xFFFFFFFF)        # left sibling: none
+    raw[compobj + 66] = 1                                         # type: storage
+    struct.pack_into("<I", raw, compobj + 76, 3)                  # child: sid 3
+    p.write_bytes(bytes(raw))
+    with olefile.OleFileIO(str(p)) as ole:
+        assert ole.exists("\x01CompObj/Book") and not ole.exists("Book")
+    assert sr.read_binary_sheet_records(p) is not None

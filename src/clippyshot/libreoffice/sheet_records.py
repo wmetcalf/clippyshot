@@ -139,8 +139,11 @@ def _read_xls(path: Path) -> list[dict] | None:
         # (e.g. "WOR\u212aBOOK"). Only trust a directory with exactly one Workbook/Book
         # look-alike, spelled exactly "Workbook". With "Book" also present, LibreOffice may
         # import that instead (it prefers Workbook only on a strictly higher BIFF version).
-        lookalikes = [e.name for e in ole.direntries
-                      if e is not None and e.name.casefold() in ("workbook", "book")]
+        # Root level only: an embedded workbook object keeps its own "Workbook" stream in
+        # a sub-storage, which LibreOffice does not import as this document. olefile keeps
+        # case-insensitive duplicates in root.kids (flagging them only as a defect).
+        lookalikes = [e.name for e in ole.root.kids
+                      if e.name.casefold() in ("workbook", "book")]
         if lookalikes != ["Workbook"]:
             raise _Declined("unreadable")
         size = ole.get_size("Workbook")
