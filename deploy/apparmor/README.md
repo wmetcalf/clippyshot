@@ -35,6 +35,20 @@ sudo aa-status | grep clippyshot
 # clippyshot-nsjail
 ```
 
+**Hosts that ship `bwrap-userns-restrict`** (newer Ubuntu images; `aa-status` lists `bwrap`
+and `unpriv_bwrap`): that stock profile also attaches to `/usr/bin/bwrap`. With both it and
+`clippyshot-bwrap` loaded, bwrap fails with `setting up uid map: Permission denied`; with
+only the stock one, bwrap's children are stacked into `unpriv_bwrap`, so attaching
+`clippyshot-soffice` fails with `aa-exec: ERROR: insufficient permissions to change to the
+profile`. Unload it before loading the ClippyShot profiles:
+
+```sh
+sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict
+```
+
+To keep it unloaded across reboots, also move it out of `/etc/apparmor.d` (or into
+`/etc/apparmor.d/disable/`). CI (`.github/workflows/ci.yml`) does exactly this.
+
 ### Containers on Ubuntu 24.04+ hosts
 
 Important: Ubuntu 24.04's user-namespace restriction is enforced at the
