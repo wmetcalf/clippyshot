@@ -168,8 +168,8 @@ def test_inspect_altchunks_rejects_dtd_document(tmp_path: Path):
     )
     p = tmp_path / "xxe.docx"
     p.write_bytes(raw)
-    # safe_fromstring refuses the DOCTYPE (the entity is unreferenced, so only the guard
-    # can) → graceful empty result.
+    # Smoke check only (no altChunk in this package, so [] either way): the DTD refusal at
+    # this caller is pinned by test_altchunk.py's UTF-8/UTF-16 altChunk package tests.
     assert altchunk.inspect_altchunks(p) == []
 
 
