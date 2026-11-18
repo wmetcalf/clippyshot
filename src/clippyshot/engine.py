@@ -248,11 +248,11 @@ def _meta_qr_entry_cost(entry: object) -> int:
 def _budget_metadata_qr(meta: dict, budget_bytes: int) -> tuple[dict, int]:
     """A copy of ``meta`` whose pages' ``qr`` entries fit ``budget_bytes`` of sealed JSON.
 
-    Everything fits -> ``meta`` itself, untouched. Otherwise entries are kept whole: pass 1
-    takes the first entry of each distinct value in page order until one does not fit, pass 2
-    then adds repeats of kept values in page order until one does not fit. Kept entries stay in
-    their original order. A page that lost any carries ``qr_omitted``; the root gets
-    ``qr_truncated: {omitted, budget_bytes}``. Truncating never grows the result: when the
+    Everything fits -> ``meta`` itself, untouched. Otherwise entries are kept whole, greedily:
+    pass 1 takes the first entry of each distinct value in page order that fits (a
+    smaller later copy can stand in for an oversized first one), pass 2 then adds repeats of
+    kept values the same way. Kept entries stay in their original order. A page that lost
+    any carries ``qr_omitted``; the root gets ``qr_truncated: {omitted, budget_bytes}``. Truncating never grows the result: when the
     bookkeeping would cost more than it saves, nothing is dropped. ``meta`` is never modified.
     Returns ``(meta, omitted_total)``.
     """
@@ -277,28 +277,24 @@ def _budget_metadata_qr(meta: dict, budget_bytes: int) -> tuple[dict, int]:
     remaining = budget_bytes - overhead
     kept: set[tuple[int, int]] = set()
     kept_keys: set[str] = set()
-    seen: set[str] = set()
-    for pi, ei, cost, key in entries:       # pass 1: one entry per distinct value
-        if key in seen:
+    # Greedy, each pass in page order; an entry that does not fit is skipped, not a stop,
+    # so one large early value cannot push every later (small) one out.
+    for pi, ei, cost, key in entries:       # pass 1: first FITTING entry per distinct value
+        if key in kept_keys:
             continue
-        seen.add(key)
-        if cost > remaining:
-            break
-        kept.add((pi, ei))
-        kept_keys.add(key)
-        remaining -= cost
+        if cost <= remaining:
+            kept.add((pi, ei))
+            kept_keys.add(key)
+            remaining -= cost
     for pi, ei, cost, key in entries:       # pass 2: repeats of kept values
-        if (pi, ei) in kept or key not in kept_keys:
+        if (pi, ei) in kept or key not in kept_keys or cost > remaining:
             continue
-        if cost > remaining:
-            break
         kept.add((pi, ei))
         remaining -= cost
     kept_cost = sum(c for pi, ei, c, _ in entries if (pi, ei) in kept)
-    if total - kept_cost <= overhead:
-        return meta, 0  # dropping would add more bookkeeping than it removes
     omitted_total = 0
     pages_out: list = []
+    added = 0  # exact sealed bytes the bookkeeping adds
     for pi, page_rec in enumerate(pages):
         qr = page_rec.get("qr") if isinstance(page_rec, dict) else None
         if not isinstance(qr, list):
@@ -309,10 +305,28 @@ def _budget_metadata_qr(meta: dict, budget_bytes: int) -> tuple[dict, int]:
         if omitted:
             page_rec = {**page_rec, "qr": keep, "qr_omitted": omitted}
             omitted_total += omitted
+            added += _nested_json_bytes(f', "qr_omitted": {omitted}')
         pages_out.append(page_rec)
-    return ({**meta, "pages": pages_out,
-             "qr_truncated": {"omitted": omitted_total, "budget_bytes": max(0, budget_bytes)}},
-            omitted_total)
+    root = {"omitted": omitted_total, "budget_bytes": max(0, budget_bytes)}
+    added += _nested_json_bytes(', "qr_truncated": ' + json.dumps(root))
+    added += len(_meta_qr_warning(omitted_total, budget_bytes).model_dump_json()) + 1
+    if total - kept_cost <= added:
+        return meta, 0  # dropping would add more bookkeeping than it removes
+    return {**meta, "pages": pages_out, "qr_truncated": root}, omitted_total
+
+
+def _nested_json_bytes(fragment: str) -> int:
+    """Sealed bytes of an ASCII JSON fragment inside the doubly-encoded clippyshot_metadata."""
+    return len(json.dumps(fragment)) - 2
+
+
+def _meta_qr_warning(omitted: int, budget_bytes: int) -> Warning:
+    return Warning(
+        code="qr_metadata_truncated",
+        message=f"{omitted} decoded QR entries omitted from clippyshot_metadata to fit "
+                f"{max(0, budget_bytes)} bytes under the metadata cap (page qr_omitted / "
+                "root qr_truncated); qr_count is exact",
+    )
 
 
 def _scanner_record(page_rec: dict, effective_dpi: int | None = None,
@@ -959,12 +973,7 @@ class ClippyShotEngine:
         budgeted_meta, omitted = _budget_metadata_qr(meta, meta_qr_budget)
         meta_qr_warnings: list[Warning] = []
         if omitted:
-            meta_qr_warnings.append(Warning(
-                code="qr_metadata_truncated",
-                message=f"{omitted} decoded QR entries omitted from clippyshot_metadata to fit "
-                        f"{max(0, meta_qr_budget)} bytes under the metadata cap (page "
-                        "qr_omitted / root qr_truncated); qr_count is exact",
-            ))
+            meta_qr_warnings.append(_meta_qr_warning(omitted, meta_qr_budget))
         headroom = self._headroom(max_meta, self._assemble(
             meta, outdir, clamped_dpi, no_qr, meta_qr_warnings, metadata_meta=budgeted_meta))
         values_budget = min(_QR_VALUES_BUDGET_BYTES, headroom * 3 // 4)

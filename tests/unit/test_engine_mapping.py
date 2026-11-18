@@ -439,3 +439,38 @@ def test_typed_copies_fit_the_headroom_at_a_low_cap(tmp_path):
     cap = 250_000
     res, out = _detonate_capped(tmp_path, _meta(pages=pages), cap)
     assert _sealed_size(res, out) < cap
+
+
+def test_one_oversized_early_value_does_not_push_later_small_ones_out():
+    from clippyshot.engine import _budget_metadata_qr
+
+    pages = [{"index": 1, "qr": [{"value": "big", "raw_bytes_hex": "ab" * 50_000}]},
+             {"index": 2, "qr": [{"value": "https://evil.example/login"}]},
+             {"index": 3, "qr": [{"value": "https://evil.example/login"},
+                                 {"value": "big", "raw_bytes_hex": "ab" * 50_000}]}]
+    out, omitted = _budget_metadata_qr({"pages": pages}, 20_000)
+    assert omitted == 2
+    assert [[q["value"] for q in p["qr"]] for p in out["pages"]] == [
+        [], ["https://evil.example/login"], ["https://evil.example/login"]]
+    assert [p.get("qr_omitted") for p in out["pages"]] == [1, None, 1]
+
+
+def test_truncation_bookkeeping_is_measured_not_guessed():
+    """Dropping an entry that saves more than the real bookkeeping costs must happen even
+    when the saving is below the conservative up-front estimate."""
+    from clippyshot.engine import _budget_metadata_qr, _meta_qr_entry_cost
+
+    entry = {"value": "x" * 900}
+    cost = _meta_qr_entry_cost(entry)
+    out, omitted = _budget_metadata_qr({"pages": [{"index": 1, "qr": [entry]}]}, cost - 1)
+    assert omitted == 1 and out["pages"][0]["qr"] == []
+
+
+def test_a_smaller_later_copy_stands_in_for_an_oversized_first_one():
+    from clippyshot.engine import _budget_metadata_qr
+
+    pages = [{"index": 1, "qr": [{"value": "u", "raw_bytes_hex": "ab" * 50_000}]},
+             {"index": 2, "qr": [{"value": "u", "raw_bytes_hex": "75"}]}]
+    out, omitted = _budget_metadata_qr({"pages": pages}, 20_000)
+    assert omitted == 1
+    assert out["pages"][1]["qr"] == [{"value": "u", "raw_bytes_hex": "75"}]
