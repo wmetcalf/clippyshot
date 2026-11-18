@@ -190,7 +190,7 @@ def _stream_entry(ole, lo_name: str):
     return ole_view[0]
 
 
-def _open_capped(ole, entry) -> bytes:
+def _open_capped(ole, entry, limit: int = MAX_BIFF_STREAM_BYTES) -> bytes:
     size = entry.size
     if size > MAX_BIFF_STREAM_BYTES:
         raise _Declined("too_large")
@@ -201,7 +201,7 @@ def _open_capped(ole, entry) -> bytes:
                 or ole.num_mini_fat_sectors * ole.sectorsize > MAX_BIFF_STREAM_BYTES):
             raise _Declined("too_large")
     with ole.openstream([entry.name]) as stream:
-        return bytes(stream.read(MAX_BIFF_STREAM_BYTES))
+        return bytes(stream.read(limit))
 
 
 def _read_xls(path: Path) -> list[dict] | None:
@@ -223,7 +223,7 @@ def _read_xls(path: Path) -> list[dict] | None:
         if book is not None:
             # LibreOffice imports Workbook only when its BIFF version is strictly higher
             # than Book's: a BIFF8 BOF in Book ties, and Book then wins.
-            head = _open_capped(ole, book)[:6]
+            head = _open_capped(ole, book, 6)
             if len(head) == 6:
                 rid, _rlen, vers = struct.unpack_from("<HHH", head, 0)
                 if rid == _BOF and vers >= _BIFF8_VERSION:
