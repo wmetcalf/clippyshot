@@ -146,6 +146,14 @@ def _setup_sandbox_cmd(args: argparse.Namespace) -> int:
                 rc = ss.apply(other, profile_dir)
                 if rc != 0:
                     return rc
+                print(f"\nLoaded {', '.join(a.profile_name for a in other)}; the distro's "
+                      "bwrap hardening is untouched. The nsjail backend (if installed) is "
+                      "ready; only the bwrap backend still needs the step below.")
+                return 0
+            if other:
+                print(f"\nTo load only what does not need this ({', '.join(a.profile_name for a in other)}),"
+                      " keeping the distro's bwrap hardening, run:\n\n  "
+                      f"{ha.LOAD_COMMAND}")
         try:
             plan = ss.stock_fix_plan(rep.stock, profile_dir)
         except ss.StockProfileUnmanaged as e:

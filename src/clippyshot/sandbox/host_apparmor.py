@@ -153,6 +153,9 @@ class AaExecProbe:
                 "refuses to run soffice unconfined. Fix: run "
                 f"`{FIX_COMMAND}` (disables {STOCK_BWRAP_PROFILE} persistently and loads "
                 f"the ClippyShot profiles; see {README})."
+                + (" It is loaded with no file in /etc/apparmor.d, so that command will ask "
+                   "you to unload it by hand or reboot first."
+                   if self.stock.loaded is True and not self.stock.installed else "")
             )
         if self.cause == "change_profile_denied":
             return (

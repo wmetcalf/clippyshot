@@ -59,6 +59,11 @@ class Host:
         monkeypatch.setattr(ha, "stock_bwrap_profile_state", state)
         monkeypatch.setattr(ha, "probe_aa_exec", probe)
         monkeypatch.setattr(ss, "_run_host_command", run)
+        # Never touch the real host: the kernel profile list is scripted and the
+        # profile-loading sudo path is recorded, not run.
+        self.applied: list = []
+        monkeypatch.setattr(ha, "loaded_profile_names", lambda *a, **k: frozenset(ss.ALL_PROFILES))
+        monkeypatch.setattr(ss, "apply", lambda actions, d: self.applied.extend(actions) or 0)
 
 
 def _four_profile_cmds() -> list[list[str]]:
@@ -223,7 +228,8 @@ def test_apply_on_a_conflicted_host_still_loads_the_nsjail_profile(monkeypatch, 
     applied: list = []
     monkeypatch.setattr(ss, "apply", lambda actions, d: applied.extend(actions) or 0)
     rc = cli.main(["setup-sandbox", "--apply"])
-    assert rc != 0  # bwrap is still blocked, and it says so
+    assert rc == 0  # the non-destructive path succeeds; bwrap's remaining step is printed
+    assert "bwrap hardening is untouched" in capsys.readouterr().out
     assert [a.profile_name for a in applied] == ["clippyshot-nsjail"]
     assert host.commands == []  # no stock-profile / bwrap policy change
 
@@ -279,7 +285,7 @@ def test_unmanaged_stock_profile_still_lets_apply_load_nsjail(monkeypatch, capsy
     monkeypatch.setattr(ss, "_userns_ok", lambda b, p: b != "nsjail")
     applied: list = []
     monkeypatch.setattr(ss, "apply", lambda actions, d: applied.extend(actions) or 0)
-    assert cli.main(["setup-sandbox", "--apply"]) == 1
+    assert cli.main(["setup-sandbox", "--apply"]) == 0
     assert [a.profile_name for a in applied] == ["clippyshot-nsjail"] and host.commands == []
 
 
@@ -310,3 +316,11 @@ def test_apply_rechecks_a_failed_attach_probe(monkeypatch, capsys):
     assert cli.main(["setup-sandbox", "--apply"]) == 1
     assert "still failing" in capsys.readouterr().out
     assert host.commands == []
+
+
+def test_plain_run_on_a_conflicted_host_offers_the_non_destructive_apply(monkeypatch, capsys):
+    Host(monkeypatch, [LOADED])
+    monkeypatch.setattr(ss, "_userns_ok", lambda b, p: b != "nsjail")
+    assert cli.main(["setup-sandbox"]) == 1
+    out = capsys.readouterr().out
+    assert "clippyshot setup-sandbox --apply" in out and "clippyshot-nsjail" in out

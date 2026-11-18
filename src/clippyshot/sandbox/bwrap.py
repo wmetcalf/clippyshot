@@ -213,7 +213,9 @@ class BwrapSandbox:
         probe = host_apparmor.probe_aa_exec(self._bwrap, self._aa_exec, self._apparmor_profile)
         self._attach_probe = probe
         if not probe.ok:
-            _log.error("bwrap_apparmor_attach_failed cause=%s %s", probe.cause, probe.message())
+            # WARNING, not ERROR: under auto-selection this only passes bwrap over, and the
+            # selection may well succeed with another backend.
+            _log.warning("bwrap_apparmor_attach_failed cause=%s %s", probe.cause, probe.message())
             raise host_apparmor.AppArmorAttachUnavailable(probe)
         _ATTACH_PROBE_OK[key] = probe
         return probe

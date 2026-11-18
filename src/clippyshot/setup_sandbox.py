@@ -209,8 +209,9 @@ def stock_fix_plan(
         raise StockProfileUnmanaged(
             f"profiles {loaded} are loaded but {src} does not exist, so there is no file to "
             "disable or unload them by. Find where they were loaded from (e.g. a package "
-            "under /usr/share/apparmor or a custom policy dir), remove them with "
-            "`sudo apparmor_parser -R <that file>`, then re-run setup-sandbox."
+            "under /usr/share/apparmor or a custom policy dir) and remove them with "
+            "`sudo apparmor_parser -R <that file>`; if the file was deleted, a reboot unloads "
+            "them for good (nothing on disk reloads them). Then re-run setup-sandbox."
         )
     cmds: list[HostCommand] = []
     if stock.installed and not stock.disabled:

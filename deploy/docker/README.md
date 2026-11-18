@@ -590,6 +590,8 @@ sudo apt install -y \
 #    `clippyshot setup-sandbox` (after the venv install below) checks all of
 #    this, including Ubuntu's stock bwrap-userns-restrict profile, which must
 #    be disabled for the bwrap backend (see "Host AppArmor prep" above).
+#    If /etc/apparmor.d/bwrap-userns-restrict exists, leave out clippyshot-bwrap here:
+#    loading it next to the stock profile breaks /usr/bin/bwrap for every user.
 sudo cp deploy/apparmor/clippyshot-nsjail  /etc/apparmor.d/
 sudo cp deploy/apparmor/clippyshot-bwrap   /etc/apparmor.d/
 sudo cp deploy/apparmor/clippyshot-runtime /etc/apparmor.d/

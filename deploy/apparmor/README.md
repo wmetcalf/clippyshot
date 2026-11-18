@@ -21,7 +21,8 @@ inside bwrap, and prints exactly which profiles need loading; `clippyshot setup-
 escalates silently). Idempotent — a no-op once loaded. If it reports a
 `bwrap-userns-restrict` CONFLICT, see [below](#ubuntus-stock-bwrap-userns-restrict-profile).
 
-**Loading manually** (one-time, survives reboots):
+**Loading manually** (one-time, survives reboots). Skip `clippyshot-bwrap` on a host that
+ships Ubuntu's stock `bwrap-userns-restrict` (see below): loading both breaks bwrap host-wide.
 
 ```sh
 sudo cp deploy/apparmor/clippyshot-bwrap deploy/apparmor/clippyshot-nsjail /etc/apparmor.d/
