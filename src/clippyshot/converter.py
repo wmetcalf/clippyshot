@@ -82,6 +82,22 @@ def _sheet_anomalies_from_runner(runner) -> list[str]:
     return sorted({a[:64] for a in raw if isinstance(a, str) and a})[:32]
 
 
+_INVENTORY_SOURCES = frozenset({
+    "input_workbook", "libreoffice_xlsx_reexport",
+    "input_xls_boundsheet_records", "input_xlsb_workbook_records",
+})
+
+
+def _inventory_source(runner) -> str:
+    """sheets.inventory_source: where the inventory's per-sheet type/state came from."""
+    src = getattr(runner, "last_run_sheets_source", None)
+    if isinstance(src, str) and src in _INVENTORY_SOURCES:
+        return src
+    return ("libreoffice_xlsx_reexport"
+            if getattr(runner, "last_run_sheets_from_reexport", False) is True
+            else "input_workbook")
+
+
 def _sheets_from_runner(runner) -> list[dict]:
     """Read captured sheet inventory off the runner.
 
@@ -1109,11 +1125,9 @@ class Converter:
                         == 'calc_pdf_Export',
                         anomalies=_sheet_anomalies),
                         # Where type/state came from: a re-export (xls/xlsb/ods/csv two-pass)
-                        # loses XLM 'macro' and 'veryHidden' (see runner._capture_sheets).
-                        "inventory_source": (
-                            "libreoffice_xlsx_reexport"
-                            if getattr(self._runner, "last_run_sheets_from_reexport", False)
-                            is True else "input_workbook")}
+                        # loses XLM 'macro' and 'veryHidden', unless the binary original's
+                        # own sheet records aligned with it (see runner._capture_sheets).
+                        "inventory_source": _inventory_source(self._runner)}
                 (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
             finally:
                 # 7. Copy the intermediate PDF to the output dir as
