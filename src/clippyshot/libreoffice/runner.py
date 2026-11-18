@@ -81,8 +81,10 @@ class LibreOfficeRunner:
         # "ok", "not_binary_workbook", or "" when no overlay was attempted.
         self.last_run_sheet_records_status = ""
         self._two_pass_output: Path | None = None
-        # The staged file the two-pass re-exported (the original xls/xlsb bytes).
+        # The staged file the two-pass re-exported (the original xls/xlsb bytes), and its
+        # detected label.
         self._two_pass_input: Path | None = None
+        self._two_pass_label = ""
         self.last_run_single_page_sheets = False
         # PDF export filter name the successful export used ("calc_pdf_Export",
         # "writer_pdf_Export", ...), or "" before/without a successful export.
@@ -120,6 +122,10 @@ class LibreOfficeRunner:
                     self._two_pass_input, self.last_run_sheets)
             except Exception:  # noqa: BLE001 - best effort; keep the re-export inventory
                 overlaid, status = None, "unreadable"
+            if status == "not_binary_workbook" and self._two_pass_label in ("xls", "xlsb"):
+                # Detected as xls/xlsb, yet no binary workbook this reader recognises
+                # (LibreOffice may still import it): a refusal, not an ods/csv.
+                status = "unreadable"
             self.last_run_sheet_records_status = status
             if overlaid is not None:
                 self.last_run_sheets, self.last_run_sheets_source = overlaid
@@ -228,6 +234,7 @@ class LibreOfficeRunner:
         self.last_run_sheet_records_status = ""
         self._two_pass_output = None
         self._two_pass_input = None
+        self._two_pass_label = ""
         self.last_run_single_page_sheets = False
         self.last_run_export_filter = ""
         self.last_altchunks = []
@@ -463,6 +470,7 @@ class LibreOfficeRunner:
                         staged_name = final.name
                         self._two_pass_output = final
                         self._two_pass_input = two_pass_input
+                        self._two_pass_label = label
                         _log.info(
                             "two_pass: patched %s, using for PDF export", staged_name
                         )

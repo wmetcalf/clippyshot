@@ -454,23 +454,92 @@ def test_xlsb_decoy_sheet_block_outside_the_book_is_declined():
     assert sr.parse_xlsb_bundle_sheets(stray) is None
 
 
-def test_xls_with_both_book_and_workbook_streams_is_declined(tmp_path):
+def _with_book(tmp_path: Path, book_head: bytes) -> Path:
+    """fixture.xls with its "\x01Ole" stream renamed "Book" (same name length keeps the
+    CFB valid) and its first bytes replaced by ``book_head``."""
     p = tmp_path / "two.xls"
     shutil.copy(FIXTURE_XLS, p)
-    with olefile.OleFileIO(str(p)) as ole:
-        names = ["/".join(e) for e in ole.listdir()]
-    assert "Book" not in names
-    # Rename a same-length stream entry to "Book" in the directory (both are 4 chars:
-    # "\x01Ole" -> "Book" keeps the CFB valid).
     raw = bytearray(p.read_bytes())
     old = "\x01Ole".encode("utf-16-le")
     i = raw.find(old)
     assert i > 0
     raw[i:i + len(old)] = "Book".encode("utf-16-le")
     p.write_bytes(bytes(raw))
+    with olefile.OleFileIO(str(p), write_mode=True) as ole:
+        data = bytearray(ole.openstream("Book").read())
+        data[:len(book_head)] = book_head
+        ole.write_stream("Book", bytes(data))
     with olefile.OleFileIO(str(p)) as ole:
         assert ole.exists("Book") and ole.exists("Workbook")
-    assert sr.read_binary_sheet_records(p) is None
+    return p
+
+
+def test_biff8_book_next_to_workbook_is_declined(tmp_path):
+    """LibreOffice imports Workbook only when its BIFF version is strictly higher than
+    Book's: with a BIFF8 Book it imports Book, so Workbook's records are not its."""
+    p = _with_book(tmp_path, _bof()[:12])
+    assert sr.read_binary_sheet_records_status(p) == (None, "unreadable")
+
+
+def test_biff5_book_next_to_biff8_workbook_reads_the_workbook(tmp_path):
+    p = _with_book(tmp_path, _bof(vers=0x0500)[:12])
+    assert sr.read_binary_sheet_records(p) == (
+        sr.XLS_SOURCE, [{"name": "fixture", "state": "visible", "type": "worksheet"}])
+
+
+def test_a_lone_upper_case_workbook_stream_is_read(tmp_path):
+    """LibreOffice looks streams up case-insensitively (ASCII upper-case compare)."""
+    p = tmp_path / "upper.xls"
+    raw = bytearray(FIXTURE_XLS.read_bytes())
+    old = "Workbook".encode("utf-16-le")
+    i = raw.find(old)
+    raw[i:i + len(old)] = "WORKBOOK".encode("utf-16-le")
+    p.write_bytes(bytes(raw))
+    assert sr.read_binary_sheet_records(p) is not None
+
+
+def test_header_minisector_cutoff_other_than_4096_is_declined(tmp_path):
+    """olefile normalises the cutoff to 4096, LibreOffice honours it: the two would read
+    the Workbook from different sectors."""
+    p = tmp_path / "cutoff.xls"
+    raw = bytearray(FIXTURE_XLS.read_bytes())
+    struct.pack_into("<I", raw, 0x38, 0x800)
+    p.write_bytes(bytes(raw))
+    assert sr.read_binary_sheet_records_status(p) == (None, "unreadable")
+
+
+@pytest.mark.parametrize("offset,value", [
+    (0x2C, 4_000_000),   # FAT sector count far beyond the file
+    (0x40, 4_000_000),   # MiniFAT sector count
+    (0x48, 4_000_000),   # DIFAT sector count
+])
+def test_header_counts_beyond_the_file_are_declined_before_olefile(tmp_path, offset, value):
+    import time
+
+    p = tmp_path / "counts.xls"
+    raw = bytearray(FIXTURE_XLS.read_bytes())
+    struct.pack_into("<I", raw, offset, value)
+    p.write_bytes(bytes(raw))
+    t = time.monotonic()
+    assert sr.read_binary_sheet_records_status(p) == (None, "unreadable")
+    assert time.monotonic() - t < 2
+
+
+def test_declared_xlm_macro_sheet_stays_a_macro_whatever_its_bof(tmp_path):
+    p = _patched_fixture(tmp_path, hs=1, dt=1, bof_dt=0x0010)
+    assert sr.read_binary_sheet_records(p)[1][0]["type"] == "macro"
+
+
+def test_bare_biff8_stream_without_a_cfb_container_is_read(tmp_path):
+    """LibreOffice imports a plain BIFF stream too; stripping the container must not be a
+    free way to lose the records."""
+    src = _patched_fixture(tmp_path, hs=2, dt=0, bof_dt=0x0040)
+    with olefile.OleFileIO(str(src)) as ole:
+        stream = ole.openstream("Workbook").read()
+    raw = tmp_path / "raw.xls"
+    raw.write_bytes(stream)
+    assert sr.read_binary_sheet_records(raw) == (
+        sr.XLS_SOURCE, [{"name": "fixture", "state": "veryHidden", "type": "macro"}])
 
 
 def test_biff8_bof_longer_than_libreoffice_accepts_is_declined():
@@ -588,7 +657,70 @@ def test_nested_workbook_stream_of_an_embedded_object_is_not_a_decoy(tmp_path):
     struct.pack_into("<I", raw, compobj + 68, 0xFFFFFFFF)        # left sibling: none
     raw[compobj + 66] = 1                                         # type: storage
     struct.pack_into("<I", raw, compobj + 76, 3)                  # child: sid 3
+    struct.pack_into("<IQ", raw, compobj + 116, 0, 0)             # a storage has no data
     p.write_bytes(bytes(raw))
     with olefile.OleFileIO(str(p)) as ole:
         assert ole.exists("\x01CompObj/Book") and not ole.exists("Book")
+        assert not ole.parsing_issues
     assert sr.read_binary_sheet_records(p) is not None
+
+
+def test_xlsb_main_part_need_not_be_xl_workbook_bin(tmp_path):
+    """LibreOffice follows the officeDocument target to any .bin part; moving the part
+    must not be a free way to lose the records."""
+    p = tmp_path / "moved.xlsb"
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("_rels/.rels", f'<Relationships xmlns="{_PKG_RELS}"><Relationship Id="r" '
+                                  f'Type="{_REL}officeDocument" Target="x/book.bin"/>'
+                                  '</Relationships>')
+        z.writestr("[Content_Types].xml",
+                   '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                   f'<Default Extension="bin" ContentType="{_XLSB_CT}"/></Types>')
+        z.writestr("x/book.bin", _book(_bundle_sh("M", 2, "rId1")))
+        z.writestr("x/_rels/book.bin.rels",
+                   f'<Relationships xmlns="{_PKG_RELS}"><Relationship Id="rId1" '
+                   f'Type="{_REL_MS}xlMacrosheet" Target="m.bin"/></Relationships>')
+    assert sr.read_binary_sheet_records(p) == (
+        sr.XLSB_SOURCE, [{"name": "M", "state": "veryHidden", "type": "macro"}])
+
+
+def test_a_detected_xls_that_is_no_binary_workbook_is_a_reported_refusal(tmp_path):
+    """Detected as xls but neither CFB, bare BIFF8 nor xlsb: the runner reports the
+    refusal instead of passing it off as an ods/csv-style inventory."""
+    src = tmp_path / "book.xls"
+    src.write_bytes(b"\x09\x02" + b"\0" * 64)  # a BIFF2 BOF: LibreOffice-importable
+    runner = LibreOfficeRunner(sandbox=_TwoPassSandbox("fixture"), uno_server=None)
+    runner.convert_to_pdf(src, tmp_path / "out", Limits(), "xls")
+    assert runner.last_run_sheets_source == "libreoffice_xlsx_reexport"
+    assert runner.last_run_sheet_records_status == "unreadable"
+
+
+def test_record_status_resets_between_jobs(tmp_path):
+    src = tmp_path / "book.xls"
+    src.write_bytes(b"\x09\x02" + b"\0" * 64)
+    runner = LibreOfficeRunner(sandbox=_TwoPassSandbox("fixture"), uno_server=None)
+    runner.convert_to_pdf(src, tmp_path / "a", Limits(), "xls")
+    assert runner.last_run_sheet_records_status == "unreadable"
+    doc = tmp_path / "w.docx"
+    doc.write_bytes(b"x")
+    runner.convert_to_pdf(doc, tmp_path / "b", Limits(), "docx")
+    assert runner.last_run_sheet_records_status == ""
+
+
+def test_xlsb_part_caps_each_apply(tmp_path, monkeypatch):
+    from clippyshot.libreoffice import _safezip
+
+    seen: list[tuple[str, int]] = []
+    real = _safezip.bounded_read
+
+    def spy(zf, name, max_bytes=_safezip.MAX_ENTRY_BYTES):
+        seen.append((name, max_bytes))
+        return real(zf, name, max_bytes)
+
+    monkeypatch.setattr(_safezip, "bounded_read", spy)
+    monkeypatch.setattr("clippyshot.libreoffice.sheet_prep.bounded_read", spy)
+    p = _xlsb(tmp_path, _book(_bundle_sh("S", 0, "rId1")), {"rId1": _REL + "worksheet"})
+    assert sr.read_binary_sheet_records(p) is not None
+    parts = {n for n, cap in seen if cap == sr.MAX_XLSB_PART_BYTES}
+    assert {"_rels/.rels", "[Content_Types].xml", "xl/workbook.bin",
+            "xl/_rels/workbook.bin.rels"} <= parts

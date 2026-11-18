@@ -107,10 +107,12 @@ def read_binary_sheet_records_status(
             head = fh.read(8)
         if head == _OLE_MAGIC:
             return (XLS_SOURCE, _ok(_read_xls(path))), "ok"
+        if head[:2] == b"\x09\x08":  # a BIFF8 BOF record: bare stream, no CFB container
+            return (XLS_SOURCE, _read_raw_biff(path)), "ok"
         if head[:4] == b"PK\x03\x04":
             sheets = _read_xlsb(path)
             if sheets is None:
-                return None, "not_binary_workbook"  # a zip without xl/workbook.bin
+                return None, "not_binary_workbook"  # a zip whose main part is not .bin
             return (XLSB_SOURCE, sheets), "ok"
         return None, "not_binary_workbook"
     except _Declined as exc:
@@ -128,41 +130,111 @@ def _ok(sheets: list[dict] | None) -> list[dict]:
 # ─── xls (BIFF8) ─────────────────────────────────────────────────────────────
 
 
+def _check_cfb_header(path: Path) -> None:
+    """Refuse a CFB header whose counts olefile would act on before any cap of ours runs
+    (the DIFAT/FAT loops in its constructor, copied quadratically), or whose mini-stream
+    cutoff olefile silently normalises to 4096 while LibreOffice honours it (the two would
+    then read different bytes for the same stream)."""
+    size = path.stat().st_size
+    with open(path, "rb") as fh:
+        h = fh.read(512)
+    if len(h) < 512:
+        raise _Declined("unreadable")
+    shift, mini_shift = struct.unpack_from("<HH", h, 0x1E)
+    if shift not in (9, 12) or mini_shift != 6:
+        raise _Declined("unreadable")
+    sector = 1 << shift
+    n_fat, _first_dir, _txn, cutoff, _first_mini, n_mini, _first_difat, n_difat = (
+        struct.unpack_from("<IIIIIIII", h, 0x2C))
+    if cutoff != 4096:
+        raise _Declined("unreadable")
+    sectors = -(-max(0, size - sector) // sector)  # sectors after the header
+    per_fat = sector // 4
+    if (n_fat > sectors // per_fat + 1 or n_mini > sectors
+            or n_difat > n_fat // (per_fat - 1) + 1):
+        raise _Declined("unreadable")
+
+
+def _stream_entry(ole, lo_name: str):
+    """The root-level entry both olefile and LibreOffice resolve ``lo_name`` to, or None.
+
+    LibreOffice compares names ASCII-uppercased (CFB); olefile lowercases with Unicode
+    rules (so the Kelvin sign K matches "k"). Only a name both views agree on, exactly
+    once, is trusted. Root level only: an embedded workbook object keeps its own streams
+    in a sub-storage, which LibreOffice does not import as this document.
+    """
+    ole_view = [e for e in ole.root.kids if e.name.lower() == lo_name.lower()]
+    lo_view = [e for e in ole.root.kids
+               if e.name.isascii() and e.name.upper() == lo_name.upper()]
+    if not ole_view and not lo_view:
+        return None
+    if len(ole_view) != 1 or len(lo_view) != 1 or ole_view[0] is not lo_view[0]:
+        raise _Declined("unreadable")
+    return ole_view[0]
+
+
+def _open_capped(ole, entry) -> bytes:
+    size = entry.size
+    if size > MAX_BIFF_STREAM_BYTES:
+        raise _Declined("too_large")
+    if size < ole.minisectorcutoff:
+        # A small stream lives in the ministream: olefile loads the whole MiniFAT and
+        # ministream (sizes from the header / root entry, attacker-chosen) to read it.
+        if (ole.root.size > MAX_BIFF_STREAM_BYTES
+                or ole.num_mini_fat_sectors * ole.sectorsize > MAX_BIFF_STREAM_BYTES):
+            raise _Declined("too_large")
+    with ole.openstream([entry.name]) as stream:
+        return bytes(stream.read(MAX_BIFF_STREAM_BYTES))
+
+
 def _read_xls(path: Path) -> list[dict] | None:
     import olefile
 
     if not olefile.isOleFile(str(path)):
         raise _Declined("unreadable")
+    _check_cfb_header(path)
     with olefile.OleFileIO(str(path)) as ole:
-        # The stream LibreOffice opens is looked up the CFB way (case-insensitive, first
-        # entry wins); olefile's lookup can pick a different, duplicate or look-alike entry
-        # (e.g. "WOR\u212aBOOK"). Only trust a directory with exactly one Workbook/Book
-        # look-alike, spelled exactly "Workbook". With "Book" also present, LibreOffice may
-        # import that instead (it prefers Workbook only on a strictly higher BIFF version).
-        # Root level only: an embedded workbook object keeps its own "Workbook" stream in
-        # a sub-storage, which LibreOffice does not import as this document. olefile keeps
-        # case-insensitive duplicates in root.kids (flagging them only as a defect).
-        lookalikes = [e.name for e in ole.root.kids
-                      if e.name.casefold() in ("workbook", "book")]
-        if lookalikes != ["Workbook"]:
+        # A directory olefile had to repair (an entry linked twice, a sibling link to the
+        # root, ...) is one LibreOffice may build differently: not ours to interpret.
+        if getattr(ole, "parsing_issues", None):
             raise _Declined("unreadable")
-        size = ole.get_size("Workbook")
-        if size > MAX_BIFF_STREAM_BYTES:
-            raise _Declined("too_large")
-        if size < ole.minisectorcutoff:
-            # A small stream lives in the ministream: olefile loads the whole MiniFAT and
-            # ministream (sizes from the header / root entry, attacker-chosen) to read it.
-            if (ole.root.size > MAX_BIFF_STREAM_BYTES
-                    or ole.num_mini_fat_sectors * ole.sectorsize > MAX_BIFF_STREAM_BYTES):
-                raise _Declined("too_large")
-        with ole.openstream("Workbook") as stream:
-            data = stream.read(MAX_BIFF_STREAM_BYTES)
+        workbook = _stream_entry(ole, "Workbook")
+        if workbook is None:
+            raise _Declined("unreadable")  # BIFF5 "Book" only, or no workbook at all
+        book = _stream_entry(ole, "Book")
+        if book is not None:
+            # LibreOffice imports Workbook only when its BIFF version is strictly higher
+            # than Book's: a BIFF8 BOF in Book ties, and Book then wins.
+            head = _open_capped(ole, book)[:6]
+            if len(head) == 6:
+                rid, _rlen, vers = struct.unpack_from("<HHH", head, 0)
+                if rid == _BOF and vers >= _BIFF8_VERSION:
+                    raise _Declined("unreadable")
+        data = _open_capped(ole, workbook)
+    return _parse_biff8_stream(data)
+
+
+def _read_raw_biff(path: Path) -> list[dict]:
+    """A bare BIFF8 stream with no CFB container, which LibreOffice also imports."""
+    if path.stat().st_size > MAX_BIFF_STREAM_BYTES:
+        raise _Declined("too_large")
+    return _parse_biff8_stream(path.read_bytes())
+
+
+def _parse_biff8_stream(data: bytes) -> list[dict]:
     try:
         sheets = parse_biff8_globals(data[:MAX_BIFF_GLOBALS_BYTES])
         if sheets is None:
             raise _Declined("unreadable")
-        return [{"name": sh["name"], "state": sh["state"],
-                 "type": _substream_type(data, sh["offset"])} for sh in sheets]
+        out = []
+        for sh in sheets:
+            kind = _substream_type(data, sh["offset"])
+            # LibreOffice renders by the substream BOF, but a BoundSheet8 that declares an
+            # XLM macro sheet is itself the signal this inventory exists to keep.
+            if sh["declared_macro"]:
+                kind = "macro"
+            out.append({"name": sh["name"], "state": sh["state"], "type": kind})
+        return out
     except _Bad:
         raise _Declined("unreadable") from None
 
@@ -242,7 +314,8 @@ def _boundsheet(body: bytes) -> dict:
         raise _Bad("bad BoundSheet8 name")
     # ShortXLUnicodeString: fHighByte=0 means each char is the low byte of a UTF-16 unit.
     name = raw[:need].decode("utf-16-le" if high else "latin-1", errors="replace")
-    return {"name": name, "state": _STATES[hs], "offset": offset}
+    return {"name": name, "state": _STATES[hs], "offset": offset,
+            "declared_macro": body[5] == 1}
 
 
 # ─── xlsb ────────────────────────────────────────────────────────────────────
@@ -251,13 +324,14 @@ def _boundsheet(body: bytes) -> dict:
 _XLSB_WORKBOOK_CT = "application/vnd.ms-excel.sheet.binary.macroEnabled.main"
 
 
-def _xlsb_package_points_at_workbook_bin(zf: zipfile.ZipFile) -> bool:
-    """Is ``xl/workbook.bin`` the part LibreOffice imports as the workbook?
+def _xlsb_workbook_part(zf: zipfile.ZipFile) -> str | None:
+    """The binary workbook part LibreOffice imports from this package, or ``None`` when
+    the package's main part is not a BIFF12 workbook (an xlsx, an ods, ...).
 
-    LO follows ``_rels/.rels``' officeDocument relationship (exact URI) and needs the
-    target's content type to be the xlsb main type; a package pointing elsewhere could
-    show this reader a decoy ``xl/workbook.bin`` with the same sheet names but different
-    states/types (codex on #68). Same rules as sheet_prep._package_anomalies for xlsx.
+    LibreOffice follows ``_rels/.rels``' officeDocument relationship (exact URI) to any
+    part name and parses it as BIFF12 when the name ends in ``.bin``; the part's content
+    type must be the xlsb main type. Anything ambiguous raises ``_Declined``: a package
+    could otherwise show this reader a decoy part (codex on #68).
     """
     from clippyshot.libreoffice._safexml import safe_fromstring
     from clippyshot.libreoffice._safezip import bounded_read
@@ -269,44 +343,55 @@ def _xlsb_package_points_at_workbook_bin(zf: zipfile.ZipFile) -> bool:
         rels = safe_fromstring(bounded_read(zf, "_rels/.rels", MAX_XLSB_PART_BYTES)).findall(
             f"{_PKG_REL_NS}Relationship")
         ct = safe_fromstring(bounded_read(zf, "[Content_Types].xml", MAX_XLSB_PART_BYTES))
+    except KeyError:
+        return None
     except Exception:  # noqa: BLE001
-        return False
+        raise _Declined("unreadable") from None
     if any(r.attrib.get("Type", "").endswith(_OFFICE_DOC_REL)
            and r.attrib.get("Type") not in _OFFICE_DOC_TYPES for r in rels):
-        return False
+        raise _Declined("unreadable")
     targets = [r.attrib.get("Target", "") for r in rels
                if r.attrib.get("Type") in _OFFICE_DOC_TYPES]
-    if len(targets) != 1 or targets[0] not in ("xl/workbook.bin", "/xl/workbook.bin"):
-        return False
+    if len(targets) != 1:
+        raise _Declined("unreadable")
+    part = targets[0].lstrip("/")
+    if not part.lower().endswith(".bin"):
+        return None  # an xlsx/xlsm main part: not a binary workbook
+    if "\\" in part or ".." in part.split("/") or not part:
+        raise _Declined("unreadable")
+    if sum(1 for n in zf.namelist() if n.lower() == part.lower()) != 1:
+        raise _Declined("unreadable")  # missing, or a case-variant twin LO might read
     overrides = [o for o in ct.findall(f"{_CT_NS}Override")
-                 if o.attrib.get("PartName", "") == "/xl/workbook.bin"]
+                 if o.attrib.get("PartName", "") == "/" + part]
     if overrides:
-        return all(o.attrib.get("ContentType", "") == _XLSB_WORKBOOK_CT for o in overrides)
-    return any(d.attrib.get("Extension", "").lower() == "bin"
-               and d.attrib.get("ContentType", "") == _XLSB_WORKBOOK_CT
-               for d in ct.findall(f"{_CT_NS}Default"))
+        ok = all(o.attrib.get("ContentType", "") == _XLSB_WORKBOOK_CT for o in overrides)
+    else:
+        ok = any(d.attrib.get("Extension", "").lower() == "bin"
+                 and d.attrib.get("ContentType", "") == _XLSB_WORKBOOK_CT
+                 for d in ct.findall(f"{_CT_NS}Default"))
+    if not ok:
+        raise _Declined("unreadable")
+    return part
 
 
 def _read_xlsb(path: Path) -> list[dict] | None:
-    """The xlsb sheet records; ``None`` when the zip has no workbook.bin at all (not an
-    xlsb); raises ``_Declined`` for an xlsb this reader will not vouch for."""
+    """The xlsb sheet records; ``None`` when the package's main part is not a BIFF12
+    workbook; raises ``_Declined`` for an xlsb this reader will not vouch for."""
     # Late import: sheet_prep imports this module.
     from clippyshot.libreoffice._safezip import ExtractionLimitExceeded, bounded_read
     from clippyshot.libreoffice.sheet_prep import _sheet_types_by_rid
 
     with zipfile.ZipFile(path) as zf:
-        names = zf.namelist()
-        twins = sum(1 for x in names if x.lower() == "xl/workbook.bin")
-        if twins == 0:
+        part = _xlsb_workbook_part(zf)
+        if part is None:
             return None
-        # One unambiguous workbook part; a case-variant twin could be the one LO reads.
-        if twins != 1 or not _xlsb_package_points_at_workbook_bin(zf):
-            raise _Declined("unreadable")
+        folder, _, name = part.rpartition("/")
+        rels_part = f"{folder}/_rels/{name}.rels" if folder else f"_rels/{name}.rels"
         try:
-            data = bounded_read(zf, "xl/workbook.bin", MAX_XLSB_PART_BYTES)
+            data = bounded_read(zf, part, MAX_XLSB_PART_BYTES)
         except ExtractionLimitExceeded:
             raise _Declined("too_large") from None
-        rel_types = _sheet_types_by_rid(zf, "xl/_rels/workbook.bin.rels", MAX_XLSB_PART_BYTES)
+        rel_types = _sheet_types_by_rid(zf, rels_part, MAX_XLSB_PART_BYTES)
     if rel_types is None:
         raise _Declined("unreadable")
     try:
