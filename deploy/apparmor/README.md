@@ -15,9 +15,11 @@ These two profiles are required on hosts where
 ClippyShot cannot run.
 
 **Automated (recommended):** `clippyshot setup-sandbox` probes whether `bwrap`/`nsjail`
-can actually create a user namespace and prints exactly which scoped profiles need loading;
-`clippyshot setup-sandbox --apply` loads them via `sudo` (interactive — the password prompt
-is your consent; it never escalates silently). Idempotent — a no-op once loaded.
+can actually create a user namespace, and whether `aa-exec` can attach `clippyshot-soffice`
+inside bwrap, and prints exactly which profiles need loading; `clippyshot setup-sandbox
+--apply` loads them via `sudo` (interactive — the password prompt is your consent; it never
+escalates silently). Idempotent — a no-op once loaded. If it reports a
+`bwrap-userns-restrict` CONFLICT, see [below](#ubuntus-stock-bwrap-userns-restrict-profile).
 
 **Loading manually** (one-time, survives reboots):
 
@@ -35,12 +37,33 @@ sudo aa-status | grep clippyshot
 # clippyshot-nsjail
 ```
 
-**Hosts that ship `bwrap-userns-restrict`** (newer Ubuntu images; `aa-status` lists `bwrap`
-and `unpriv_bwrap`): that stock profile also attaches to `/usr/bin/bwrap`. With both it and
-`clippyshot-bwrap` loaded, bwrap fails with `setting up uid map: Permission denied`; with
-only the stock one, bwrap's children are stacked into `unpriv_bwrap`, so attaching
-`clippyshot-soffice` fails with `aa-exec: ERROR: insufficient permissions to change to the
-profile`.
+### Ubuntu's stock `bwrap-userns-restrict` profile
+
+Newer Ubuntu releases (apparmor 4.1+, and the current GitHub-hosted runner images) ship
+`/etc/apparmor.d/bwrap-userns-restrict`. It loads two profiles, `bwrap` (attached to
+`/usr/bin/bwrap`) and `unpriv_bwrap`, and stacks every child bwrap starts into
+`unpriv_bwrap`, which may not change profile. It conflicts with ClippyShot's bwrap backend
+in both of its states:
+
+| Loaded alongside... | What fails |
+|---|---|
+| nothing (stock profile only) | `aa-exec -p clippyshot-soffice` inside bwrap: `aa-exec: ERROR: insufficient permissions to change to the profile` |
+| `clippyshot-bwrap` (both attach `/usr/bin/bwrap`) | bwrap itself: `setting up uid map: Permission denied` |
+
+ClippyShot fails closed either way: it never runs soffice without `clippyshot-soffice`.
+At startup (`select_sandbox()`, so also `clippyshot selftest` and the engine's first job)
+the bwrap backend runs the attach probe CI runs,
+
+```sh
+bwrap --unshare-user --die-with-parent --ro-bind / / --proc /proc -- \
+    aa-exec -p clippyshot-soffice -- /bin/true
+```
+
+(`--proc /proc` like `BwrapSandbox`; without a pid namespace that is a writable bind of the
+host procfs, but either way aa-exec can write `/proc/self/attr/exec`, which the inherited
+read-only `/proc` does not allow on some libapparmor versions). On failure it refuses to start with an
+error naming `bwrap-userns-restrict` and the fix command. A passing probe is cached for
+the life of the process; a failing one is re-run on every selection.
 
 **Know what `clippyshot-bwrap` costs, on any host.** `clippyshot-bwrap` is
 `flags=(unconfined) { userns, }` and attaches by path to every `/usr/bin/bwrap` on the host
@@ -48,29 +71,76 @@ profile`.
 capability-bearing user namespace through `/usr/bin/bwrap` (e.g.
 `bwrap --unshare-user --uid 0 --cap-add ALL ... mount ...` succeeds), which is exactly the
 hole Ubuntu's unprivileged-userns restriction closes. That is true on a stock 24.04 host
-with section 1's profiles loaded, not only after the step below. `bwrap-userns-restrict`,
-where shipped, is the distro's own mitigation for it: it lets bwrap create a user namespace
-but stacks every bwrap child into `unpriv_bwrap`, which denies capabilities; unloading it
-removes that. ClippyShot attaches `clippyshot-soffice` to its sandboxed children by default
-(soffice, the cold QR/OCR scanners, pdftoppm); the pdfium rasterizer and the warm OCR helper
-opt out and run under bwrap without a profile. Load the bwrap profiles only on a
+with section 1's profiles loaded, not only after disabling the stock profile.
+`bwrap-userns-restrict` is the distro's own mitigation for it: it lets bwrap create a user
+namespace but stacks every bwrap child into `unpriv_bwrap`, which denies capabilities;
+disabling it removes that. ClippyShot attaches `clippyshot-soffice` to its sandboxed children
+by default (soffice, the cold QR/OCR scanners, pdftoppm); the pdfium rasterizer and the warm
+OCR helper opt out and run under bwrap without a profile. Load the bwrap profiles only on a
 host (or VM) dedicated to ClippyShot, with no untrusted local users; on a shared host, run
-ClippyShot in its own VM instead.
+ClippyShot in its own VM instead, or use a deployment mode that does not run bwrap (gVisor or
+Firecracker, below).
 
-On such a dedicated host, unload it before loading the ClippyShot profiles:
+**Fix (persistent, dedicated hosts only):**
 
 ```sh
+clippyshot setup-sandbox                                # reports the conflict, exits 1
+clippyshot setup-sandbox --disable-stock-bwrap-profile  # fixes it (sudo, interactive)
+```
+
+The flag is the explicit opt-in to change distro policy; `--apply` alone will not touch a
+host in this state (loading `clippyshot-bwrap` next to the stock profile only swaps one
+failure for the other). With the flag, setup runs, skipping any step already done:
+
+```sh
+sudo ln -sf /etc/apparmor.d/bwrap-userns-restrict /etc/apparmor.d/disable/bwrap-userns-restrict
 sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict
+# then, for each of clippyshot-bwrap clippyshot-nsjail clippyshot-soffice clippyshot-runtime:
+sudo cp deploy/apparmor/<profile> /etc/apparmor.d/
+sudo apparmor_parser -r -W /etc/apparmor.d/<profile>
 ```
 
-To keep it unloaded across reboots, also disable it (otherwise `apparmor.service` reloads it
-next to `clippyshot-bwrap` at boot and bwrap fails with `setting up uid map: Permission denied`):
+and then re-runs the attach probe, exiting non-zero if it still fails. Re-running it is a
+no-op. The `disable/` symlink is what keeps the profile from returning on reboot (otherwise
+`apparmor.service` reloads it next to `clippyshot-bwrap` at boot and bwrap fails with
+`setting up uid map: Permission denied`) or on an `apparmor` package upgrade;
+`apparmor_parser -R` alone only lasts until the next boot. CI
+(`.github/workflows/ci.yml`) runs only the unload, because its runner is ephemeral.
 
-```sh
-sudo ln -s /etc/apparmor.d/bwrap-userns-restrict /etc/apparmor.d/disable/
-```
+`clippyshot selftest` (the image healthcheck) reports both `apparmor_attach` (`ok` /
+`not_applicable` / the failure cause) and `stock_bwrap_profile` (its state) in
+`selftest_passed`, and logs a `stock_bwrap_profile_conflict` warning when the stock
+profile is active on a host that has bwrap, even if nsjail was selected, so a host upgrade
+that brings it back is visible before it breaks a bwrap deployment. (Not under the
+`container` backend, where `/etc/apparmor.d` is the image's, not host policy.)
 
-CI (`.github/workflows/ci.yml`) runs only the unload, because its runner is ephemeral.
+### Which deployments need this
+
+| Deployment | ClippyShot sandbox | Stock-profile host prep? |
+|---|---|---|
+| Bare host (bwrap backend) | `bwrap` + `aa-exec` | **Yes**, dedicated hosts only (see the cost above): `clippyshot setup-sandbox --disable-stock-bwrap-profile` |
+| Plain `docker run` of the ClippyShot image with bwrap selected | `bwrap` + `aa-exec` in the container, host kernel policy | **Yes**, on the host (setup-sandbox in a container cannot change host policy; use the commands above) |
+| gVisor (compose cold workers, `docker-compose.gvisor.yml` warm sidecar) | `container` (`CLIPPYSHOT_SANDBOX=container`) | No |
+| Firecracker via blastbox (`docker-compose.firecracker.yml`) | `container`, inside the guest kernel | No |
+
+- **gVisor.** AppArmor is not enforced for processes inside a gVisor sandbox: they run on
+  gVisor's Sentry, not on host-kernel syscalls. Docker's AppArmor profile for the container
+  (`docker-default` unless overridden) applies on the host side, to runsc. So ClippyShot
+  must use `CLIPPYSHOT_SANDBOX=container` there; the cold-worker image sets it (`ENV` in
+  blastbox's `deploy/docker/Dockerfile.clippyshot-cold-worker`) and
+  `docker-compose.gvisor.yml` sets it for warm slots via `BLASTBOX_GVISOR_EXTRA_ENV`. bwrap
+  and aa-exec are never run, so the stock profile needs no host prep.
+- **Firecracker.** The guest has its own kernel; host AppArmor policy does not reach guest
+  processes. The FC rootfs (blastbox `deploy/firecracker/Dockerfile.clippyshot`, layered on
+  this repo's image) bakes `deploy/firecracker/guest.clippyshot.env` as
+  `/opt/blastbox/guest.env`, which `/init` sources and which exports
+  `CLIPPYSHOT_SANDBOX=container` and `CLIPPYSHOT_WARN_ON_INSECURE=1`. The forced backend
+  means no nsjail/bwrap fallback, so the guest never runs bwrap or aa-exec (the guest
+  `/init` does not even mount securityfs). The guest image therefore needs nothing for this;
+  the host needs only what blastbox's Firecracker prep requires.
+
+Host preparation for the blastbox runtimes themselves (KVM, runsc, Docker) is in
+blastbox's [docs/HOST-PREP.md](https://github.com/wmetcalf/blastbox/blob/main/docs/HOST-PREP.md).
 
 ### Containers on Ubuntu 24.04+ hosts
 
