@@ -540,3 +540,8 @@ def test_bookkeeping_alone_never_pushes_a_fitting_result_over_the_cap(tmp_path):
     for spare in (500, 2_000, 5_000):
         res, out = _detonate_capped(tmp_path / f"s{spare}", _meta(pages=pages), base + spare)
         assert _sealed_size(res, out) <= base + spare, spare
+        # Whatever was dropped, no typed copy may claim to be complete (codex on #67).
+        for page in res.payload.children:
+            rec = _scanner(page)
+            if rec["qr_count"] and len(rec["qr_values"]) < rec["qr_count"]:
+                assert rec["qr_values_truncated"] is True, spare

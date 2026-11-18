@@ -1022,16 +1022,23 @@ class ClippyShotEngine:
             # Last resort (bookkeeping at near-zero room, a never-grow overshoot): no QR
             # content, one root count and the warning -- if THAT fits by the same estimate.
             # Where even it does not, the estimate cannot tell what fits; keep the result.
+            # Typed copies are empty here too: say so on every page that had codes.
+            none_kept: dict[int, tuple[list[str], bool]] = {
+                p["index"]: ([], bool(p.get("qr"))) for p in meta.get("pages", [])
+                if isinstance(p, dict) and type(p.get("index")) is int}
+            budget_shown = max(0, meta_qr_budget)
             fallback = self._assemble(
-                meta, outdir, clamped_dpi, no_qr, [_meta_qr_warning(total_qr, 0)],
-                metadata_meta={**stripped_meta,
-                               "qr_truncated": {"omitted": total_qr, "budget_bytes": 0}})
+                meta, outdir, clamped_dpi, none_kept,
+                [_meta_qr_warning(total_qr, budget_shown)],
+                metadata_meta={**stripped_meta, "qr_truncated": {
+                    "omitted": total_qr, "budget_bytes": budget_shown}})
             if self._sealed_estimate(fallback, tight=True, outdir=outdir) <= max_meta:
                 final = fallback
             else:
                 # Not even the count fits: the QR-free result (qr_count on each page's
-                # scanner Record still says how many codes were decoded).
-                final = self._assemble(meta, outdir, clamped_dpi, no_qr, [],
+                # scanner Record still says how many codes were decoded, and
+                # qr_values_truncated that none of them is listed).
+                final = self._assemble(meta, outdir, clamped_dpi, none_kept, [],
                                        metadata_meta=stripped_meta)
         page_nodes, artifacts, payload, warnings = final
 
