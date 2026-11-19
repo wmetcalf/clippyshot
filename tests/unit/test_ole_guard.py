@@ -399,3 +399,42 @@ def test_detector_reports_a_directory_olefile_stopped_reading(tmp_path):
     p = _write(tmp_path, "partial.xls", bytes(raw))
     assert "ole_unreadable" in _check_ole_content(p)
     assert sr.read_binary_sheet_records_status(p) == (None, "unreadable")
+
+
+def _fake_ole(tree, issues=()):
+    """A stand-in OleFileIO: ``tree`` maps name -> None (stream) or a dict (storage)."""
+    from types import SimpleNamespace as E
+
+    def build(items):
+        return [E(name=n, entry_type=olefile.STGTY_STREAM, kids=[]) if v is None
+                else E(name=n, entry_type=olefile.STGTY_STORAGE, kids=build(v))
+                for n, v in items.items()]
+
+    class Ole:
+        root = E(kids=build(tree))
+        parsing_issues = list(issues)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return None
+
+    return Ole()
+
+
+@pytest.mark.parametrize("tree,expected", [
+    ({"Macros": {"VBA": {"dir": None}}}, ["ole_macro_only_payload"]),   # macro stream
+    ({"Macros": {"VBA": {}}}, []),                                       # empty storages
+    ({"_VBA_PROJECT_CUR": {"VBA": {"dir": None}}, "WordDocument": None}, []),
+    ({"VBA": {"dir": None}, "PP97_DUALSTORAGE": None}, []),             # ppt content
+    ({"x": {"WordDocument": None}, "VBA": {"dir": None}}, ["ole_macro_only_payload"]),
+    ({"EncryptedPackage": None}, ["ole_encrypted"]),
+    ({"x": {"EncryptedPackage": None}}, []),                             # root level only
+])
+def test_structural_checks_match_the_listdir_semantics(tmp_path, monkeypatch, tree, expected):
+    """master read listdir() stream paths: a STREAM whose path names VBA/Macros, and
+    root-level stream names. The entry walk must give the same verdicts."""
+    p = _write(tmp_path, "s.doc", _cfb(10))
+    monkeypatch.setattr(ole_guard, "open_ole", lambda path: _fake_ole(tree))
+    assert _check_ole_content(p) == expected

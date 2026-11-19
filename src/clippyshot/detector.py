@@ -455,17 +455,25 @@ def _check_ole_content(path: Path) -> list[str]:
                             else "ole_unreadable")
             return warnings
         with ole:
-            # Entry names, not listdir() paths: a path per stream is O(entries x depth)
-            # memory (~1 GB for a 4 MB file of 470 nested storages at the slot cap).
-            names = [e.name for e in ole.direntries if e is not None]
+            # What listdir() paths gave (a STREAM whose path names VBA/Macros; root-level
+            # stream names), without building a path per stream: that is O(entries x
+            # depth) memory (~1 GB for a 4 MB file of 470 nested storages at the slot cap).
+            has_vba = False
+            stack = [(k, False) for k in ole.root.kids]
+            while stack and not has_vba:
+                entry, under = stack.pop()
+                marked = under or "VBA" in entry.name or "Macros" in entry.name
+                if entry.entry_type == olefile.STGTY_STREAM:
+                    has_vba = marked
+                else:
+                    stack.extend((k, marked) for k in entry.kids)
             root_streams = {k.name for k in ole.root.kids
                             if k.entry_type == olefile.STGTY_STREAM}
             if serious_parsing_issues(ole):
                 # olefile stopped reading or repaired the directory: what follows may miss
                 # entries (sheet_records refuses the same file as unreadable).
                 warnings.append("ole_unreadable")
-        has_vba = any("VBA" in n or "Macros" in n for n in names)
-        has_ppt = "PowerPoint Document" in root_streams
+        has_ppt = any(s in root_streams for s in ["PowerPoint Document", "PP97_DUALSTORAGE"])
         has_doc = any(s in root_streams for s in ["WordDocument", "1Table", "0Table"])
         has_xls = any(s in root_streams for s in ["Workbook", "Book"])
         has_encrypted = "EncryptedPackage" in root_streams
