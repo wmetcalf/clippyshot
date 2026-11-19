@@ -144,7 +144,7 @@ def test_ui_flags_qr_dropped_without_any_marker_from_typed_counts():
       const meta = {pages: [{index: 1, qr: []}, {index: 2, qr: []}, {index: 3, qr: [{v: 1}]}]};
       console.log(JSON.stringify([typed, collectWarnings(meta, [], typed),
         qrPageNote(meta.pages[0], typed), qrPageNote(meta.pages[2], typed),
-        qrPageNote({index: 9, qr: {count: 2}}, typed)]));
+        qrPageNote({index: 1, qr: {count: 2}}, typed)]));
     """)
     typed, warnings, note1, note3, fallback = got
     assert typed == {"1": 2, "2": 0, "3": 1}
@@ -152,7 +152,8 @@ def test_ui_flags_qr_dropped_without_any_marker_from_typed_counts():
     assert warnings[0]["message"].startswith("2 decoded QR entries not shown")
     assert "pages: 1 (2)" in warnings[0]["message"]
     assert note1 == "2 of 2 decoded QR entries not shown (dropped to fit the metadata budget)"
-    assert note3 == "" and fallback == ""
+    assert note3 == ""
+    assert fallback == "2 decoded QR entries (values not recorded in this result)"
 
 
 def test_ui_merge_matches_warnings_the_engine_cut_to_its_limits():
@@ -202,6 +203,9 @@ def test_ui_thin_envelope_fallback_shows_typed_qr_values():
     code = _outside_helpers()
     assert "sf.qr_values.map(v => ({ value: String(v)" in code
     assert "{ count: sf.qr_count }" not in code
+    # No typed qr_values (results sealed before the embed): null, not [] -- an empty list
+    # would read as "every value dropped to fit the budget".
+    assert "String(v), format: '' })) : null," in code
     got = _run_helpers("""
       const typed = {1: 2};
       console.log(JSON.stringify([qrPageNote({index: 1, qr: null}, typed),
