@@ -437,26 +437,63 @@ def _check_ole_content(path: Path) -> list[str]:
     is almost certainly a macro-only payload — there's nothing to render.
     """
     warnings: list[str] = []
+    is_ole = False
     try:
         import olefile
 
+        from clippyshot.ole_guard import OleGuardError, open_ole, serious_parsing_issues
+
         if not olefile.isOleFile(str(path)):
             return warnings
-        ole = olefile.OleFileIO(str(path))
-        dirs = ["/".join(d) for d in ole.listdir()]
-        has_vba = any("VBA" in d or "Macros" in d for d in dirs)
-        has_ppt = any(s in dirs for s in ["PowerPoint Document", "PP97_DUALSTORAGE"])
-        has_doc = any(s in dirs for s in ["WordDocument", "1Table", "0Table"])
-        has_xls = any(s in dirs for s in ["Workbook", "Book"])
-        has_encrypted = "EncryptedPackage" in dirs
+        is_ole = True
+        try:
+            # Bounded pre-check first: olefile's constructor is quadratic in directory
+            # entries. A refusal is reported, not swallowed with the parse errors below.
+            ole = open_ole(path)
+        except OleGuardError as exc:
+            warnings.append("ole_limit_exceeded" if exc.reason == "too_large"
+                            else "ole_unreadable")
+            return warnings
+        with ole:
+            # What listdir() paths gave (a STREAM whose path names VBA/Macros; root-level
+            # stream names), without building a path per stream: that is O(entries x
+            # depth) memory (~1 GB for a 4 MB file of 470 nested storages at the slot cap).
+            # olefile can attach the root (or an entry twice) under a storage, so the
+            # kids graph may cycle: visit each entry once, descend into storages only.
+            has_vba = False
+            seen = {id(ole.root)}
+            stack = [(k, False) for k in ole.root.kids]
+            while stack and not has_vba:
+                entry, under = stack.pop()
+                if id(entry) in seen:
+                    continue
+                seen.add(id(entry))
+                marked = under or "VBA" in entry.name or "Macros" in entry.name
+                if entry.entry_type == olefile.STGTY_STREAM:
+                    has_vba = marked
+                elif entry.entry_type == olefile.STGTY_STORAGE:
+                    stack.extend((k, marked) for k in entry.kids)
+            root_streams = {k.name for k in ole.root.kids
+                            if k.entry_type == olefile.STGTY_STREAM}
+            if serious_parsing_issues(ole):
+                # olefile stopped reading or repaired the directory: what follows may miss
+                # entries (sheet_records refuses the same file as unreadable).
+                warnings.append("ole_unreadable")
+        has_ppt = any(s in root_streams for s in ["PowerPoint Document", "PP97_DUALSTORAGE"])
+        has_doc = any(s in root_streams for s in ["WordDocument", "1Table", "0Table"])
+        has_xls = any(s in root_streams for s in ["Workbook", "Book"])
+        has_encrypted = "EncryptedPackage" in root_streams
         has_content = has_ppt or has_doc or has_xls or has_encrypted
         if has_vba and not has_content:
             warnings.append("ole_macro_only_payload")
         if has_encrypted:
             warnings.append("ole_encrypted")
-        ole.close()
     except Exception:
-        pass
+        # An OLE container olefile could not parse after the pre-check passed is still
+        # reported, the same verdict sheet_records gives it -- not an empty, clean-looking
+        # structural check.
+        if is_ole and not warnings:
+            warnings.append("ole_unreadable")
     return warnings
 
 

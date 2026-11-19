@@ -130,43 +130,30 @@ def _ok(sheets: list[dict] | None) -> list[dict]:
 # ─── xls (BIFF8) ─────────────────────────────────────────────────────────────
 
 
-# olefile defects that change neither the directory LibreOffice builds nor the stream bytes
-# it reads (header CLSID/transaction quirks, a size high-dword some writers set, a storage
-# with a size): common in dropper tooling, so refusing them would lose real signal.
-_BENIGN_OLE_ISSUES = (
-    "incorrect OLE stream size",
-    "incorrect CLSID in OLE header",
-    "transaction_signature_number",
-    "non-null reserved bytes",
-    "OLE storage with size>0",
-)
-
-
 def _check_cfb_header(path: Path) -> None:
-    """Refuse a CFB header whose counts olefile would act on before any cap of ours runs
-    (the DIFAT/FAT loops in its constructor, copied quadratically), or whose mini-stream
-    cutoff olefile silently normalises to 4096 while LibreOffice honours it (the two would
-    then read different bytes for the same stream)."""
-    size = path.stat().st_size
+    """Refuse a CFB olefile would do unbounded work on (ole_guard: header counts absurd for
+    the file, a directory chain past MAX_OLE_DIR_ENTRIES slots or looping), a FAT count
+    absurd for the file even without a DIFAT, or
+    whose mini-stream cutoff olefile silently normalises to 4096 while LibreOffice honours
+    it (the two would then read different bytes for the same stream)."""
+    from clippyshot.ole_guard import OleGuardError, check_cfb
+
+    path = Path(path)
+    try:
+        check_cfb(path)
+    except OleGuardError as exc:
+        raise _Declined(exc.reason) from None
     with open(path, "rb") as fh:
         h = fh.read(512)
-    if len(h) < 512:
-        raise _Declined("unreadable")
-    shift, mini_shift = struct.unpack_from("<HH", h, 0x1E)
-    if shift not in (9, 12) or mini_shift != 6:
-        raise _Declined("unreadable")
-    sector = 1 << shift
-    n_fat, _first_dir, _txn, cutoff, _first_mini, n_mini, _first_difat, n_difat = (
-        struct.unpack_from("<IIIIIIII", h, 0x2C))
+    (n_fat,) = struct.unpack_from("<I", h, 0x2C)
+    (cutoff,) = struct.unpack_from("<I", h, 0x38)
     if cutoff != 4096:
         raise _Declined("unreadable")
-    sectors = -(-max(0, size - sector) // sector)  # sectors after the header
-    per_fat = sector // 4
-    # Spare FAT sectors are legal, so allow generous slack over what the file needs; the
-    # bound only has to stop counts that are absurd for the file's size.
-    needed_fat = sectors // per_fat + 1
-    if (n_fat > 2 * needed_fat + 16 or n_mini > sectors
-            or n_difat > n_fat // (per_fat - 1) + 2):
+    # Stricter than the shared guard (which bounds n_fat only with a DIFAT): a FAT count
+    # absurd for the file's size is not a header these records are read from.
+    sector = 1 << struct.unpack_from("<H", h, 0x1E)[0]
+    sectors = -(-max(0, path.stat().st_size - sector) // sector)
+    if n_fat > 2 * (sectors // (sector // 4) + 1) + 16:
         raise _Declined("unreadable")
 
 
@@ -210,11 +197,12 @@ def _read_xls(path: Path) -> list[dict] | None:
     if not olefile.isOleFile(str(path)):
         raise _Declined("unreadable")
     _check_cfb_header(path)
-    with olefile.OleFileIO(str(path)) as ole:
+    from clippyshot.ole_guard import _bounded_olefile_class, serious_parsing_issues
+
+    with _bounded_olefile_class()(str(path)) as ole:
         # A directory olefile had to repair (an entry linked twice, a sibling link to the
         # root, ...) is one LibreOffice may build differently: not ours to interpret.
-        if any(not any(q in str(msg) for q in _BENIGN_OLE_ISSUES)
-               for _kind, msg in (getattr(ole, "parsing_issues", None) or [])):
+        if serious_parsing_issues(ole):
             raise _Declined("unreadable")
         workbook = _stream_entry(ole, "Workbook")
         if workbook is None:

@@ -522,3 +522,35 @@ def test_pdf_intermediate_dir_cleaned_on_rasterize_failure(tmp_path: Path):
         conv.convert(src, out, ConvertOptions(limits=Limits()))
     # _pdf dir must be gone regardless of the rasterize failure.
     assert not (out / "_pdf").exists()
+
+
+def test_converter_reports_detector_structural_warnings(tmp_path: Path):
+    """The detector's structural warnings (incl. the CFB pre-check's ole_limit_exceeded)
+    reach metadata.input.detected.warnings, which the UI renders, instead of being dropped."""
+    src = tmp_path / "input.xls"
+    src.write_bytes(b"x")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    class LimitDetector:
+        def detect(self, path, *, max_input_bytes=None):
+            return DetectedType(
+                label="xls", mime="application/vnd.ms-excel", extension_hint="xls",
+                confidence=0.99, source="magika", agreed_with_extension=True,
+                warnings=["ole_limit_exceeded"],
+            )
+
+    conv = Converter(
+        detector=LimitDetector(),
+        runner=StubRunner(pages=1),
+        rasterizer=StubRasterizer(pages=1),
+        sandbox_backend="bwrap",
+        apparmor_profile="unconfined",
+    )
+    conv.convert(src, out, ConvertOptions(limits=Limits()))
+
+    meta = json.loads((out / "metadata.json").read_text())
+    assert meta["input"]["detected"]["warnings"] == ["ole_limit_exceeded"]
+    # ...and in the warnings list the sealed envelope and the UI's Warnings card read.
+    assert [w["code"] for w in meta["warnings"] if w["code"].startswith("ole_")] == [
+        "ole_limit_exceeded"]
