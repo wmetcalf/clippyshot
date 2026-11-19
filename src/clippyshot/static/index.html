@@ -500,8 +500,9 @@ async function loadResult(jobId, opts) {
             trimmed: hasTrim(c.index) ? { phash: h.phash } : null,
             focused: hasFocus(c.index) ? {} : null,
             phash: h.phash, colorhash: h.colorhash, sha256: h.sha256,
-            // The typed record's qr_values (budgeted) are the only QR text this envelope has.
-            qr: Array.isArray(sf.qr_values) ? sf.qr_values.map(v => ({ value: String(v), format: '' })) : [],
+            // The typed record's qr_values are the only QR text this envelope could have;
+            // results sealed before the embed carry neither (null: values not recorded).
+            qr: Array.isArray(sf.qr_values) ? sf.qr_values.map(v => ({ value: String(v), format: '' })) : null,
             ocr: (sf.ocr_text || sf.ocr_char_count) ? { text: sf.ocr_text, char_count: sf.ocr_char_count } : null,
           };
         });
@@ -994,11 +995,13 @@ function mergeWarnings(...lists) {
     }
     for (const [k, items] of counts) {
       const prev = best.get(k);
-      // On a tie keep the copy that carries context (the envelope's re-sealed one does).
+      // On a tie keep the first (metadata) copy, whose message is uncut, and take the
+      // context the envelope's re-sealed copy carries.
       const hasCtx = l => l.some(w => w.context);
-      if (!prev || items.length > prev.items.length
-          || (items.length === prev.items.length && hasCtx(items) && !hasCtx(prev.items)))
+      if (!prev || items.length > prev.items.length)
         best.set(k, {items, order: prev ? prev.order : best.size});
+      else if (items.length === prev.items.length && hasCtx(items) && !hasCtx(prev.items))
+        prev.items = prev.items.map((w, i) => ({...w, context: items[i].context}));
     }
   }
   return [...best.values()].sort((a, b) => a.order - b.order).flatMap(e => e.items);
@@ -1018,7 +1021,7 @@ function typedQrCounts(env) {
 // Decoded QR entries a page decoded but its metadata list does not show: the exact typed
 // count minus the list length, else the engine's per-page qr_omitted marker.
 function qrMissing(p, typed) {
-  // Only a metadata QR LIST can be short; the thin-envelope fallback's {count} shows no values.
+  // Only a QR LIST can be short; a page with no list (older thin results) has no values.
   const list = Array.isArray(p && p.qr);
   const shown = list ? p.qr.length : 0;
   if (list && typed && Object.prototype.hasOwnProperty.call(typed, p.index))
@@ -1026,6 +1029,11 @@ function qrMissing(p, typed) {
   return Math.max(0, Number(p && p.qr_omitted) || 0);
 }
 function qrPageNote(p, typed) {
+  // An older result with typed counts but no QR text at all: say so, claim no budget cut.
+  if (p && !Array.isArray(p.qr) && typed && Object.prototype.hasOwnProperty.call(typed, p.index)
+      && typed[p.index] > 0)
+    return typed[p.index] + ' decoded QR entr' + (typed[p.index] === 1 ? 'y' : 'ies')
+      + ' (values not recorded in this result)';
   const missing = qrMissing(p, typed);
   if (!missing) return '';
   const shown = Array.isArray(p.qr) ? p.qr.length : 0;
