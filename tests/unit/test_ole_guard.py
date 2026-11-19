@@ -511,3 +511,48 @@ def test_fat_load_is_linear_in_fat_sectors(tmp_path):
     with ole_guard.open_ole(p) as ole:
         assert len(ole.fat) == min(n_fat * per_fat, total)
     assert time.process_time() - t < 0.3
+
+
+def test_fat_is_extended_in_place_not_copied_per_fat_sector(tmp_path):
+    """Structural twin of the timing test (CI speed varies): stock olefile reassigns
+    self.fat once per FAT sector; the subclass assigns it a constant number of times."""
+    p = _write(tmp_path, "difat.xls", _cfb(50, gap=109 * 128 + 10, spare_fat=300))
+    sets = []
+
+    class Spy(ole_guard._bounded_olefile_class()):
+        def __setattr__(self, name, value):
+            if name == "fat":
+                sets.append(1)
+            super().__setattr__(name, value)
+
+    with Spy(str(p)):
+        pass
+    assert 0 < len(sets) <= 3, len(sets)
+
+
+def test_absurd_fat_count_under_a_difat_is_refused(tmp_path):
+    """n_fat drives olefile's (and the guard's) DIFAT loop: 0xFFFFFFFF must not run it."""
+    raw = bytearray(_cfb(10))
+    n_fat = 0xFFFFFFFF
+    n_difat = (n_fat - 109 + 128 - 2) // 127
+    struct.pack_into("<I", raw, 0x2C, n_fat)
+    struct.pack_into("<II", raw, 0x44, 1, n_difat)
+    p = _write(tmp_path, "nfat.xls", bytes(raw))
+    t = time.process_time()
+    with pytest.raises(ole_guard.OleGuardError, match="unreadable"):
+        _with_timeout(5, ole_guard.check_cfb, p)
+    assert time.process_time() - t < 0.5
+
+
+def test_walk_descends_into_storages_only(tmp_path, monkeypatch):
+    """olefile builds kids for any entry type; master's listdir() descends into storages
+    only, so an EMPTY-typed 'Macros' entry with a stream kid is not macro code."""
+    from types import SimpleNamespace as E
+
+    stream = E(name="dir", entry_type=olefile.STGTY_STREAM, kids=[])
+    odd = E(name="Macros", entry_type=olefile.STGTY_EMPTY, kids=[stream])
+    ole = _fake_ole({})
+    ole.root = E(kids=[odd])
+    p = _write(tmp_path, "s.doc", _cfb(10))
+    monkeypatch.setattr(ole_guard, "open_ole", lambda path: ole)
+    assert _check_ole_content(p) == []
