@@ -190,7 +190,7 @@ def test_directory_reached_through_the_difat_chain(tmp_path):
         assert len(ole.listdir()) == 49
     with pytest.raises(ole_guard.OleGuardError, match="too_large"):
         ole_guard.check_cfb(_write(tmp_path, "difat-many.xls",
-                                   _cfb(20_000, gap=109 * 128 + 10)))
+                                   _cfb(40_000, gap=109 * 128 + 10)))
 
 
 def test_4k_sector_cfb(tmp_path):
@@ -302,11 +302,11 @@ def test_olefile_failure_after_the_guard_is_reported(tmp_path, monkeypatch):
 def test_opened_olefile_has_a_linear_duplicate_stream_check(tmp_path):
     """Second line of defence: even a directory the guard passes is parsed in linear time,
     and a stream referenced twice is still flagged."""
-    p = _write(tmp_path, "edge.xls", _cfb(ole_guard.MAX_OLE_DIR_ENTRIES))
+    p = _write(tmp_path, "edge.xls", _cfb(8192))  # plain olefile: ~0.3 s; linear: ~0.06 s
     t = time.process_time()
     with ole_guard.open_ole(p) as ole:
-        assert len(ole.listdir()) == ole_guard.MAX_OLE_DIR_ENTRIES - 1
-    assert time.process_time() - t < 0.25
+        assert len(ole.listdir()) == 8191
+    assert time.process_time() - t < 0.2
     raw = bytearray(_cfb(4))
     # Entry 2's start minisector := entry 1's: the same stream referenced twice.
     dir_off = len(raw) - 512
@@ -314,3 +314,42 @@ def test_opened_olefile_has_a_linear_duplicate_stream_check(tmp_path):
     dup = _write(tmp_path, "dup.xls", bytes(raw))
     with ole_guard.open_ole(dup) as ole:
         assert any("referenced twice" in str(m) for _k, m in ole.parsing_issues)
+
+
+def test_difat_count_mismatch_alone_is_refused(tmp_path):
+    """n_difat must equal what olefile derives from n_fat (olefile raises otherwise); here
+    the DIFAT chain itself is empty, so only the count check can refuse."""
+    b = bytearray(_cfb(10))
+    struct.pack_into("<II", b, 0x44, _EOC, 1)  # first_difat=ENDOFCHAIN, n_difat=1, n_fat=1
+    p = _write(tmp_path, "difat-eoc.xls", bytes(b))
+    with pytest.raises(ole_guard.OleGuardError, match="DIFAT count"):
+        ole_guard.check_cfb(p)
+
+
+def test_spare_fat_count_without_difat_is_not_refused(tmp_path):
+    """Without a DIFAT olefile ignores n_fat; a real .doc claiming spare FAT sectors (seen
+    in the wild: n_fat 49 for a file that needs 6) parses cleanly and must not be refused."""
+    raw = bytearray((_FIXTURES / "fixture.doc").read_bytes())
+    struct.pack_into("<I", raw, 0x2C, 40)
+    p = _write(tmp_path, "spare.doc", bytes(raw))
+    with olefile.OleFileIO(str(p)) as ole:
+        assert ole.num_difat_sectors == 0 and not ole.parsing_issues
+    assert ole_guard.check_cfb(p) > 0
+    assert "ole_unreadable" not in _check_ole_content(p)
+
+
+def test_padded_directory_slots_are_refused_and_reported(tmp_path):
+    p = _write(tmp_path, "pad.xls", _cfb(ole_guard.MAX_OLE_DIR_ENTRIES + 4))
+    assert _check_ole_content(p) == ["ole_limit_exceeded"]
+
+
+def test_directory_chain_leaving_the_fat_stops_like_olefile(tmp_path):
+    """olefile flags a directory chain pointing past the FAT and stops reading there
+    (common in malformed dropper xls); the guard stops at the same place, not refuses."""
+    raw = bytearray(_cfb(10))  # FAT sector 0 at file offset 512; directory = sectors 1..3
+    struct.pack_into("<I", raw, 512 + 4 * 3, 5000)  # last directory sector -> out of range
+    p = _write(tmp_path, "oor.xls", bytes(raw))
+    with olefile.OleFileIO(str(p)) as ole:
+        assert any("out of range" in str(m) for _k, m in ole.parsing_issues)
+    assert ole_guard.check_cfb(p) == 12
+    assert "ole_unreadable" not in _check_ole_content(p)

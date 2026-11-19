@@ -155,8 +155,15 @@ def _check_cfb_header(path: Path) -> None:
         raise _Declined(exc.reason) from None
     with open(path, "rb") as fh:
         h = fh.read(512)
+    (n_fat,) = struct.unpack_from("<I", h, 0x2C)
     (cutoff,) = struct.unpack_from("<I", h, 0x38)
     if cutoff != 4096:
+        raise _Declined("unreadable")
+    # Stricter than the shared guard (which bounds n_fat only with a DIFAT): a FAT count
+    # absurd for the file's size is not a header these records are read from.
+    sector = 1 << struct.unpack_from("<H", h, 0x1E)[0]
+    sectors = -(-max(0, path.stat().st_size - sector) // sector)
+    if n_fat > 2 * (sectors // (sector // 4) + 1) + 16:
         raise _Declined("unreadable")
 
 

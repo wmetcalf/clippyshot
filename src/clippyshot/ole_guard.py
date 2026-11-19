@@ -22,16 +22,17 @@ import functools
 import struct
 from pathlib import Path
 
-# Directory entries a CFB may carry before we refuse to hand it to olefile. Real Office
-# documents carry tens to a few hundred (each embedded object adds a storage and a handful
-# of streams); olefile's quadratic duplicate-stream check costs ~0.3 s CPU at this bound
-# versus ~29 s at 80k.
-MAX_OLE_DIR_ENTRIES = 8192
+# Directory slots a CFB may carry before we refuse to hand it to olefile. Most Office
+# documents carry tens to a few hundred entries, but real ones with tens of thousands exist
+# (a Word ObjectPool with 8k+ embedded objects, 21k-entry .doc files). With the set-based
+# duplicate check below olefile's parse is linear: ~0.3 s CPU and ~25 MB at this bound
+# (plain olefile: ~29 s at 80k). Slots are counted, not loaded entries -- a chain padded
+# with empty sectors is refused too, and reported.
+MAX_OLE_DIR_ENTRIES = 32768
 
 _MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 _ENDOFCHAIN = 0xFFFFFFFE
 _FREESECT = 0xFFFFFFFF
-_MAXREGSECT = 0xFFFFFFFA
 _HEADER_DIFAT = 109
 
 REASONS = frozenset({"too_large", "unreadable"})
@@ -83,8 +84,11 @@ def check_cfb(path: Path, *, max_entries: int | None = None) -> int:
         # Spare FAT sectors are legal, so allow generous slack over what the file needs;
         # the bound only has to stop counts that are absurd for the file's size (olefile
         # loops over and copies them in its constructor).
+        # n_fat only drives olefile when a DIFAT is present (it derives the DIFAT sector
+        # count from it); without one olefile reads the header's 109 slots whatever n_fat
+        # says, and real files with spare FAT sectors claim more than they need.
         needed_fat = n_sectors // per_fat + 1
-        if (n_fat > 2 * needed_fat + 16 or n_mini > n_sectors
+        if ((n_difat and n_fat > 2 * needed_fat + 16) or n_mini > n_sectors
                 or n_difat > n_fat // (per_fat - 1) + 2):
             raise OleGuardError("unreadable", "header sector counts exceed the file")
 
@@ -119,10 +123,8 @@ def check_cfb(path: Path, *, max_entries: int | None = None) -> int:
         fat_cache: dict[int, tuple[int, ...]] = {}
 
         def fat_entry(sect: int) -> int:
-            k, off = divmod(sect, per_fat)
+            k, off = divmod(sect, per_fat)  # sect < fat_len, so k < len(fat_secs)
             if k not in fat_cache:
-                if k >= len(fat_secs):
-                    raise OleGuardError("unreadable", "sector beyond the FAT")
                 fat_cache[k] = struct.unpack(f"<{per_fat}I", read_sector(fat_secs[k]))
             return fat_cache[k][off]
 
@@ -131,9 +133,13 @@ def check_cfb(path: Path, *, max_entries: int | None = None) -> int:
         sect = first_dir
         walked = 0
         seen: set[int] = set()
+        # olefile's FAT: the listed FAT sectors' entries, truncated to the file's sectors.
+        fat_len = min(len(fat_secs) * per_fat, n_sectors)
         while sect != _ENDOFCHAIN:
-            if sect > _MAXREGSECT or sect >= n_sectors:
-                raise OleGuardError("unreadable", f"directory sector {sect:#x} invalid")
+            if sect >= fat_len:
+                # olefile flags "sector index out of range" and stops reading the directory
+                # there (malformed droppers do this); stop where it stops.
+                break
             if sect in seen:
                 raise OleGuardError("unreadable", "directory chain loops")
             if walked >= max_dir_sectors:
