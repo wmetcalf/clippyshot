@@ -96,6 +96,18 @@ source = "warnings[].code"
 description = "Input extension disagrees with the detected type."
 
 [[detections]]
+code = "ole_limit_exceeded"
+severity = "low"
+source = "warnings[].code (once; also listed in clippyshot_metadata input.detected.warnings)"
+description = "The OLE (CFB) input's directory chain exceeds the bounded pre-check's slot limit (clippyshot.ole_guard.MAX_OLE_DIR_ENTRIES), so it was never handed to olefile: OLE structural checks (macro-only payload, encrypted) and xls sheet-record recovery were skipped. LibreOffice still renders it."
+
+[[detections]]
+code = "ole_unreadable"
+severity = "low"
+source = "warnings[].code (once; also listed in clippyshot_metadata input.detected.warnings)"
+description = "The OLE (CFB) input's header, FAT/DIFAT or directory is malformed: refused by the pre-check, rejected by olefile, or parsed only with defects (a directory olefile stopped reading). OLE structural checks may be incomplete."
+
+[[detections]]
 code = "qr_decoded"
 severity = "info"
 source = "warnings[].code (one per DISTINCT decoded QR value, at its first page; at most 256 per document and at most 64 KiB of sealed JSON (less when the envelope has less headroom); message is the value cut at 2000 chars, context 'page N' plus ' (value truncated)' when cut)"

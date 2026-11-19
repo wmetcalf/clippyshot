@@ -1014,6 +1014,19 @@ class Converter:
                         ),
                         "pages": _clamped_pages,
                     })
+                # The CFB pre-check's refusals also go to the warnings list (the sealed
+                # envelope and the UI's Warnings card read it), not only input.detected.
+                _ole_messages = {
+                    "ole_limit_exceeded": (
+                        "OLE directory exceeds the pre-check's slot limit; OLE structural "
+                        "checks and binary sheet-record recovery were skipped"),
+                    "ole_unreadable": (
+                        "OLE container header, FAT or directory is malformed; OLE structural "
+                        "checks may be incomplete"),
+                }
+                for _w in detected.warnings or []:
+                    if _w in _ole_messages:
+                        warnings.append({"code": _w, "message": _ole_messages[_w]})
                 if not detected.agreed_with_extension:
                     warnings.append({
                         "code": "extension_mismatch",

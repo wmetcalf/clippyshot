@@ -551,3 +551,6 @@ def test_converter_reports_detector_structural_warnings(tmp_path: Path):
 
     meta = json.loads((out / "metadata.json").read_text())
     assert meta["input"]["detected"]["warnings"] == ["ole_limit_exceeded"]
+    # ...and in the warnings list the sealed envelope and the UI's Warnings card read.
+    assert [w["code"] for w in meta["warnings"] if w["code"].startswith("ole_")] == [
+        "ole_limit_exceeded"]
