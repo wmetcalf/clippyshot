@@ -432,6 +432,13 @@ async function loadResult(jobId, opts) {
     const r = await fetch(API+'/v1/jobs/'+jobId+'/metadata');
     if (!r.ok) return;
     let meta = await r.json();
+    // Engine/host warnings sealed on the blastbox ENVELOPE (qr_metadata_truncated,
+    // qr_decoded, ...) are not inside the embedded clippyshot_metadata; keep them before
+    // the compat shim below swaps meta for the legacy schema.
+    const envWarnings = (meta && meta.payload && Array.isArray(meta.warnings)) ? meta.warnings : [];
+    // Exact per-page QR counts from the envelope's typed scanner records: the embedded
+    // metadata's page lists may be cut (or emptied) to fit the metadata budget.
+    const typedQr = typedQrCounts(meta);
 
     // --- compat shim: the backend now returns the blastbox ENVELOPE (engine/status/detected/
     // artifacts/payload), but this UI was written for the legacy clippyshot metadata.json schema
@@ -493,7 +500,9 @@ async function loadResult(jobId, opts) {
             trimmed: hasTrim(c.index) ? { phash: h.phash } : null,
             focused: hasFocus(c.index) ? {} : null,
             phash: h.phash, colorhash: h.colorhash, sha256: h.sha256,
-            qr: (sf.qr_count > 0) ? { count: sf.qr_count } : null,
+            // The typed record's qr_values are the only QR text this envelope could have;
+            // results sealed before the embed carry neither (null: values not recorded).
+            qr: Array.isArray(sf.qr_values) ? sf.qr_values.map(v => ({ value: String(v), format: '' })) : null,
             ocr: (sf.ocr_text || sf.ocr_char_count) ? { text: sf.ocr_text, char_count: sf.ocr_char_count } : null,
           };
         });
@@ -601,13 +610,27 @@ async function loadResult(jobId, opts) {
     } catch(e) { /* best-effort */ }
     setTable('security-table', secRows);
 
-    // Warnings
+    // Warnings: the metadata's own, the envelope's engine/host warnings, and the QR
+    // budget marker (root qr_truncated / page qr_omitted) the engine writes into metadata.
     const wb = document.getElementById('warnings-body');
-    const warnings = meta.warnings || [];
+    const warnings = collectWarnings(meta, envWarnings, typedQr);
     if (warnings.length === 0) {
       wb.innerHTML = '<span style="color:#8b949e;font-size:.82rem">None</span>';
     } else {
-      wb.innerHTML = warnings.map(w=>'<div class="warn" style="font-size:.82rem;margin-bottom:4px">'+esc(w.code)+': '+esc(w.message)+'</div>').join('');
+      const line = w => '<div class="warn" style="font-size:.82rem;margin-bottom:4px">'
+        + esc(w.code) + ': ' + esc(w.message)
+        + (w.context ? ' <span style="color:#8b949e">(' + esc(w.context) + ')</span>' : '')
+        + '</div>';
+      // qr_decoded is one warning per distinct decoded value (up to 256): fold them.
+      const decoded = warnings.filter(w => w.code === 'qr_decoded');
+      wb.innerHTML = warnings.filter(w => w.code !== 'qr_decoded').map(line).join('')
+        + (decoded.length
+          // Open when the page QR lists were cut: these may be the only copy of a value.
+          ? '<details' + (warnings.some(w => w.code === 'qr_truncated') ? ' open' : '')
+            + '><summary class="warn" style="font-size:.82rem">qr_decoded: '
+            + decoded.length + ' decoded QR value(s)</summary>' + decoded.map(line).join('')
+            + '</details>'
+          : '');
     }
 
     // Download link
@@ -703,6 +726,12 @@ async function loadResult(jobId, opts) {
         card.insertAdjacentHTML('beforeend',
           `<details open><summary>QR codes (${p.qr.length})</summary><ul>${items}</ul></details>`
         );
+      }
+      // Entries the engine dropped from this page's list to fit the metadata budget.
+      const qrNote = qrPageNote(p, typedQr);
+      if (qrNote) {
+        card.insertAdjacentHTML('beforeend',
+          '<div class="warn qr-omitted-note" style="font-size:.78rem">' + esc(qrNote) + '</div>');
       }
 
       grid.appendChild(card);
@@ -890,10 +919,12 @@ async function refreshJobs() {
           .then(r => r.ok ? r.json() : null)
           .then(meta => {
             if (!meta) return;
-            const hasQr = (meta.pages || []).some(p => (p.qr || []).length > 0);
+            const hasQr = (meta.pages || []).some(p => (p.qr || []).length > 0)
+              || Object.values(typedQrCounts(meta)).some(n => n > 0);
             if (hasQr) {
               const cell = document.querySelector(`tr[data-job-id="${job.job_id}"] .badges`);
-              if (cell) cell.insertAdjacentHTML('beforeend',
+              // Refreshes overlap (3 s timer vs a slow metadata fetch): one badge per row.
+              if (cell && !cell.querySelector('.badge-qr')) cell.insertAdjacentHTML('beforeend',
                 '<span class="badge badge-qr">QR</span>');
             }
           })
@@ -941,6 +972,100 @@ setInterval(refreshJobs, 3000);
 refreshJobs();
 
 // Helpers
+// WARNINGS-HELPERS-BEGIN (pure; exercised by tests/unit/test_static_ui.py under node)
+// The engine re-seals each metadata warning onto the envelope with code cut to 64 and
+// message to 2000 code points (blastbox Warning limits): compare on the same cut.
+function warningKey(w) {
+  const cut = (v, n) => Array.from(String(v ?? '')).slice(0, n).join('');
+  return cut(w.code, 64) + '\u0000' + cut(w.message, 2000);
+}
+// Union of warning lists. The metadata's warnings are re-sealed onto the envelope, so the
+// same (code, message) appears in both: keep each pair as many times as the list that has
+// it most often (two identical altChunk parts stay two), never doubled.
+function mergeWarnings(...lists) {
+  const best = new Map();
+  for (const list of lists) {
+    const counts = new Map();
+    for (const w of (Array.isArray(list) ? list : [])) {
+      if (!w || typeof w !== 'object' || !w.code) continue;
+      const k = warningKey(w);
+      const items = counts.get(k) || [];
+      items.push(w);
+      counts.set(k, items);
+    }
+    for (const [k, items] of counts) {
+      const prev = best.get(k);
+      // On a tie keep the first (metadata) copy, whose message is uncut, and take the
+      // context the envelope's re-sealed copy carries.
+      const hasCtx = l => l.some(w => w.context);
+      if (!prev || items.length > prev.items.length)
+        best.set(k, {items, order: prev ? prev.order : best.size});
+      else if (items.length === prev.items.length && hasCtx(items) && !hasCtx(prev.items))
+        prev.items = prev.items.map((w, i) => ({...w, context: items[i].context}));
+    }
+  }
+  return [...best.values()].sort((a, b) => a.order - b.order).flatMap(e => e.items);
+}
+// {pageIndex: exact qr_count} from the sealed envelope's typed page scanner records.
+function typedQrCounts(env) {
+  const out = {};
+  const kids = env && env.payload && Array.isArray(env.payload.children) ? env.payload.children : [];
+  for (const c of kids) {
+    if (!c || c._type !== 'page') continue;
+    const rec = (Array.isArray(c.children) ? c.children : []).find(x => x && x._type === 'record');
+    const n = rec && rec.fields ? Number(rec.fields.qr_count) : NaN;
+    if (Number.isFinite(n)) out[c.index] = n;
+  }
+  return out;
+}
+// Decoded QR entries a page decoded but its metadata list does not show: the exact typed
+// count minus the list length, else the engine's per-page qr_omitted marker.
+function qrMissing(p, typed) {
+  // Only a QR LIST can be short; a page with no list (older thin results) has no values.
+  const list = Array.isArray(p && p.qr);
+  const shown = list ? p.qr.length : 0;
+  if (list && typed && Object.prototype.hasOwnProperty.call(typed, p.index))
+    return Math.max(0, typed[p.index] - shown);
+  return Math.max(0, Number(p && p.qr_omitted) || 0);
+}
+function qrPageNote(p, typed) {
+  // An older result with typed counts but no QR text at all: say so, claim no budget cut.
+  if (p && !Array.isArray(p.qr) && typed && Object.prototype.hasOwnProperty.call(typed, p.index)
+      && typed[p.index] > 0)
+    return typed[p.index] + ' decoded QR entr' + (typed[p.index] === 1 ? 'y' : 'ies')
+      + ' (values not recorded in this result)';
+  const missing = qrMissing(p, typed);
+  if (!missing) return '';
+  const shown = Array.isArray(p.qr) ? p.qr.length : 0;
+  return missing + ' of ' + (shown + missing) + ' decoded QR entr' + (shown + missing === 1 ? 'y' : 'ies')
+    + ' not shown (dropped to fit the metadata budget)';
+}
+// The engine's QR budget marker (root qr_truncated {omitted, budget_bytes}, page
+// qr_omitted) and/or typed counts above the shown lists -- the engine's last-resort
+// QR-free result carries no marker at all, only the typed counts.
+function qrTruncatedWarning(meta, typed) {
+  const t = meta && typeof meta.qr_truncated === 'object' ? meta.qr_truncated : null;
+  const pages = (meta && Array.isArray(meta.pages) ? meta.pages : [])
+    .map(p => [p, qrMissing(p, typed)]).filter(([, n]) => n > 0);
+  const missing = pages.reduce((a, [, n]) => a + n, 0);
+  if (!t && !missing) return null;
+  const omitted = missing || (t && t.omitted);
+  return {
+    code: 'qr_truncated',
+    message: (omitted ?? '?') + ' decoded QR entr' + (omitted === 1 ? 'y' : 'ies')
+      + ' not shown in the page QR lists'
+      + (t && t.budget_bytes != null ? ' (metadata budget ' + t.budget_bytes + ' bytes)' : ' (dropped to fit the metadata budget)')
+      + (pages.length ? '; pages: ' + pages.slice(0, 20).map(([p, n]) => p.index + ' (' + n + ')').join(', ')
+        + (pages.length > 20 ? ' and ' + (pages.length - 20) + ' more' : '') : ''),
+  };
+}
+function collectWarnings(meta, envWarnings, typed) {
+  const out = mergeWarnings((meta && meta.warnings) || [], envWarnings || []);
+  const qt = qrTruncatedWarning(meta, typed);
+  if (qt) out.push(qt);
+  return out;
+}
+// WARNINGS-HELPERS-END
 function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML}
 function escapeHtml(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function fmtSize(b){if(!b)return '0B';const u=['B','KB','MB','GB'];let i=0;let v=b;while(v>=1024&&i<u.length-1){v/=1024;i++}return v.toFixed(i?1:0)+' '+u[i]}
