@@ -21,7 +21,7 @@ _FREE, _EOC, _FATSECT, _DIFSECT, _NOSTREAM = (
 
 
 def _cfb(n_entries: int, *, shift: int = 9, gap: int = 0, loop: bool = False,
-         loaded: int | None = None) -> bytes:
+         loaded: int | None = None, spare_fat: int = 0) -> bytes:
     """A CFB whose root holds ``n_entries - 1`` one-byte ministreams in a balanced sibling
     tree (each non-empty stream feeds olefile's quadratic duplicate-stream list).
 
@@ -37,7 +37,7 @@ def _cfb(n_entries: int, *, shift: int = 9, gap: int = 0, loop: bool = False,
     n_fat = n_difat = 0
     while True:  # FAT + DIFAT sectors must cover themselves too
         total = n_fat + n_difat + gap + n_dir
-        need_fat = -(-total // per_fat)
+        need_fat = -(-total // per_fat) + spare_fat
         need_difat = 0 if need_fat <= 109 else -(-(need_fat - 109) // (per_fat - 1))
         if (need_fat, need_difat) == (n_fat, n_difat):
             break
@@ -267,9 +267,7 @@ def test_decoy_difat_does_not_hide_the_real_directory(tmp_path, no_olefile_open)
     small = _write(tmp_path, "decoy-small.xls", _decoy_difat_cfb(400))
     with olefile.OleFileIO(str(small)) as ole:  # the shape olefile really parses
         assert len(ole.listdir()) == 399
-    # (a file this small also trips the header-count bound: 110 FAT sectors for 0.6 MB)
-    with pytest.raises(ole_guard.OleGuardError, match="unreadable"):
-        ole_guard.check_cfb(small)
+    assert ole_guard.check_cfb(small) == 400  # the directory olefile reads, not the decoy
     no_olefile_open.clear()
     p = _write(tmp_path, "decoy.xls", _decoy_difat_cfb(40_000))
     t = time.process_time()
@@ -438,3 +436,78 @@ def test_structural_checks_match_the_listdir_semantics(tmp_path, monkeypatch, tr
     p = _write(tmp_path, "s.doc", _cfb(10))
     monkeypatch.setattr(ole_guard, "open_ole", lambda path: _fake_ole(tree))
     assert _check_ole_content(p) == expected
+
+
+class _Hung(BaseException):
+    """Not an Exception: the code under test catches those broadly."""
+
+
+def _with_timeout(seconds, fn, *a):
+    import signal
+
+    def boom(*_):
+        raise _Hung(f"{fn.__name__} did not return within {seconds}s")
+
+    old = signal.signal(signal.SIGALRM, boom)
+    signal.alarm(seconds)
+    try:
+        return fn(*a)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+
+
+@pytest.mark.parametrize("root_type", [5, 1])
+def test_root_reattached_as_a_kid_does_not_loop_the_detector(tmp_path, root_type):
+    """olefile loads the root outside append_kids, so a child pointer back to SID 0 hangs
+    it under a storage: the kids graph cycles (12 real corpus files do this). The root's
+    type byte is attacker-set, so storage-only descent alone is not enough."""
+    raw = bytearray(_cfb(10))
+    dir_off = 512 * 2  # header + one FAT sector
+    struct.pack_into("<B", raw, dir_off + 66, root_type)
+    e = dir_off + 2 * 128
+    struct.pack_into("<B", raw, e + 66, 1)          # entry 2 retyped as a storage ...
+    struct.pack_into("<I", raw, e + 76, 0)          # ... whose child is the root
+    p = _write(tmp_path, "cycle.doc", bytes(raw))
+    got = _with_timeout(5, _check_ole_content, p)
+    assert isinstance(got, list)
+
+
+def test_spare_fat_sectors_under_a_difat_are_not_refused(tmp_path):
+    """Real encrypted packages list ~3x the FAT sectors they need under a DIFAT (6 MB,
+    265 listed, 93 needed) and olefile parses them cleanly."""
+    p = _write(tmp_path, "spare.xlsx", _cfb(50, gap=109 * 128 + 10, spare_fat=300))
+    n_fat = struct.unpack_from("<I", p.read_bytes(), 0x2C)[0]
+    assert n_fat > 400
+    with olefile.OleFileIO(str(p)) as ole:
+        assert len(ole.listdir()) == 49 and not ole.parsing_issues
+    assert ole_guard.check_cfb(p) == 52
+
+
+def test_fat_load_is_linear_in_fat_sectors(tmp_path):
+    """olefile's loadfat_sect copies the whole FAT per FAT sector; the subclass extends."""
+    S, per_fat = 512, 128
+    n_fat = 4000
+    n_difat = -(-(n_fat - 109) // (per_fat - 1))
+    total = n_fat + 8
+    hdr = bytearray(_cfb(2)[:512])
+    difat0 = 2  # sectors: 0 FAT (everything points at it), 1 directory, 2.. DIFAT
+    struct.pack_into("<IIIIIIII", hdr, 0x2C, n_fat, 1, 0, 4096, _EOC, 0, difat0, n_difat)
+    struct.pack_into("<109I", hdr, 0x4C, *([0] * 109))
+    fat = [_FATSECT, _EOC] + [_DIFSECT] * n_difat
+    fat += [_FREE] * (per_fat - len(fat))
+    body = bytearray(struct.pack(f"<{per_fat}I", *fat))
+    body += _cfb(2)[-S:]  # root + one stream directory sector
+    left = n_fat - 109
+    for j in range(n_difat):
+        k = min(per_fat - 1, left)
+        left -= k
+        nxt = difat0 + j + 1 if j + 1 < n_difat else _EOC
+        body += struct.pack(f"<{per_fat}I", *([0] * k + [_FREE] * (per_fat - 1 - k)), nxt)
+    body = body.ljust(total * S, b"\0")
+    p = _write(tmp_path, "fats.xls", bytes(hdr) + bytes(body))
+    assert ole_guard.check_cfb(p) > 0
+    t = time.process_time()
+    with ole_guard.open_ole(p) as ole:
+        assert len(ole.fat) == min(n_fat * per_fat, total)
+    assert time.process_time() - t < 0.3

@@ -458,14 +458,20 @@ def _check_ole_content(path: Path) -> list[str]:
             # What listdir() paths gave (a STREAM whose path names VBA/Macros; root-level
             # stream names), without building a path per stream: that is O(entries x
             # depth) memory (~1 GB for a 4 MB file of 470 nested storages at the slot cap).
+            # olefile can attach the root (or an entry twice) under a storage, so the
+            # kids graph may cycle: visit each entry once, descend into storages only.
             has_vba = False
+            seen = {id(ole.root)}
             stack = [(k, False) for k in ole.root.kids]
             while stack and not has_vba:
                 entry, under = stack.pop()
+                if id(entry) in seen:
+                    continue
+                seen.add(id(entry))
                 marked = under or "VBA" in entry.name or "Macros" in entry.name
                 if entry.entry_type == olefile.STGTY_STREAM:
                     has_vba = marked
-                else:
+                elif entry.entry_type == olefile.STGTY_STORAGE:
                     stack.extend((k, marked) for k in entry.kids)
             root_streams = {k.name for k in ole.root.kids
                             if k.entry_type == olefile.STGTY_STREAM}

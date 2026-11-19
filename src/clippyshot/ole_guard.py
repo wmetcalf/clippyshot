@@ -21,6 +21,7 @@ Refusals raise :class:`OleGuardError` with ``reason`` ``"too_large"`` (a limit) 
 """
 from __future__ import annotations
 
+import array
 import functools
 import struct
 from pathlib import Path
@@ -109,8 +110,10 @@ def check_cfb(path: Path, *, max_entries: int | None = None) -> int:
         # n_fat only drives olefile when a DIFAT is present (it derives the DIFAT sector
         # count from it); without one olefile reads the header's 109 slots whatever n_fat
         # says, and real files with spare FAT sectors claim more than they need.
-        needed_fat = n_sectors // per_fat + 1
-        if ((n_difat and n_fat > 2 * needed_fat + 16) or n_mini > n_sectors
+        # With a DIFAT, olefile loads every FAT sector it lists, one sector read each (made
+        # linear by the subclass's loadfat_sect below), so n_fat is bounded by the file's
+        # sector count, not by what the file needs: real encrypted packages list ~3x spare.
+        if ((n_difat and n_fat > n_sectors) or n_mini > n_sectors
                 or n_difat > n_fat // (per_fat - 1) + 2):
             raise OleGuardError("unreadable", "header sector counts exceed the file")
 
@@ -178,7 +181,7 @@ def check_cfb(path: Path, *, max_entries: int | None = None) -> int:
 
 @functools.cache
 def _bounded_olefile_class():
-    """``OleFileIO`` with a set-based duplicate-stream check.
+    """``OleFileIO`` with a set-based duplicate-stream check and a linear FAT load.
 
     olefile keeps the first sectors of the streams it has seen in a *list*, so its
     constructor is O(n^2) in directory entries. Same check, same defect, O(1) per entry:
@@ -188,6 +191,18 @@ def _bounded_olefile_class():
     import olefile
 
     class _OleFileIO(olefile.OleFileIO):
+        def loadfat_sect(self, sect):
+            # olefile's loop with ``self.fat = self.fat + nextfat`` (a copy of the whole
+            # FAT per FAT sector: quadratic in n_fat) replaced by an in-place extend.
+            fat1 = sect if isinstance(sect, array.array) else self.sect2array(sect)
+            isect = None
+            for isect in fat1:
+                isect = isect & 0xFFFFFFFF
+                if isect == olefile.ENDOFCHAIN or isect == olefile.FREESECT:
+                    break
+                self.fat.extend(self.sect2array(self.getsect(isect)))
+            return isect
+
         def _check_duplicate_stream(self, first_sect, minifat=False):
             if not minifat and first_sect in (olefile.DIFSECT, olefile.FATSECT,
                                               olefile.ENDOFCHAIN, olefile.FREESECT):
