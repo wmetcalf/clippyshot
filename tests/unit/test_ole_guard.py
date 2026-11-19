@@ -20,14 +20,17 @@ _FREE, _EOC, _FATSECT, _DIFSECT, _NOSTREAM = (
     0xFFFFFFFF, 0xFFFFFFFE, 0xFFFFFFFD, 0xFFFFFFFC, 0xFFFFFFFF)
 
 
-def _cfb(n_entries: int, *, shift: int = 9, gap: int = 0, loop: bool = False) -> bytes:
+def _cfb(n_entries: int, *, shift: int = 9, gap: int = 0, loop: bool = False,
+         loaded: int | None = None) -> bytes:
     """A CFB whose root holds ``n_entries - 1`` one-byte ministreams in a balanced sibling
     tree (each non-empty stream feeds olefile's quadratic duplicate-stream list).
 
     ``gap`` free sectors precede the directory so its FAT entries land in FAT sectors past
     the header's 109 DIFAT slots (exercising the DIFAT chain). ``loop`` points the last
-    directory sector back at the first.
+    directory sector back at the first. ``loaded`` < ``n_entries`` keeps only that many
+    entries in the tree; the remaining slots are empty (a padded directory).
     """
+    live = n_entries if loaded is None else loaded
     S = 1 << shift
     per_fat, per_dir = S // 4, S // 128
     n_dir = -(-n_entries // per_dir)
@@ -57,7 +60,7 @@ def _cfb(n_entries: int, *, shift: int = 9, gap: int = 0, loop: bool = False) ->
         left[mid], right[mid] = bal(lo, mid - 1), bal(mid + 1, hi)
         return mid
 
-    top = bal(1, n_entries - 1)
+    top = bal(1, live - 1)
 
     def ent(name: str, typ: int, lt: int, rt: int, c: int, start: int, size: int) -> bytes:
         nm = name.encode("utf-16-le") + b"\0\0"
@@ -65,10 +68,10 @@ def _cfb(n_entries: int, *, shift: int = 9, gap: int = 0, loop: bool = False) ->
                 + b"\0" * 36 + struct.pack("<IQ", start, size))
 
     d = bytearray(ent("Root Entry", 5, _NOSTREAM, _NOSTREAM, top, _EOC, 0))
-    for i in range(1, n_entries):
+    for i in range(1, live):
         d += ent(f"S{i:06d}", 2, left[i], right[i], _NOSTREAM, i - 1, 1)
     d = d.ljust(n_dir * S, b"\0")
-    for k in range(n_entries, n_dir * per_dir):
+    for k in range(live, n_dir * per_dir):
         struct.pack_into("<III", d, k * 128 + 68, _NOSTREAM, _NOSTREAM, _NOSTREAM)
 
     hdr = bytearray(512)
@@ -339,8 +342,22 @@ def test_spare_fat_count_without_difat_is_not_refused(tmp_path):
 
 
 def test_padded_directory_slots_are_refused_and_reported(tmp_path):
-    p = _write(tmp_path, "pad.xls", _cfb(ole_guard.MAX_OLE_DIR_ENTRIES + 4))
+    """Slots are counted, not loaded entries: 3 live entries in a chain past the cap."""
+    p = _write(tmp_path, "pad.xls", _cfb(ole_guard.MAX_OLE_DIR_ENTRIES + 4, loaded=3))
+    with olefile.OleFileIO(str(p)) as ole:
+        assert len(ole.listdir()) == 2
     assert _check_ole_content(p) == ["ole_limit_exceeded"]
+
+
+def test_real_sized_large_directories_pass():
+    """Real .doc files with 8k and 21k entries exist; the cap must admit them."""
+    assert ole_guard.MAX_OLE_DIR_ENTRIES >= 22_000
+
+
+def test_str_paths_work_everywhere(tmp_path):
+    p = _FIXTURES / "fixture.xls"
+    assert sr.read_binary_sheet_records_status(str(p))[1] == "ok"
+    assert ole_guard.check_cfb(str(p)) > 0
 
 
 def test_directory_chain_leaving_the_fat_stops_like_olefile(tmp_path):
@@ -352,4 +369,33 @@ def test_directory_chain_leaving_the_fat_stops_like_olefile(tmp_path):
     with olefile.OleFileIO(str(p)) as ole:
         assert any("out of range" in str(m) for _k, m in ole.parsing_issues)
     assert ole_guard.check_cfb(p) == 12
-    assert "ole_unreadable" not in _check_ole_content(p)
+    # olefile flagged the chain: reported (the parse is bounded and was not refused).
+    assert _check_ole_content(p) == ["ole_unreadable"]
+
+
+@pytest.mark.parametrize("target", [50, 5000])  # inside FAT sector 0 but past EOF; past both
+def test_chain_into_the_fat_past_eof_stops_too(tmp_path, target):
+    raw = bytearray(_cfb(10))
+    struct.pack_into("<I", raw, 512 + 4 * 3, target)
+    assert ole_guard.check_cfb(_write(tmp_path, "eof.xls", bytes(raw))) == 12
+
+
+def test_chain_past_a_short_fat_stops_where_olefile_stops(tmp_path):
+    """Header lists one FAT sector (128 entries) for a 152-sector file: olefile's FAT ends
+    at sector 127 and its directory read stops there; the guard counts the same slots."""
+    raw = bytearray(_cfb(600))
+    struct.pack_into("<I", raw, 0x4C + 4, _FREE)  # drop the second FAT sector from DIFAT
+    p = _write(tmp_path, "shortfat.xls", bytes(raw))
+    with olefile.OleFileIO(str(p)) as ole:
+        assert any("out of range" in str(m) for _k, m in ole.parsing_issues)
+    assert ole_guard.check_cfb(p) == (128 - 2) * 4
+
+
+def test_detector_reports_a_directory_olefile_stopped_reading(tmp_path):
+    """olefile reads only part of the directory: the detector says unreadable (as
+    sheet_records does), not a clean-looking empty check."""
+    raw = bytearray(_cfb(600))
+    struct.pack_into("<I", raw, 0x4C + 4, _FREE)
+    p = _write(tmp_path, "partial.xls", bytes(raw))
+    assert "ole_unreadable" in _check_ole_content(p)
+    assert sr.read_binary_sheet_records_status(p) == (None, "unreadable")

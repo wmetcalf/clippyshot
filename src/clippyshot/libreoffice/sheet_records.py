@@ -130,25 +130,15 @@ def _ok(sheets: list[dict] | None) -> list[dict]:
 # ─── xls (BIFF8) ─────────────────────────────────────────────────────────────
 
 
-# olefile defects that change neither the directory LibreOffice builds nor the stream bytes
-# it reads (header CLSID/transaction quirks, a size high-dword some writers set, a storage
-# with a size): common in dropper tooling, so refusing them would lose real signal.
-_BENIGN_OLE_ISSUES = (
-    "incorrect OLE stream size",
-    "incorrect CLSID in OLE header",
-    "transaction_signature_number",
-    "non-null reserved bytes",
-    "OLE storage with size>0",
-)
-
-
 def _check_cfb_header(path: Path) -> None:
     """Refuse a CFB olefile would do unbounded work on (ole_guard: header counts absurd for
-    the file, a directory chain past MAX_OLE_DIR_ENTRIES, looping or leaving the file), or
+    the file, a directory chain past MAX_OLE_DIR_ENTRIES slots or looping), a FAT count
+    absurd for the file even without a DIFAT, or
     whose mini-stream cutoff olefile silently normalises to 4096 while LibreOffice honours
     it (the two would then read different bytes for the same stream)."""
     from clippyshot.ole_guard import OleGuardError, check_cfb
 
+    path = Path(path)
     try:
         check_cfb(path)
     except OleGuardError as exc:
@@ -207,13 +197,12 @@ def _read_xls(path: Path) -> list[dict] | None:
     if not olefile.isOleFile(str(path)):
         raise _Declined("unreadable")
     _check_cfb_header(path)
-    from clippyshot.ole_guard import _bounded_olefile_class
+    from clippyshot.ole_guard import _bounded_olefile_class, serious_parsing_issues
 
     with _bounded_olefile_class()(str(path)) as ole:
         # A directory olefile had to repair (an entry linked twice, a sibling link to the
         # root, ...) is one LibreOffice may build differently: not ours to interpret.
-        if any(not any(q in str(msg) for q in _BENIGN_OLE_ISSUES)
-               for _kind, msg in (getattr(ole, "parsing_issues", None) or [])):
+        if serious_parsing_issues(ole):
             raise _Declined("unreadable")
         workbook = _stream_entry(ole, "Workbook")
         if workbook is None:

@@ -9,9 +9,12 @@ number of small reads, independent of the entry count -- and refuses the file be
 ever sees it when:
 
 * the header is short or its sector shifts are not CFB's (9 or 12, mini 6),
-* a FAT / MiniFAT / DIFAT sector count is absurd for the file's size,
-* the directory chain is longer than :data:`MAX_OLE_DIR_ENTRIES` entries allow, loops,
-  or leaves the file.
+* a MiniFAT / DIFAT sector count (or, with a DIFAT, the FAT count) is absurd for the
+  file's size, or the DIFAT disagrees with what olefile derives,
+* the directory chain is longer than :data:`MAX_OLE_DIR_ENTRIES` slots allow or loops.
+
+A chain that leaves the FAT ends the walk where olefile also stops reading (olefile then
+records a parsing issue; :func:`serious_parsing_issues` is how callers report it).
 
 Refusals raise :class:`OleGuardError` with ``reason`` ``"too_large"`` (a limit) or
 ``"unreadable"`` (a malformed header or chain); callers report it, never drop it silently.
@@ -46,6 +49,25 @@ def _until_terminator(entries) -> list[int]:
             break
         out.append(e)
     return out
+
+
+# olefile defects that change neither the directory LibreOffice builds nor the stream bytes
+# it reads (header CLSID/transaction quirks, a size high-dword some writers set, a storage
+# with a size): common in dropper tooling, so treating them as unreadable would lose signal.
+BENIGN_OLE_ISSUES = (
+    "incorrect OLE stream size",
+    "incorrect CLSID in OLE header",
+    "transaction_signature_number",
+    "non-null reserved bytes",
+    "OLE storage with size>0",
+)
+
+
+def serious_parsing_issues(ole) -> list[str]:
+    """The defects olefile recorded while parsing that are not in BENIGN_OLE_ISSUES (a
+    directory it had to stop reading or repair)."""
+    return [str(msg) for _kind, msg in (getattr(ole, "parsing_issues", None) or [])
+            if not any(q in str(msg) for q in BENIGN_OLE_ISSUES)]
 
 
 class OleGuardError(Exception):

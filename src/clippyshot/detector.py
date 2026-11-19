@@ -441,7 +441,7 @@ def _check_ole_content(path: Path) -> list[str]:
     try:
         import olefile
 
-        from clippyshot.ole_guard import OleGuardError, open_ole
+        from clippyshot.ole_guard import OleGuardError, open_ole, serious_parsing_issues
 
         if not olefile.isOleFile(str(path)):
             return warnings
@@ -455,12 +455,20 @@ def _check_ole_content(path: Path) -> list[str]:
                             else "ole_unreadable")
             return warnings
         with ole:
-            dirs = ["/".join(d) for d in ole.listdir()]
-        has_vba = any("VBA" in d or "Macros" in d for d in dirs)
-        has_ppt = any(s in dirs for s in ["PowerPoint Document", "PP97_DUALSTORAGE"])
-        has_doc = any(s in dirs for s in ["WordDocument", "1Table", "0Table"])
-        has_xls = any(s in dirs for s in ["Workbook", "Book"])
-        has_encrypted = "EncryptedPackage" in dirs
+            # Entry names, not listdir() paths: a path per stream is O(entries x depth)
+            # memory (~1 GB for a 4 MB file of 470 nested storages at the slot cap).
+            names = [e.name for e in ole.direntries if e is not None]
+            root_streams = {k.name for k in ole.root.kids
+                            if k.entry_type == olefile.STGTY_STREAM}
+            if serious_parsing_issues(ole):
+                # olefile stopped reading or repaired the directory: what follows may miss
+                # entries (sheet_records refuses the same file as unreadable).
+                warnings.append("ole_unreadable")
+        has_vba = any("VBA" in n or "Macros" in n for n in names)
+        has_ppt = "PowerPoint Document" in root_streams
+        has_doc = any(s in root_streams for s in ["WordDocument", "1Table", "0Table"])
+        has_xls = any(s in root_streams for s in ["Workbook", "Book"])
+        has_encrypted = "EncryptedPackage" in root_streams
         has_content = has_ppt or has_doc or has_xls or has_encrypted
         if has_vba and not has_content:
             warnings.append("ole_macro_only_payload")
