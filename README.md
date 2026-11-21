@@ -172,8 +172,8 @@ Six shipping shapes, trading setup effort for isolation depth:
 |---|---|---|---|---|---|
 | Compose + gVisor (runsc) | `runsc` per-job container | `ContainerSandbox` | `runsc` + docker-default | none | anywhere Docker + gVisor run |
 | Compose + runc | `runc` per-job container | `ContainerSandbox` | docker-default | none | anywhere Docker runs |
-| Single container (inner bwrap/nsjail) | `docker run` | `bwrap` or `nsjail` inside | libseccomp or KAFEL | `clippyshot-{bwrap,nsjail}` on host kernel | Linux w/ unprivileged userns |
-| Host-native bwrap | — | `bwrap` | libseccomp BPF | `clippyshot-bwrap` + `clippyshot-soffice` | AppArmor distros, kernel ≥ 3.8 |
+| Single container (inner bwrap/nsjail) | `docker run` | `bwrap` or `nsjail` inside | denylist BPF or KAFEL (probe-verified) | `clippyshot-{bwrap,nsjail}` on host kernel | Linux w/ unprivileged userns |
+| Host-native bwrap | — | `bwrap` | denylist BPF (probe-verified) | `clippyshot-bwrap` + `clippyshot-soffice` | AppArmor distros, kernel ≥ 3.8 |
 | Host-native nsjail | — | `nsjail` | KAFEL DSL | `clippyshot-nsjail` + `clippyshot-soffice` | AppArmor distros + source build |
 | AWS / cloud workers (blastbox.host) | Disposable/hibernated AWS instance (`aws-ec2` / Lambda MicroVM) | `ContainerSandbox` | docker-default (verified) | none | ARM64 AWS |
 

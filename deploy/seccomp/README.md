@@ -39,24 +39,45 @@ else is allowed (`DEFAULT ALLOW`).
    up the policy in these locations (first-match wins):
    - `/etc/clippyshot/seccomp.policy` (runtime image)
    - `<repo>/deploy/seccomp/clippyshot.seccomp.policy` (dev checkout)
-3. nsjail is invoked with `--seccomp_policy <path>`. The KAFEL parser
+3. nsjail is handed the policy text inline (`--seccomp_string`, read once
+   when the backend is built, so every run applies the bytes the probe
+   proved). The KAFEL parser
    compiles the rules into a BPF program at startup; malformed rules
-   cause nsjail to refuse to start (which is a loud-failure we want).
+   cause nsjail to exit 255 ("Couldn't prepare sandboxing policy") on
+   every run. The kafel bundled with nsjail 3.4 knows no syscall newer
+   than about Linux 4.x, and ONE unknown name fails the whole policy, so
+   newer calls are written by number: `SYSCALL[425],  // io_uring_setup`.
+   The image build compiles the policy with the shipped nsjail and fails
+   if it cannot.
 4. The filter is installed via `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER)`
    immediately before the `execve()` of the child.
 
 ## Bubblewrap backend
 
-The `BwrapSandbox` backend does not build a BPF program: bwrap expects an
-already-compiled BPF blob via `--seccomp <fd>`, and building the blob at
-runtime requires the `seccomp` Python bindings (shipped by the distro as
-`python3-libseccomp`, not via PyPI). If the bindings are not importable,
-the backend logs a WARN and continues without a per-process filter; the
-nsjail backend is the preferred production backend and always has
-seccomp enforced.
+bwrap expects an already-compiled BPF blob via `--seccomp <fd>`. The
+`BwrapSandbox` backend assembles it from the shared denylist
+(`src/clippyshot/sandbox/seccomp_denylist.py`) with no libseccomp
+dependency: the same `DEFAULT ALLOW` + `ERRNO(1)` rules as the KAFEL
+policy (a parity test keeps them equal), killing any foreign-ABI (i386,
+x32) syscall as libseccomp would. It used to need libseccomp's Python
+bindings, a distro package the image's venv could not import, so the
+image's bwrap ran with no filter at all.
 
-This is why the spec § 4.3 describes nsjail as the preferred backend and
-bwrap as a fallback.
+## Both backends verify the filter and fail closed
+
+Neither nsjail nor bwrap reports whether its filter took effect. Before
+the first command, each backend runs a probe inside its sandbox
+(`src/clippyshot/sandbox/seccomp_check.py`) that makes denylisted calls
+with harmless arguments (`unshare(0)`, `open_tree`, `kcmp`,
+`io_uring_setup`, `mount`). The run proceeds only if every call is EPERM
+inside AND that EPERM is the sandbox's own -- at least one call is not
+EPERM outside (a higher filter count is not accepted: an allow-all filter
+raises it too). Otherwise
+`run()`/`spawn()`/`smoketest()` raise `SeccompNotEnforced` and
+auto-selection passes the backend over. `CLIPPYSHOT_WARN_ON_INSECURE`
+does not waive this (gVisor tiers set it routinely for the container
+backend). The in-image proof is `tests/docker/test_inner_seccomp.py`,
+run by CI's `image-seccomp` job.
 
 ## Verifying the policy parses
 

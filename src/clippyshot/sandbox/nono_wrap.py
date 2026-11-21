@@ -243,6 +243,11 @@ class NonoWrappedSandbox:
         # The base's syscall filter still applies under nono; report it, not "none".
         return str(getattr(self.inner, "seccomp_source", "none"))
 
+    @property
+    def seccomp_verdict(self) -> object:
+        # The base's proof of that filter (selftest reports it).
+        return getattr(self.inner, "seccomp_verdict", None)
+
     def run(self, request: SandboxRequest) -> SandboxResult:
         return self.inner.run(self.wrap.apply(request))
 

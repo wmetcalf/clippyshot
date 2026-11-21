@@ -12,13 +12,14 @@
 // LibreOffice version (or any new glibc) introduces a syscall we didn't
 // explicitly permit, causing silent SIGSYS at startup.
 //
-// Loaded by src/clippyshot/sandbox/nsjail.py via --seccomp_policy.
+// Loaded by src/clippyshot/sandbox/nsjail.py and passed inline via --seccomp_string.
 // Deployed into the runtime image at /etc/clippyshot/seccomp.policy.
 //
-// KAFEL caveats: not every Linux syscall name is a valid KAFEL identifier
-// (e.g. umount2, stime, _sysctl, pidfd_*, landlock_*). Only names the
-// KAFEL lexer accepts appear below. Others live in the Docker-format JSON
-// profile (deploy/seccomp/clippyshot.seccomp.json).
+// KAFEL caveats: the kafel bundled with nsjail knows only the syscalls up to
+// roughly Linux 4.x (its amd64 table stops before statx), and an unknown name
+// fails the WHOLE policy. Anything newer is written by number with its name in
+// a trailing comment: `SYSCALL[425],  // io_uring_setup`. The image build and
+// tests/docker/test_inner_seccomp.py compile this file with the shipped nsjail.
 //
 // Syntax reference: https://github.com/google/kafel
 
@@ -67,10 +68,12 @@ POLICY clippyshot_deny {
     bpf,
     perf_event_open,
 
-    // io_uring — prolific attack surface; LO doesn't use it
-    io_uring_setup,
-    io_uring_enter,
-    io_uring_register,
+    // io_uring — prolific attack surface; LO doesn't use it. By NUMBER: the kafel bundled
+    // with nsjail 3.4 has no io_uring names, and ONE unknown name fails the whole policy --
+    // nsjail then exits 255 ("Couldn't prepare sandboxing policy") on every run.
+    SYSCALL[425],  // io_uring_setup
+    SYSCALL[426],  // io_uring_enter
+    SYSCALL[427],  // io_uring_register
 
     // Userfaultfd (fault-injection primitives)
     userfaultfd,
@@ -115,4 +118,79 @@ POLICY clippyshot_deny {
   }
 }
 
-USE clippyshot_deny DEFAULT ALLOW
+// The same calls under the x32 ABI (syscall number | 0x40000000). kafel emits only an
+// AUDIT_ARCH check and exact-number compares, and x32 syscalls carry AUDIT_ARCH_X86_64, so
+// without these a jailed process could call e.g. mount as 0x400000a5 on a kernel built with
+// CONFIG_X86_X32_ABI. The bwrap BPF kills every x32 call instead (seccomp_denylist.py).
+// Four of the denied calls have an x32-only number too (ptrace, kexec_load,
+// process_vm_readv/writev at 521/528/539/540). Generated from seccomp_denylist; a test
+// (tests/unit/test_seccomp_fail_closed.py) keeps it complete.
+POLICY clippyshot_deny_x32 {
+  ERRNO(1) {
+    SYSCALL[0x400000af],  // x32 init_module
+    SYSCALL[0x40000139],  // x32 finit_module
+    SYSCALL[0x400000b0],  // x32 delete_module
+    SYSCALL[0x400000f8],  // x32 add_key
+    SYSCALL[0x400000fa],  // x32 keyctl
+    SYSCALL[0x400000f9],  // x32 request_key
+    SYSCALL[0x400000a5],  // x32 mount
+    SYSCALL[0x400000a6],  // x32 umount2
+    SYSCALL[0x4000009b],  // x32 pivot_root
+    SYSCALL[0x400000a1],  // x32 chroot
+    SYSCALL[0x400001d8],  // x32 fchroot
+    SYSCALL[0x400001ae],  // x32 fsopen
+    SYSCALL[0x400001af],  // x32 fsconfig
+    SYSCALL[0x400001b0],  // x32 fsmount
+    SYSCALL[0x400001b1],  // x32 fspick
+    SYSCALL[0x400001ad],  // x32 move_mount
+    SYSCALL[0x400001ac],  // x32 open_tree
+    SYSCALL[0x400001d3],  // x32 open_tree_attr
+    SYSCALL[0x400001ba],  // x32 mount_setattr
+    SYSCALL[0x400000f6],  // x32 kexec_load
+    SYSCALL[0x40000210],  // x32 kexec_load (x32-only number)
+    SYSCALL[0x40000140],  // x32 kexec_file_load
+    SYSCALL[0x400000a9],  // x32 reboot
+    SYSCALL[0x40000065],  // x32 ptrace
+    SYSCALL[0x40000209],  // x32 ptrace (x32-only number)
+    SYSCALL[0x40000136],  // x32 process_vm_readv
+    SYSCALL[0x4000021b],  // x32 process_vm_readv (x32-only number)
+    SYSCALL[0x40000137],  // x32 process_vm_writev
+    SYSCALL[0x4000021c],  // x32 process_vm_writev (x32-only number)
+    SYSCALL[0x40000141],  // x32 bpf
+    SYSCALL[0x4000012a],  // x32 perf_event_open
+    SYSCALL[0x400001a9],  // x32 io_uring_setup
+    SYSCALL[0x400001aa],  // x32 io_uring_enter
+    SYSCALL[0x400001ab],  // x32 io_uring_register
+    SYSCALL[0x40000143],  // x32 userfaultfd
+    SYSCALL[0x400000e3],  // x32 clock_settime
+    SYSCALL[0x40000131],  // x32 clock_adjtime
+    SYSCALL[0x400000a4],  // x32 settimeofday
+    SYSCALL[0x4000009f],  // x32 adjtimex
+    SYSCALL[0x400000aa],  // x32 sethostname
+    SYSCALL[0x400000ab],  // x32 setdomainname
+    SYSCALL[0x40000110],  // x32 unshare
+    SYSCALL[0x400000b3],  // x32 quotactl
+    SYSCALL[0x40000099],  // x32 vhangup
+    SYSCALL[0x400000b4],  // x32 nfsservctl
+    SYSCALL[0x4000012f],  // x32 name_to_handle_at
+    SYSCALL[0x40000130],  // x32 open_by_handle_at
+    SYSCALL[0x400000a7],  // x32 swapon
+    SYSCALL[0x400000a8],  // x32 swapoff
+    SYSCALL[0x40000138],  // x32 kcmp
+    SYSCALL[0x40000086],  // x32 uselib
+    SYSCALL[0x4000008b],  // x32 sysfs
+    SYSCALL[0x400000ac],  // x32 iopl
+    SYSCALL[0x400000ad],  // x32 ioperm
+    SYSCALL[0x4000009a],  // x32 modify_ldt
+    SYSCALL[0x4000012c],  // x32 fanotify_init
+    SYSCALL[0x4000012d]   // x32 fanotify_mark
+  }
+}
+
+// kafel's top-level USE takes one policy; combine the two here.
+POLICY clippyshot {
+  USE clippyshot_deny,
+  USE clippyshot_deny_x32
+}
+
+USE clippyshot DEFAULT ALLOW

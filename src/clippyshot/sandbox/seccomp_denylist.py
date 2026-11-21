@@ -1,16 +1,22 @@
-"""Shared source of truth for the sandbox syscall denylist + a libseccomp BPF builder.
+"""Shared source of truth for the sandbox syscall denylist + the BPF program bwrap installs.
 
 The **nsjail** backend applies this denylist as a KAFEL policy
 (``deploy/seccomp/clippyshot.seccomp.policy``); the **bwrap** backend has no KAFEL, so it
-builds an equivalent BPF program here (via ``python3-libseccomp``) and feeds it to
-``bwrap --seccomp <fd>``. Keeping the list in one place — plus a parity test asserting it
-equals the KAFEL ``ERRNO(1)`` block — stops the two backends from drifting.
+is handed an equivalent classic-BPF program built here and fed to ``bwrap --seccomp <fd>``.
+Keeping the list in one place — plus a parity test asserting it equals the KAFEL ``ERRNO(1)``
+block — stops the two backends from drifting.
 
-**Policy:** ``DEFAULT ALLOW`` + ``ERRNO(1)`` (return EPERM) on the dangerous syscalls below.
-**x86_64-only**, matching the nsjail policy (syscall availability is arch-specific).
-``python3-libseccomp`` is a *distro* package (not on PyPI); where it's absent the builder
-returns ``None`` and the bwrap backend keeps marking itself insecure on the seccomp axis
-(fail-safe — same as before this module existed).
+**Policy:** ``DEFAULT ALLOW`` + ``ERRNO(1)`` (return EPERM) on the dangerous syscalls below;
+any syscall made under a foreign ABI (i386 ``int 0x80``, x32) kills the process, as libseccomp
+does for a native-only filter. (kafel kills a foreign AUDIT_ARCH but cannot see x32, which
+shares AUDIT_ARCH_X86_64, so the KAFEL policy denies each call's x32 number explicitly.) **x86_64-only**, matching the nsjail policy.
+
+**Why no libseccomp.** The program used to be built with the libseccomp Python bindings, which
+exist only as a distro package (``python3-seccomp``), never on PyPI. The shipped image installs
+ClippyShot into a venv that cannot see distro packages, so the import failed there, bwrap got
+no filter at all, and nothing noticed (it only marked itself insecure). The program is a flat
+list of compares, so it is assembled directly from the syscall numbers below; libseccomp
+remains an optional test oracle (tests/unit/test_seccomp_fail_closed.py), not a runtime dependency.
 
 **Mount surface.** Besides ``mount``/``umount2``/``pivot_root`` the list denies ``chroot``/``fchroot``
 and the whole new mount API (``fsopen``/``fsconfig``/``fsmount``/``fspick``/``move_mount``/
@@ -22,9 +28,10 @@ mirrors blastbox's worker denylist (blastbox #216, released in 0.1.51).
 """
 from __future__ import annotations
 
+import errno
 import logging
-import os
 import platform
+import struct
 
 _log = logging.getLogger("clippyshot.sandbox.seccomp")
 
@@ -35,15 +42,13 @@ DENY_ERRNO1: tuple[str, ...] = (
     "init_module", "finit_module", "delete_module",
     # Key management
     "add_key", "keyctl", "request_key",
-    # Mount / filesystem manipulation. libseccomp needs the REAL x86_64 syscall `umount2`
-    # (`umount` resolves to a pseudo that never matches); the nsjail KAFEL policy names the same
-    # syscall `umount` (KAFEL can't lex `umount2`). Same intent, backend-appropriate name — the
-    # parity test normalizes it.
+    # Mount / filesystem manipulation. `umount2` is x86_64 syscall 166; the bundled kafel names
+    # that same number `umount` (it can't lex `umount2`) -- the parity test normalizes it.
     "mount", "umount2", "pivot_root", "chroot", "fchroot",
     # The new mount API (Linux 5.2+) builds and attaches mounts without mount(2): fsopen ->
     # fsconfig -> fsmount -> move_mount; open_tree/open_tree_attr clone a subtree; fspick
     # reconfigures an existing mount; mount_setattr flips a mount's flags (e.g. clears `ro`).
-    # The KAFEL policy names these by NUMBER (an older bundled kafel predates some names).
+    # The KAFEL policy names these by NUMBER: nsjail's bundled kafel predates the names.
     "fsopen", "fsconfig", "fsmount", "fspick", "move_mount",
     "open_tree", "open_tree_attr", "mount_setattr",
     # Kernel exec / reboot
@@ -52,7 +57,7 @@ DENY_ERRNO1: tuple[str, ...] = (
     "ptrace", "process_vm_readv", "process_vm_writev",
     # BPF / perf / tracing
     "bpf", "perf_event_open",
-    # io_uring — prolific attack surface; LO doesn't use it
+    # io_uring — prolific attack surface; LO doesn't use it. By NUMBER in the KAFEL policy too.
     "io_uring_setup", "io_uring_enter", "io_uring_register",
     # Userfaultfd (fault-injection primitives)
     "userfaultfd",
@@ -76,73 +81,102 @@ DENY_ERRNO1: tuple[str, ...] = (
 )
 
 
-# Numbers for names a distro libseccomp may predate (2.5.5, Ubuntu 24.04's, has no
-# open_tree_attr, which is Linux 6.15, nor fchroot, 7.1). Without a fallback the fail-closed
-# builder below would drop the WHOLE filter on such a host. These calls sit in the unified
-# asm-generic range, so the number is the same on x86_64 and aarch64; keyed by arch anyway so a
-# port can't silently reuse an x86_64 number for an arch where it differs.
-_FALLBACK_NR: dict[str, dict[str, int]] = {
-    "open_tree": {"x86_64": 428, "aarch64": 428},
-    "move_mount": {"x86_64": 429, "aarch64": 429},
-    "fsopen": {"x86_64": 430, "aarch64": 430},
-    "fsconfig": {"x86_64": 431, "aarch64": 431},
-    "fsmount": {"x86_64": 432, "aarch64": 432},
-    "fspick": {"x86_64": 433, "aarch64": 433},
-    "mount_setattr": {"x86_64": 442, "aarch64": 442},
-    "open_tree_attr": {"x86_64": 467, "aarch64": 467},
-    "fchroot": {"x86_64": 472, "aarch64": 472},   # Linux 7.1; chroot by fd
+# x86_64 syscall numbers (arch/x86/entry/syscalls/syscall_64.tbl) for every name above.
+# The new-mount-API calls, io_uring, open_tree_attr and fchroot sit in the unified asm-generic
+# range (>= 424), which is the same table on every arch. A test cross-checks this table against
+# the kernel headers and, where it is installed, libseccomp.
+X86_64_NR: dict[str, int] = {
+    "init_module": 175, "finit_module": 313, "delete_module": 176,
+    "add_key": 248, "keyctl": 250, "request_key": 249,
+    "mount": 165, "umount2": 166, "pivot_root": 155, "chroot": 161, "fchroot": 472,
+    "fsopen": 430, "fsconfig": 431, "fsmount": 432, "fspick": 433, "move_mount": 429,
+    "open_tree": 428, "open_tree_attr": 467, "mount_setattr": 442,
+    "kexec_load": 246, "kexec_file_load": 320, "reboot": 169,
+    "ptrace": 101, "process_vm_readv": 310, "process_vm_writev": 311,
+    "bpf": 321, "perf_event_open": 298,
+    "io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427,
+    "userfaultfd": 323,
+    "clock_settime": 227, "clock_adjtime": 305, "settimeofday": 164, "adjtimex": 159,
+    "sethostname": 170, "setdomainname": 171,
+    "unshare": 272,
+    "quotactl": 179, "vhangup": 153, "nfsservctl": 180,
+    "name_to_handle_at": 303, "open_by_handle_at": 304, "swapon": 167, "swapoff": 168,
+    "kcmp": 312,
+    "uselib": 134, "sysfs": 139,
+    "iopl": 172, "ioperm": 173, "modify_ldt": 154,
+    "fanotify_init": 300, "fanotify_mark": 301,
 }
 
+# struct seccomp_data offsets, classic-BPF opcodes and seccomp return values (linux/seccomp.h,
+# linux/filter.h, linux/audit.h).
+_OFF_NR, _OFF_ARCH = 0, 4
+_LD_W_ABS = 0x20          # BPF_LD | BPF_W | BPF_ABS
+_JEQ_K = 0x15             # BPF_JMP | BPF_JEQ | BPF_K
+_JGE_K = 0x35             # BPF_JMP | BPF_JGE | BPF_K
+_RET_K = 0x06             # BPF_RET | BPF_K
+AUDIT_ARCH_X86_64 = 0xC000003E
+_X32_SYSCALL_BIT = 0x40000000
+SECCOMP_RET_KILL_PROCESS = 0x80000000
+SECCOMP_RET_ERRNO = 0x00050000
+SECCOMP_RET_ALLOW = 0x7FFF0000
 
-def _syscall_ref(seccomp: object, name: str, arch: str) -> str | int:
-    """The name if this libseccomp resolves it, else its known number for ``arch``, else the
-    name (so add_rule raises and the builder fails closed)."""
-    try:
-        if seccomp.resolve_syscall(seccomp.Arch.NATIVE, name) >= 0:  # type: ignore[attr-defined]
-            return name
-    except Exception:  # noqa: BLE001
-        pass
-    return _FALLBACK_NR.get(name, {}).get(arch, name)
+
+def _insn(code: int, jt: int, jf: int, k: int) -> bytes:
+    return struct.pack("<HBBI", code, jt, jf, k)
+
+
+def assemble_denylist(nrs: list[int]) -> bytes:
+    """A ``DEFAULT ALLOW`` program returning EPERM for each of ``nrs`` (x86_64 numbers).
+
+    Layout::
+
+        0  ld  arch
+        1  jeq AUDIT_ARCH_X86_64 ? 3 : 2
+        2  ret KILL_PROCESS                     foreign ABI (i386 int 0x80)
+        3  ld  nr
+        4  jeq -1 ? ALLOW : 5                   syscall(-1) is ENOSYS, as libseccomp allows it
+        5  jge X32_SYSCALL_BIT ? KILL : 6       x32 ABI
+        6+ jeq nr_i ? ERRNO : next              one per denied syscall
+        .  ret ALLOW
+        .  ret ERRNO|EPERM                       ERRNO
+        .  ret KILL_PROCESS                      KILL (cBPF jumps only forward)
+    """
+    uniq = sorted(set(nrs))
+    n = len(uniq)
+    if not 0 < n < 250:   # jt/jf are 8-bit; keep every jump in range
+        raise ValueError(f"denylist size {n} out of range")
+    prog = [
+        _insn(_LD_W_ABS, 0, 0, _OFF_ARCH),
+        _insn(_JEQ_K, 1, 0, AUDIT_ARCH_X86_64),
+        _insn(_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS),
+        _insn(_LD_W_ABS, 0, 0, _OFF_NR),
+        # To the ALLOW: past the x32 check and the n compares.
+        _insn(_JEQ_K, n + 1, 0, 0xFFFFFFFF),
+        # To the trailing KILL: past the n compares and the ALLOW and ERRNO returns.
+        _insn(_JGE_K, n + 2, 0, _X32_SYSCALL_BIT),
+    ]
+    for i, nr in enumerate(uniq):
+        # Distance from this compare to the ERRNO return: the remaining compares + the ALLOW.
+        prog.append(_insn(_JEQ_K, (n - 1 - i) + 1, 0, nr))
+    prog.append(_insn(_RET_K, 0, 0, SECCOMP_RET_ALLOW))
+    prog.append(_insn(_RET_K, 0, 0, SECCOMP_RET_ERRNO | errno.EPERM))
+    prog.append(_insn(_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS))
+    return b"".join(prog)
 
 
 def build_bpf_bytes() -> bytes | None:
-    """Build a ``DEFAULT ALLOW`` + ``ERRNO(1)``-denylist BPF program via libseccomp and return
-    its raw bytes (to feed ``bwrap --seccomp <fd>``).
+    """The ``DEFAULT ALLOW`` + ``ERRNO(1)``-denylist BPF program bwrap is handed via
+    ``--seccomp <fd>``, or ``None`` where no correct program can be built.
 
-    Returns ``None`` — so the caller keeps bwrap marked insecure — when the arch isn't x86_64,
-    libseccomp is unavailable, OR **any** deny rule can't be added. That last case is deliberately
-    **fail-CLOSED**: a partial denylist (e.g. an older libseccomp missing a syscall name) would
-    still report ``seccomp_active=True`` while silently allowing a denied syscall, breaking the
-    parity guarantee — attach the FULL filter or none at all.
+    ``None`` on a non-x86_64 host (the numbers are x86_64's) and if any name lacks a number --
+    never a partial denylist. The bwrap backend then refuses to run (it fails closed; see
+    ``BwrapSandbox``) rather than run without the filter.
     """
     if platform.machine() not in ("x86_64", "amd64"):
-        # The denylist (and the nsjail KAFEL policy it mirrors) is x86_64-only — syscall
-        # availability is arch-specific, so don't claim a filter on other arches.
         _log.warning("seccomp: denylist is x86_64-only; not building on %s", platform.machine())
         return None
-    try:
-        import seccomp  # type: ignore[import-not-found]
-    except Exception:
+    missing = [n for n in DENY_ERRNO1 if n not in X86_64_NR]
+    if missing:
+        _log.error("seccomp: no x86_64 number for %s -- refusing a partial denylist", missing)
         return None
-    arch = {"amd64": "x86_64"}.get(platform.machine(), platform.machine())
-    try:
-        f = seccomp.SyscallFilter(defaction=seccomp.ALLOW)
-        for name in DENY_ERRNO1:
-            try:
-                f.add_rule(seccomp.ERRNO(1), _syscall_ref(seccomp, name, arch))
-            except Exception as e:  # noqa: BLE001
-                _log.warning("seccomp: cannot add deny rule for %r (%s) — failing closed", name, e)
-                return None  # fail-closed: no partial denylist
-        # Export to a memfd (a pipe could deadlock if the BPF exceeded the pipe buffer; it won't
-        # here, but memfd is unconditionally safe). closefd=False so the outer os.close owns the fd.
-        fd = os.memfd_create("clippyshot_seccomp_build", 0)
-        try:
-            with os.fdopen(fd, "wb", closefd=False) as bf:
-                f.export_bpf(bf)   # flushed + closed by the with (fd stays open, closefd=False)
-            os.lseek(fd, 0, os.SEEK_SET)
-            return b"".join(iter(lambda: os.read(fd, 1 << 16), b""))
-        finally:
-            os.close(fd)
-    except Exception as e:  # noqa: BLE001
-        _log.warning("seccomp: BPF build failed, bwrap will run without a syscall filter: %s", e)
-        return None
+    return assemble_denylist([X86_64_NR[n] for n in DENY_ERRNO1])

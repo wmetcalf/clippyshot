@@ -191,6 +191,9 @@ def run_selftest() -> int:
         runtime_apparmor=detect_runtime_apparmor_profile(),
         soffice_apparmor=detect_soffice_apparmor_profile(sb),
         seccomp=getattr(sb, "seccomp_source", "none"),
+        # How the namespace backends proved their filter (None for `container`, whose
+        # seccomp is the runtime's and is checked from /proc/self/status instead).
+        seccomp_verified=getattr(getattr(sb, "seccomp_verdict", None), "detail", None),
         **attach_report,
     )
     return 0

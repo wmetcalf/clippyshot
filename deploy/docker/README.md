@@ -576,12 +576,11 @@ run bare metal.
 ### One-time host setup
 
 ```sh
-# 1. LibreOffice, pdftoppm, bubblewrap, nsjail, and libseccomp's Python
-#    bindings. The seccomp bindings ship as `python3-seccomp` on Ubuntu;
-#    they are not installable via pip.
+# 1. LibreOffice, pdftoppm, bubblewrap, nsjail. (bwrap's seccomp BPF is built
+#    in-process; no libseccomp Python bindings are needed.)
 sudo apt install -y \
     libreoffice libreoffice-writer libreoffice-calc libreoffice-impress libreoffice-draw \
-    poppler-utils bubblewrap python3-seccomp apparmor-utils
+    poppler-utils bubblewrap apparmor-utils
 # nsjail: Ubuntu 24.04 ships /usr/local/bin/nsjail via nsjail source or
 # you can grab a build from the ClippyShot Dockerfile. No apt package yet.
 
@@ -608,14 +607,12 @@ See `deploy/apparmor/README.md` for details on each profile.
 ### Install ClippyShot into a venv
 
 ```sh
-# --system-site-packages so python3-seccomp (apt-installed) is visible
-python3 -m venv --system-site-packages .venv
+python3 -m venv .venv
 .venv/bin/pip install -e .
 ```
 
-`--system-site-packages` is important — the bwrap backend requires
-`import seccomp` which lives in the distro's site-packages and cannot be
-pip-installed on its own.
+No distro site-packages are needed: the bwrap backend assembles its seccomp
+BPF in-process.
 
 ### Smoketest
 
@@ -625,8 +622,9 @@ CLIPPYSHOT_SANDBOX=nsjail .venv/bin/clippyshot selftest
 
 A successful run ends with `selftest_passed` and `"secure": true,
 "insecurity_reasons": []`. If you see `insecurity_reasons` set,
-something is missing (AppArmor profile not loaded, libseccomp Python
-bindings missing, etc.).
+something is missing (AppArmor profile not loaded, etc.). A namespace
+backend whose seccomp filter cannot be verified is refused outright
+(`SeccompNotEnforced`), not selected as insecure.
 
 ### Force a specific backend
 
@@ -638,10 +636,10 @@ CLIPPYSHOT_SANDBOX=nsjail .venv/bin/clippyshot convert input.docx -o out/
 CLIPPYSHOT_SANDBOX=bwrap  .venv/bin/clippyshot convert input.docx -o out/
 ```
 
-`bwrap` applies **no seccomp syscall filter** (not implemented — it runs
-namespaces + cap-drop + AppArmor only), so it always reports insecure on the
-seccomp axis and needs `CLIPPYSHOT_WARN_ON_INSECURE=1` to activate. Prefer the
-`nsjail` backend, which enforces a real seccomp filter via its KAFEL policy.
+Both `nsjail` (KAFEL policy) and `bwrap` (BPF via `--seccomp`) apply the same
+seccomp denylist, and both refuse to run until a probe has shown it enforced
+(see `deploy/seccomp/README.md`). bwrap still reports insecure where the
+installed bubblewrap lacks `--cgroup-pids` (`pid_limit_missing`).
 
 ### Run the API server locally (nsjail backend)
 
@@ -658,8 +656,8 @@ stack).
 Notes:
 
 - `nsjail` gives you user+mount+PID+IPC+UTS+cgroup+network namespaces,
-  rlimits, and KAFEL-based seccomp via `--seccomp_policy
-  /etc/clippyshot/seccomp.policy` (denylist-style — blocks only the
+  rlimits, and KAFEL-based seccomp from `/etc/clippyshot/seccomp.policy`, passed
+  inline via `--seccomp_string` (denylist-style — blocks only the
   dangerous syscalls, same philosophy as Docker's default).
 - `bwrap` gives you the same namespace model + cap-drop + AppArmor, but
   **no seccomp syscall filter** (not implemented). Slightly faster to spin up
@@ -722,7 +720,7 @@ stack if you want async jobs.
 | `[WARN tini (2)] Tini is not running as PID 1` in worker output | `--init` passed alongside image ENTRYPOINT that already runs tini | Don't pass `--init`; the image already does. (Fixed in current build.) |
 | Jobs queue forever, never dispatch | Single-container `serve` mode has no inline dispatcher | Use the compose stack, or switch to `/v1/convert` (sync) |
 | Search bar returns everything | Old API without `q=` support | Rebuild; `q=<substring>` is now supported on `/v1/jobs` |
-| Local bwrap: `ImportError: No module named 'seccomp'` | venv created without `--system-site-packages` | Recreate: `python3 -m venv --system-site-packages .venv && .venv/bin/pip install -e .` |
+| Local nsjail/bwrap: `SeccompNotEnforced: ... refuses to run: its seccomp filter is not verified (...)` | The in-sandbox probe did not see the denylist enforced; the detail says why (nsjail exit 255 = policy did not compile, or the sandbox could not start) | See `deploy/seccomp/README.md`; run `clippyshot selftest` for the full reason |
 | Local bwrap: soffice dies with `ERROR 4 forking process` | AppArmor profile denies `socketpair(AF_UNIX)` or file-lock | Ensure the latest `clippyshot-soffice` profile is loaded (commit includes `network unix` and `k` on sandbox paths) |
 | Local nsjail: soffice exit 1 with `ERROR: /proc not mounted` | Stale code with `--disable_proc` still in the nsjail backend | Pull latest — `--disable_proc` removed from `src/clippyshot/sandbox/nsjail.py` |
 | Local nsjail: soffice exit 159 / SIGSYS on startup | Outdated KAFEL allowlist missing syscalls used by newer LO | Pull latest — policy is now denylist-style, survives LO version changes |

@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from clippyshot.errors import SandboxError, SandboxUnavailable
+from clippyshot.sandbox import seccomp_check
 from clippyshot.sandbox.base import SandboxRequest
 from clippyshot.types import SandboxResult
 
@@ -118,6 +119,24 @@ class NsjailSandbox:
         self._seccomp_policy: Path | None = (
             seccomp_policy if seccomp_policy is not None else _find_seccomp_policy()
         )
+        # The policy TEXT, read once and handed to nsjail inline (--seccomp_string), so the
+        # bytes the probe proves are exactly the bytes every later run applies. A path would
+        # be re-read by nsjail on each run, after the gate had vouched for earlier bytes.
+        self._seccomp_policy_text: str | None = None
+        if self._seccomp_policy is not None:
+            try:
+                self._seccomp_policy_text = self._seccomp_policy.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                _log.warning("nsjail_seccomp_policy_unreadable path=%s error=%s",
+                             self._seccomp_policy, exc)
+                self._seccomp_policy = None
+            else:
+                # nsjail treats an empty --seccomp_string as UNSET and runs with no filter
+                # (an empty --seccomp_policy file was a compile error). Treat it as missing.
+                if not self._seccomp_policy_text.strip():
+                    _log.warning("nsjail_seccomp_policy_empty path=%s", self._seccomp_policy)
+                    self._seccomp_policy = None
+                    self._seccomp_policy_text = None
         self._proc_apparmor_supported = _probe_nsjail_proc_apparmor(self._nsjail)
         if self._seccomp_policy is None:
             _log.warning(
@@ -131,6 +150,8 @@ class NsjailSandbox:
                 self._apparmor_profile,
             )
         self._insecurity_reasons: list[str] = []
+        # Nothing runs until a probe proves the filter; see _require_seccomp.
+        self._seccomp_gate = seccomp_check.SeccompGate("nsjail")
         if self._seccomp_policy is None:
             self._insecurity_reasons.append("seccomp_policy_missing")
         if not self._proc_apparmor_supported:
@@ -142,12 +163,43 @@ class NsjailSandbox:
 
     @property
     def seccomp_active(self) -> bool:
-        return self._seccomp_policy is not None
+        """True only once a probe has PROVEN the filter enforced (run/spawn/smoketest verify
+        first; select_sandbox smoketests every candidate). Before that it is False, so nothing
+        stamps an unproven filter into metadata."""
+        v = self._seccomp_gate.verdict
+        return (self._seccomp_policy is not None and self._seccomp_policy_text is not None
+                and v is not None and v.ok)
 
     @property
     def seccomp_source(self) -> str:
         """Stable string identifying where the seccomp filter comes from."""
-        return "clippyshot-nsjail" if self._seccomp_policy is not None else "none"
+        return "clippyshot-nsjail" if self.seccomp_active else "none"
+
+    @property
+    def seccomp_verdict(self) -> seccomp_check.SeccompVerdict | None:
+        return self._seccomp_gate.verdict
+
+    def _require_seccomp(self) -> None:
+        """Fail closed: refuse to run anything until a probe has shown the KAFEL policy is
+        enforced inside this jail.
+
+        A policy file on disk proves nothing -- the image's bundled kafel rejected
+        ``io_uring_setup``, so the policy never compiled. nsjail happened to exit 255 then,
+        but a filter that compiles and still lets the calls through would not, and neither
+        failure was reported as a seccomp problem. No CLIPPYSHOT_WARN_ON_INSECURE override:
+        see seccomp_check.
+        """
+        key = None
+        if self._seccomp_policy is not None and self._seccomp_policy_text is not None:
+            key = ("nsjail", seccomp_check.binary_id(self._nsjail),
+                   seccomp_check.filter_digest(self._seccomp_policy_text.encode()))
+        self._seccomp_gate.require(
+            key=key,
+            missing=("no KAFEL policy file (searched "
+                     f"{[str(p) for p in _SECCOMP_POLICY_CANDIDATES]})"),
+            run_unchecked=self._run,
+            reasons=self._insecurity_reasons,
+        )
 
     @property
     def apparmor_profile(self) -> str:
@@ -165,6 +217,10 @@ class NsjailSandbox:
         return self.run(SandboxRequest(argv=["/bin/true"]))
 
     def run(self, request: SandboxRequest) -> SandboxResult:
+        self._require_seccomp()
+        return self._run(request)
+
+    def _run(self, request: SandboxRequest) -> SandboxResult:
         argv = self._build_argv(request)
         start = time.monotonic()
         killed = False
@@ -230,6 +286,7 @@ class NsjailSandbox:
         SIGKILLs a hung helper -- and killing this process kills the jailed one
         (verified on nsjail and bwrap: zero survivors).
         """
+        self._require_seccomp()
         return subprocess.Popen(self._build_argv(request, persistent=True), **popen_kwargs)
 
     def _build_argv(self, req: SandboxRequest, *, persistent: bool = False) -> list[str]:
@@ -291,11 +348,10 @@ class NsjailSandbox:
         if "PATH" not in req.env:
             argv += ["--env", "PATH=/usr/bin:/bin"]
 
-        # Seccomp policy (KAFEL DSL denylist of dangerous syscalls). Attached
-        # only if the policy file is present on disk; otherwise we already
-        # logged a WARN at construction time.
-        if self._seccomp_policy is not None:
-            argv += ["--seccomp_policy", str(self._seccomp_policy)]
+        # Seccomp policy (KAFEL DSL denylist of dangerous syscalls). Without a policy file
+        # nothing reaches this point: run()/spawn() refuse first (_require_seccomp).
+        if self._seccomp_policy is not None and self._seccomp_policy_text is not None:
+            argv += ["--seccomp_string", self._seccomp_policy_text]
 
         # Strict AppArmor profile for the child process. nsjail calls
         # aa_change_onexec() with this name before execve(), so the profile
