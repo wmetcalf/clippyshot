@@ -607,14 +607,12 @@ See `deploy/apparmor/README.md` for details on each profile.
 ### Install ClippyShot into a venv
 
 ```sh
-# --system-site-packages so python3-seccomp (apt-installed) is visible
-python3 -m venv --system-site-packages .venv
+python3 -m venv .venv
 .venv/bin/pip install -e .
 ```
 
-`--system-site-packages` is important — the bwrap backend requires
-`import seccomp` which lives in the distro's site-packages and cannot be
-pip-installed on its own.
+No distro site-packages are needed: the bwrap backend assembles its seccomp
+BPF in-process.
 
 ### Smoketest
 
@@ -722,7 +720,7 @@ stack if you want async jobs.
 | `[WARN tini (2)] Tini is not running as PID 1` in worker output | `--init` passed alongside image ENTRYPOINT that already runs tini | Don't pass `--init`; the image already does. (Fixed in current build.) |
 | Jobs queue forever, never dispatch | Single-container `serve` mode has no inline dispatcher | Use the compose stack, or switch to `/v1/convert` (sync) |
 | Search bar returns everything | Old API without `q=` support | Rebuild; `q=<substring>` is now supported on `/v1/jobs` |
-| Local bwrap: `ImportError: No module named 'seccomp'` | venv created without `--system-site-packages` | Recreate: `python3 -m venv --system-site-packages .venv && .venv/bin/pip install -e .` |
+| Local nsjail/bwrap: `SeccompNotEnforced: ... refuses to run: its seccomp filter is not verified (...)` | The in-sandbox probe did not see the denylist enforced; the detail says why (nsjail exit 255 = policy did not compile, or the sandbox could not start) | See `deploy/seccomp/README.md`; run `clippyshot selftest` for the full reason |
 | Local bwrap: soffice dies with `ERROR 4 forking process` | AppArmor profile denies `socketpair(AF_UNIX)` or file-lock | Ensure the latest `clippyshot-soffice` profile is loaded (commit includes `network unix` and `k` on sandbox paths) |
 | Local nsjail: soffice exit 1 with `ERROR: /proc not mounted` | Stale code with `--disable_proc` still in the nsjail backend | Pull latest — `--disable_proc` removed from `src/clippyshot/sandbox/nsjail.py` |
 | Local nsjail: soffice exit 159 / SIGSYS on startup | Outdated KAFEL allowlist missing syscalls used by newer LO | Pull latest — policy is now denylist-style, survives LO version changes |
