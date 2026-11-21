@@ -21,7 +21,7 @@ set -euo pipefail
 # Declared ONCE, above the first message that mentions it. Written out by hand
 # in two places, this drifted before: the script told an operator to install a
 # version it then rejected.
-BB_MIN=0.1.39
+BB_MIN=0.1.51
 
 # One check for EVERY way a version can arrive: the legacy bare argument and
 # the `--blastbox-version V` / `--blastbox-version=V` option, which is
@@ -465,7 +465,8 @@ trap - EXIT INT TERM HUP QUIT
   echo "one image succeeded -- so a worker could pull an image nothing had" >&2
   echo "verified, and a mid-chain failure left the tags on a mixture of two" >&2
   echo "builds. Its published children also recorded a base reference the" >&2
-  echo "same run then deleted." >&2
+  echo "same run then deleted. 0.1.51 is the release whose worker sandbox" >&2
+  echo "denies the new mount API (#216), which this repo's denylist mirrors." >&2
   echo "  pip install --upgrade 'blastbox>=$BB_MIN'" >&2
   exit 2
 }
