@@ -96,7 +96,7 @@ class TestBwrapPersistentSeccomp:
         monkeypatch.setattr(sb, "_seccomp_bpf", bpf, raising=False)
         if bpf is not None:
             # Verified, as the first run() would have; spawn() then only builds the argv.
-            monkeypatch.setattr(sb, "_seccomp_verdict", SeccompVerdict(True, "test"))
+            monkeypatch.setattr(sb._seccomp_gate, "verdict", SeccompVerdict(True, "test"))
         monkeypatch.setattr(bwrap.subprocess, "Popen", FakePopen)
         sb.spawn(_req())
         return seen

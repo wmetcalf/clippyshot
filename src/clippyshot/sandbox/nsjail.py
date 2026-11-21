@@ -132,8 +132,8 @@ class NsjailSandbox:
                 self._apparmor_profile,
             )
         self._insecurity_reasons: list[str] = []
-        # None until the first run proves (or disproves) the filter; see _require_seccomp.
-        self._seccomp_verdict: seccomp_check.SeccompVerdict | None = None
+        # Nothing runs until a probe proves the filter; see _require_seccomp.
+        self._seccomp_gate = seccomp_check.SeccompGate("nsjail")
         if self._seccomp_policy is None:
             self._insecurity_reasons.append("seccomp_policy_missing")
         if not self._proc_apparmor_supported:
@@ -148,8 +148,8 @@ class NsjailSandbox:
         """True only once a probe has PROVEN the filter enforced (run/spawn/smoketest verify
         first; select_sandbox smoketests every candidate). Before that it is False, so nothing
         stamps an unproven filter into metadata."""
-        return self._seccomp_policy is not None and (
-            self._seccomp_verdict is not None and self._seccomp_verdict.ok)
+        v = self._seccomp_gate.verdict
+        return self._seccomp_policy is not None and v is not None and v.ok
 
     @property
     def seccomp_source(self) -> str:
@@ -158,7 +158,7 @@ class NsjailSandbox:
 
     @property
     def seccomp_verdict(self) -> seccomp_check.SeccompVerdict | None:
-        return self._seccomp_verdict
+        return self._seccomp_gate.verdict
 
     def _require_seccomp(self) -> None:
         """Fail closed: refuse to run anything until a probe has shown the KAFEL policy is
@@ -170,33 +170,20 @@ class NsjailSandbox:
         failure was reported as a seccomp problem. No CLIPPYSHOT_WARN_ON_INSECURE override:
         see seccomp_check.
         """
-        # Re-probe until a probe PASSES: only a success is final. A failed verdict is kept for
-        # reporting, but a transient failure (a probe timed out on a loaded host) must not
-        # disable the backend for the life of the process.
-        if self._seccomp_verdict is None or not self._seccomp_verdict.ok:
-            if self._seccomp_policy is None:
-                verdict = seccomp_check.SeccompVerdict(
-                    False, "no KAFEL policy file (searched "
-                           f"{[str(p) for p in _SECCOMP_POLICY_CANDIDATES]})")
-            else:
-                try:
-                    digest = seccomp_check.filter_digest(self._seccomp_policy.read_bytes())
-                except OSError as exc:
-                    digest = f"unreadable:{exc}"
-                verdict = seccomp_check.verify(
-                    ("nsjail", self._nsjail, f"{self._seccomp_policy}:{digest}"), self._run)
-                if verdict.ok:
-                    if "seccomp_not_enforced" in self._insecurity_reasons:
-                        self._insecurity_reasons.remove("seccomp_not_enforced")
-                    _log.info("nsjail_seccomp_verified %s", verdict.detail)
-                else:
-                    _log.error("nsjail_seccomp_not_enforced %s", verdict.detail)
-                    if "seccomp_not_enforced" not in self._insecurity_reasons:
-                        self._insecurity_reasons.append("seccomp_not_enforced")
-            self._seccomp_verdict = verdict
-        if not self._seccomp_verdict.ok:
-            raise seccomp_check.SeccompNotEnforced(
-                f"nsjail refuses to run: its seccomp filter is not verified ({self._seccomp_verdict.detail})")
+        key = None
+        if self._seccomp_policy is not None:
+            try:
+                digest = seccomp_check.filter_digest(self._seccomp_policy.read_bytes())
+            except OSError as exc:
+                digest = f"unreadable:{exc}"
+            key = ("nsjail", self._nsjail, f"{self._seccomp_policy}:{digest}")
+        self._seccomp_gate.require(
+            key=key,
+            missing=("no KAFEL policy file (searched "
+                     f"{[str(p) for p in _SECCOMP_POLICY_CANDIDATES]})"),
+            run_unchecked=self._run,
+            reasons=self._insecurity_reasons,
+        )
 
     @property
     def apparmor_profile(self) -> str:

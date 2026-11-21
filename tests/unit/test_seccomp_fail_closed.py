@@ -141,7 +141,9 @@ def test_the_kafel_policy_denies_every_call_under_the_x32_abi_too() -> None:
     got = {int(m, 0) for m in re.findall(r"SYSCALL\[(0x[0-9a-fA-F]+|\d+)\]", x32)}
     want = {_X32 | seccomp_denylist.X86_64_NR[n] for n in seccomp_denylist.DENY_ERRNO1}
     want |= {_X32 | nr for nr in _X32_ONLY.values()}
-    assert want <= got, sorted(hex(n) for n in want - got)
+    # Exactly: a typo'd constant would otherwise pass as long as the right one were absent
+    # from neither set.
+    assert got == want, (sorted(hex(n) for n in want - got), sorted(hex(n) for n in got - want))
     assert "USE clippyshot_deny_x32" in text   # and it is actually in force
 
 
@@ -304,6 +306,7 @@ def test_a_transient_probe_failure_is_retried_not_final(monkeypatch, tmp_path, m
 
     sb = _bwrap(monkeypatch) if make == "bwrap" else _nsjail(monkeypatch, tmp_path)
     monkeypatch.setattr(seccomp_check, "outside_report", lambda: _report(UNFILTERED, 0))
+    monkeypatch.setattr(seccomp_check, "RETRY_AFTER_S", 0.0)
     probes = iter([_result(-9, stderr=b"timeout"),
                    _result(0, json.dumps(_report(ALL_EPERM, 1)).encode())])
     ran: list[str] = []
@@ -321,3 +324,58 @@ def test_a_transient_probe_failure_is_retried_not_final(monkeypatch, tmp_path, m
     sb.run(SandboxRequest(argv=["/bin/true"]))
     assert ran == [seccomp_check.PROBE_PYTHON, seccomp_check.PROBE_PYTHON, "/bin/true"]
     assert sb.seccomp_active and "seccomp_not_enforced" not in sb.insecurity_reasons
+
+
+def test_a_failing_host_is_not_re_probed_on_every_request(monkeypatch, tmp_path) -> None:
+    """Within RETRY_AFTER_S a failed verdict stands: requests fail fast instead of each paying
+    a (up to 30 s) probe."""
+    sb = _nsjail(monkeypatch, tmp_path)
+    probes: list[int] = []
+
+    def fake_run(req):
+        probes.append(1)
+        return _result(255, stderr=b"[F] Couldn't prepare sandboxing policy")
+
+    monkeypatch.setattr(sb, "_run", fake_run)
+    from clippyshot.sandbox.base import SandboxRequest
+
+    for _ in range(5):
+        with pytest.raises(SeccompNotEnforced):
+            sb.run(SandboxRequest(argv=["/bin/true"]))
+    assert len(probes) == 1
+    assert sb.insecurity_reasons.count("seccomp_not_enforced") == 1
+
+
+def test_concurrent_first_requests_run_one_probe(monkeypatch, tmp_path) -> None:
+    import json
+    import threading
+    import time as _time
+
+    sb = _bwrap(monkeypatch)
+    monkeypatch.setattr(seccomp_check, "outside_report", lambda: _report(UNFILTERED, 0))
+    probes: list[int] = []
+
+    def fake_run(req):
+        if req.argv[0] == seccomp_check.PROBE_PYTHON:
+            probes.append(1)
+            _time.sleep(0.2)
+            return _result(0, json.dumps(_report(ALL_EPERM, 1)).encode())
+        return _result(0)
+
+    monkeypatch.setattr(sb, "_run", fake_run)
+    from clippyshot.sandbox.base import SandboxRequest
+
+    errors: list[BaseException] = []
+
+    def go():
+        try:
+            sb.run(SandboxRequest(argv=["/bin/true"]))
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+
+    ts = [threading.Thread(target=go) for _ in range(8)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert not errors and len(probes) == 1

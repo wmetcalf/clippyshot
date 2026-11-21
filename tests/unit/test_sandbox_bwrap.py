@@ -186,7 +186,7 @@ def test_bwrap_seccomp_active_when_bpf_builds(monkeypatch):
     sb = BwrapSandbox()
     assert "seccomp_missing" not in sb.insecurity_reasons
     assert sb.seccomp_active is False and sb.seccomp_source == "none"   # not proven yet
-    monkeypatch.setattr(sb, "_seccomp_verdict", SeccompVerdict(True, "test"))
+    monkeypatch.setattr(sb._seccomp_gate, "verdict", SeccompVerdict(True, "test"))
     assert sb.seccomp_active is True
     assert sb.seccomp_source == "clippyshot-bwrap"
 

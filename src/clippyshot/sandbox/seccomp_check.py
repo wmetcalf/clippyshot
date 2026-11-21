@@ -34,6 +34,7 @@ import json
 import logging
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -199,3 +200,60 @@ def verify(
     if verdict.ok:
         _VERIFIED[key] = verdict
     return verdict
+
+
+# How long a FAILED verdict stands before the next run re-probes. A transient failure (a probe
+# timed out on a loaded host) must not disable a backend for good, but a host that keeps failing
+# must not pay a probe on every request either.
+RETRY_AFTER_S = 30.0
+
+
+class SeccompGate:
+    """One backend instance's fail-closed gate: nothing runs until a probe has passed.
+
+    A pass is final. A failure is kept (for reporting and ``insecurity_reasons``) and re-probed
+    once it is ``RETRY_AFTER_S`` old. Verification is serialized per instance, so concurrent
+    first requests run one probe, not one each, and the reasons list is only edited under the
+    lock.
+    """
+
+    def __init__(self, backend: str) -> None:
+        self.backend = backend
+        self.verdict: SeccompVerdict | None = None
+        self._failed_at: float | None = None
+        self._lock = threading.Lock()
+
+    def require(
+        self,
+        *,
+        key: tuple[str, str, str] | None,
+        missing: str,
+        run_unchecked: Callable[[SandboxRequest], SandboxResult],
+        reasons: list[str],
+    ) -> None:
+        """Raise SeccompNotEnforced unless the filter is proven. ``key`` None = no filter is
+        configured at all (``missing`` says why)."""
+        with self._lock:
+            v = self.verdict
+            due = v is None or (
+                not v.ok and (self._failed_at is None
+                              or time.monotonic() - self._failed_at >= RETRY_AFTER_S))
+            if due:
+                if key is None:
+                    v = SeccompVerdict(False, missing)
+                else:
+                    v = verify(key, run_unchecked)
+                    if v.ok:
+                        reasons[:] = [r for r in reasons if r != "seccomp_not_enforced"]
+                        _log.info("%s_seccomp_verified %s", self.backend, v.detail)
+                    else:
+                        _log.error("%s_seccomp_not_enforced %s", self.backend, v.detail)
+                        if "seccomp_not_enforced" not in reasons:
+                            reasons.append("seccomp_not_enforced")
+                self.verdict = v
+                self._failed_at = None if v.ok else time.monotonic()
+        assert v is not None
+        if not v.ok:
+            raise SeccompNotEnforced(
+                f"{self.backend} refuses to run: its seccomp filter is not verified "
+                f"({v.detail})")

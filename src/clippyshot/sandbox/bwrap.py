@@ -127,7 +127,7 @@ class BwrapSandbox:
         from clippyshot.sandbox import seccomp_denylist
 
         self._seccomp_bpf = seccomp_denylist.build_bpf_bytes()
-        self._seccomp_verdict: seccomp_check.SeccompVerdict | None = None
+        self._seccomp_gate = seccomp_check.SeccompGate("bwrap")
         self._insecurity_reasons: list[str] = []
         if self._seccomp_bpf is None:
             _log.warning(
@@ -149,8 +149,8 @@ class BwrapSandbox:
         """True only once a probe has PROVEN the filter enforced (run/spawn/smoketest verify
         first; select_sandbox smoketests every candidate). Before that it is False, so nothing
         stamps an unproven filter into metadata."""
-        return self._seccomp_bpf is not None and (
-            self._seccomp_verdict is not None and self._seccomp_verdict.ok)
+        v = self._seccomp_gate.verdict
+        return self._seccomp_bpf is not None and v is not None and v.ok
 
     @property
     def seccomp_source(self) -> str:
@@ -159,36 +159,22 @@ class BwrapSandbox:
 
     @property
     def seccomp_verdict(self) -> seccomp_check.SeccompVerdict | None:
-        return self._seccomp_verdict
+        return self._seccomp_gate.verdict
 
     def _require_seccomp(self) -> None:
         """Fail closed: refuse to run anything until a probe has shown the BPF denylist is
         enforced inside this sandbox. The image once shipped a bwrap with no filter at all
         (its builder could not import libseccomp there) and still ran it. No
         CLIPPYSHOT_WARN_ON_INSECURE override: see seccomp_check."""
-        # Re-probe until a probe PASSES: only a success is final. A failed verdict is kept for
-        # reporting, but a transient failure (a probe timed out on a loaded host) must not
-        # disable the backend for the life of the process.
-        if self._seccomp_verdict is None or not self._seccomp_verdict.ok:
-            if self._seccomp_bpf is None:
-                verdict = seccomp_check.SeccompVerdict(
-                    False, "no seccomp BPF program for this host (the denylist is x86_64-only)")
-            else:
-                verdict = seccomp_check.verify(
-                    ("bwrap", self._bwrap, seccomp_check.filter_digest(self._seccomp_bpf)),
-                    self._run)
-                if verdict.ok:
-                    if "seccomp_not_enforced" in self._insecurity_reasons:
-                        self._insecurity_reasons.remove("seccomp_not_enforced")
-                    _log.info("bwrap_seccomp_verified %s", verdict.detail)
-                else:
-                    _log.error("bwrap_seccomp_not_enforced %s", verdict.detail)
-                    if "seccomp_not_enforced" not in self._insecurity_reasons:
-                        self._insecurity_reasons.append("seccomp_not_enforced")
-            self._seccomp_verdict = verdict
-        if not self._seccomp_verdict.ok:
-            raise seccomp_check.SeccompNotEnforced(
-                f"bwrap refuses to run: its seccomp filter is not verified ({self._seccomp_verdict.detail})")
+        key = None
+        if self._seccomp_bpf is not None:
+            key = ("bwrap", self._bwrap, seccomp_check.filter_digest(self._seccomp_bpf))
+        self._seccomp_gate.require(
+            key=key,
+            missing="no seccomp BPF program for this host (the denylist is x86_64-only)",
+            run_unchecked=self._run,
+            reasons=self._insecurity_reasons,
+        )
 
     @property
     def apparmor_profile(self) -> str:
