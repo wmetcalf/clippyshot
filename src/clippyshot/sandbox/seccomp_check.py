@@ -17,7 +17,8 @@ A verdict is OK only when
 1. every probed call returns EPERM inside the sandbox, AND
 2. the EPERM is attributable to the sandbox, not to an outer layer (a Docker profile can deny
    the same calls): at least one call is NOT EPERM when the same probe runs outside the
-   sandbox, or the process inside carries more seccomp filters than the one outside.
+   sandbox. A higher ``Seccomp_filters`` count inside is NOT accepted instead: an allow-all
+   filter raises it too.
 
 Anything else -- the probe did not run, a call got through, or the two cannot be told apart --
 is a failed verdict, and the backends refuse to run (``SeccompNotEnforced``). There is no
@@ -134,14 +135,15 @@ def evaluate(inside: dict | None, outside: dict | None) -> SeccompVerdict:
         if own:
             return SeccompVerdict(
                 True, f"EPERM inside, allowed outside: {', '.join(own)}")
+    # No fallback to "more seccomp filters inside": an allow-all filter raises that count too,
+    # so under an outer profile that already denies every probed call it would pass a sandbox
+    # whose own filter denies nothing. Such an outer profile also blocks the namespace setup
+    # nsjail/bwrap need (unshare), so refusing there costs nothing real.
     f_in, f_out = inside.get("filters"), (outside or {}).get("filters")
-    if isinstance(f_in, int) and isinstance(f_out, int) and f_in > f_out:
-        return SeccompVerdict(
-            True, f"probed calls EPERM; seccomp filters {f_out} outside -> {f_in} inside")
     return SeccompVerdict(
-        False, "probed calls are EPERM inside, but they are EPERM outside too and the "
-               f"filter count does not rise (outside={f_out}, inside={f_in}): cannot tell "
-               "the sandbox's own filter from an outer one")
+        False, "probed calls are EPERM inside, but they are EPERM outside too "
+               f"(seccomp filters outside={f_out}, inside={f_in}): cannot tell the sandbox's "
+               "own filter from an outer one")
 
 
 _baseline_lock = threading.Lock()
@@ -150,7 +152,8 @@ _baseline_done = False
 
 
 def outside_report() -> dict | None:
-    """The probe run directly, unsandboxed, once per process."""
+    """The probe run directly, unsandboxed: once per process once it succeeds (a failed run is
+    retried next time rather than leaving the baseline empty for good)."""
     global _baseline, _baseline_done
     with _baseline_lock:
         if not _baseline_done:
@@ -162,7 +165,7 @@ def outside_report() -> dict | None:
                 _baseline = parse_probe(r.stdout) if r.returncode == 0 else None
             except (OSError, subprocess.TimeoutExpired):
                 _baseline = None
-            _baseline_done = True
+            _baseline_done = _baseline is not None
         return _baseline
 
 

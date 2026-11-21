@@ -126,6 +126,25 @@ def test_the_program_decides_like_libseccomp() -> None:
     assert not diff, diff[:10]
 
 
+_X32 = 0x40000000
+# x32-only numbers (arch/x86/entry/syscalls/syscall_64.tbl, 512+) for denied calls whose
+# native number is 64-bit-ABI-only.
+_X32_ONLY = {"ptrace": 521, "kexec_load": 528, "process_vm_readv": 539, "process_vm_writev": 540}
+
+
+def test_the_kafel_policy_denies_every_call_under_the_x32_abi_too() -> None:
+    """kafel checks only AUDIT_ARCH, which x32 shares with x86_64, and compares exact numbers,
+    so `mount | 0x40000000` sails past a native-only denylist on an X32-enabled kernel."""
+    policy = (Path(__file__).resolve().parents[2] / "deploy/seccomp/clippyshot.seccomp.policy")
+    text = policy.read_text()
+    x32 = text[text.index("POLICY clippyshot_deny_x32"):]
+    got = {int(m, 0) for m in re.findall(r"SYSCALL\[(0x[0-9a-fA-F]+|\d+)\]", x32)}
+    want = {_X32 | seccomp_denylist.X86_64_NR[n] for n in seccomp_denylist.DENY_ERRNO1}
+    want |= {_X32 | nr for nr in _X32_ONLY.values()}
+    assert want <= got, sorted(hex(n) for n in want - got)
+    assert "USE clippyshot_deny_x32" in text   # and it is actually in force
+
+
 # --- the verdict --------------------------------------------------------------------------
 
 EPERM = errno.EPERM
@@ -162,8 +181,10 @@ def test_eperm_from_an_outer_layer_alone_is_not_the_sandbox_filter() -> None:
     assert not evaluate(_report(ALL_EPERM, None), _report(ALL_EPERM, None)).ok
 
 
-def test_an_extra_filter_inside_attributes_the_eperm() -> None:
-    assert evaluate(_report(ALL_EPERM, 2), _report(ALL_EPERM, 1)).ok
+def test_an_extra_filter_inside_does_not_attribute_the_eperm() -> None:
+    """An allow-all inner filter raises Seccomp_filters exactly like a real one, so under an
+    outer profile that already denies every probed call the count proves nothing."""
+    assert not evaluate(_report(ALL_EPERM, 2), _report(ALL_EPERM, 1)).ok
 
 
 def test_no_report_or_no_calls_fails() -> None:
@@ -233,7 +254,8 @@ def test_a_failed_probe_refuses_every_run(monkeypatch, tmp_path, make, insecure_
         sb.smoketest()
     with pytest.raises(SeccompNotEnforced):
         sb.spawn(req)
-    assert len(ran) == 1 and ran[0][0] == seccomp_check.PROBE_PYTHON   # only the probe ran
+    # Only probes ran -- one per attempt, since a failure is re-probed -- never the request.
+    assert ran and all(argv[0] == seccomp_check.PROBE_PYTHON for argv in ran)
     assert sb.seccomp_active is False and sb.seccomp_source == "none"
     assert "seccomp_not_enforced" in sb.insecurity_reasons and not sb.secure
 
@@ -272,3 +294,30 @@ def test_a_passing_probe_is_run_once_then_requests_run(monkeypatch, tmp_path, ma
     assert sb.seccomp_active
     assert not {"seccomp_missing", "seccomp_not_enforced"} & set(sb.insecurity_reasons)
     assert isinstance(sb.seccomp_verdict, SeccompVerdict) and sb.seccomp_verdict.ok
+
+
+@pytest.mark.parametrize("make", ["bwrap", "nsjail"])
+def test_a_transient_probe_failure_is_retried_not_final(monkeypatch, tmp_path, make) -> None:
+    """A probe that times out once on a loaded host must not disable the backend for the life
+    of the process: the next run re-probes, and a pass restores it."""
+    import json
+
+    sb = _bwrap(monkeypatch) if make == "bwrap" else _nsjail(monkeypatch, tmp_path)
+    monkeypatch.setattr(seccomp_check, "outside_report", lambda: _report(UNFILTERED, 0))
+    probes = iter([_result(-9, stderr=b"timeout"),
+                   _result(0, json.dumps(_report(ALL_EPERM, 1)).encode())])
+    ran: list[str] = []
+
+    def fake_run(req):
+        ran.append(req.argv[0])
+        return next(probes) if req.argv[0] == seccomp_check.PROBE_PYTHON else _result(0)
+
+    monkeypatch.setattr(sb, "_run", fake_run)
+    from clippyshot.sandbox.base import SandboxRequest
+
+    with pytest.raises(SeccompNotEnforced):
+        sb.run(SandboxRequest(argv=["/bin/true"]))
+    assert "seccomp_not_enforced" in sb.insecurity_reasons
+    sb.run(SandboxRequest(argv=["/bin/true"]))
+    assert ran == [seccomp_check.PROBE_PYTHON, seccomp_check.PROBE_PYTHON, "/bin/true"]
+    assert sb.seccomp_active and "seccomp_not_enforced" not in sb.insecurity_reasons

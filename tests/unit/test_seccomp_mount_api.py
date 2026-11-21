@@ -73,7 +73,8 @@ _POLICY = _SECCOMP_DIR / "clippyshot.seccomp.policy"
 
 def _kafel_errno1_names() -> set[str]:
     text = _POLICY.read_text()
-    block = text[text.index("ERRNO(1) {"):text.index("USE ")]
+    # The native block only; the x32 twin block is checked in test_seccomp_fail_closed.
+    block = text[text.index("ERRNO(1) {"):text.index("POLICY clippyshot_deny_x32")]
     names: set[str] = set()
     for line in block.splitlines():
         code, _, comment = line.partition("//")
@@ -300,9 +301,10 @@ def test_inside_bwrap_the_new_mount_api_is_eperm() -> None:
     from clippyshot.sandbox.bwrap import BwrapSandbox
 
     sb = BwrapSandbox()
-    assert sb.seccomp_active, sb.insecurity_reasons
+    assert "seccomp_missing" not in sb.insecurity_reasons, sb.insecurity_reasons
     res = sb.run(_probe_request())
     _assert_all_eperm(res.exit_code, res.stdout, res.stderr)
+    assert sb.seccomp_active, sb.insecurity_reasons   # proven by the run's probe
 
 
 @needs_nsjail_userns

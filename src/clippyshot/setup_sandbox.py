@@ -56,7 +56,14 @@ def _userns_ok(binary: str, path: str) -> bool:
         if binary == "nsjail":
             from clippyshot.sandbox.nsjail import NsjailSandbox
 
-            res = NsjailSandbox().smoketest()
+            from clippyshot.sandbox.base import SandboxRequest
+
+            # A USERNS probe only. smoketest() now also proves the seccomp filter, and a
+            # filter failure reported here as "userns blocked" would load an AppArmor profile
+            # that fixes nothing. The filter is checked by select_sandbox/selftest instead.
+            sb = NsjailSandbox()
+            sb._seccomp_policy = None
+            res = sb._run(SandboxRequest(argv=["/bin/true"]))
             return res.exit_code == 0 and not res.killed
     except Exception:  # noqa: BLE001 — any probe failure ⇒ treat as not-working
         return False

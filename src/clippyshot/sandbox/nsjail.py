@@ -145,10 +145,11 @@ class NsjailSandbox:
 
     @property
     def seccomp_active(self) -> bool:
-        """A policy is configured and has not failed verification. Nothing runs before the
-        verdict (run/spawn verify first), so after any run this is the verified answer."""
+        """True only once a probe has PROVEN the filter enforced (run/spawn/smoketest verify
+        first; select_sandbox smoketests every candidate). Before that it is False, so nothing
+        stamps an unproven filter into metadata."""
         return self._seccomp_policy is not None and (
-            self._seccomp_verdict is None or self._seccomp_verdict.ok)
+            self._seccomp_verdict is not None and self._seccomp_verdict.ok)
 
     @property
     def seccomp_source(self) -> str:
@@ -169,7 +170,10 @@ class NsjailSandbox:
         failure was reported as a seccomp problem. No CLIPPYSHOT_WARN_ON_INSECURE override:
         see seccomp_check.
         """
-        if self._seccomp_verdict is None:
+        # Re-probe until a probe PASSES: only a success is final. A failed verdict is kept for
+        # reporting, but a transient failure (a probe timed out on a loaded host) must not
+        # disable the backend for the life of the process.
+        if self._seccomp_verdict is None or not self._seccomp_verdict.ok:
             if self._seccomp_policy is None:
                 verdict = seccomp_check.SeccompVerdict(
                     False, "no KAFEL policy file (searched "
@@ -182,10 +186,13 @@ class NsjailSandbox:
                 verdict = seccomp_check.verify(
                     ("nsjail", self._nsjail, f"{self._seccomp_policy}:{digest}"), self._run)
                 if verdict.ok:
+                    if "seccomp_not_enforced" in self._insecurity_reasons:
+                        self._insecurity_reasons.remove("seccomp_not_enforced")
                     _log.info("nsjail_seccomp_verified %s", verdict.detail)
                 else:
                     _log.error("nsjail_seccomp_not_enforced %s", verdict.detail)
-                    self._insecurity_reasons.append("seccomp_not_enforced")
+                    if "seccomp_not_enforced" not in self._insecurity_reasons:
+                        self._insecurity_reasons.append("seccomp_not_enforced")
             self._seccomp_verdict = verdict
         if not self._seccomp_verdict.ok:
             raise seccomp_check.SeccompNotEnforced(

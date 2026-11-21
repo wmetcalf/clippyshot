@@ -68,8 +68,9 @@ the first command, each backend runs a probe inside its sandbox
 (`src/clippyshot/sandbox/seccomp_check.py`) that makes denylisted calls
 with harmless arguments (`unshare(0)`, `open_tree`, `kcmp`,
 `io_uring_setup`, `mount`). The run proceeds only if every call is EPERM
-inside AND that EPERM is the sandbox's own -- the calls are not EPERM
-outside, or the process inside carries more seccomp filters. Otherwise
+inside AND that EPERM is the sandbox's own -- at least one call is not
+EPERM outside (a higher filter count is not accepted: an allow-all filter
+raises it too). Otherwise
 `run()`/`spawn()`/`smoketest()` raise `SeccompNotEnforced` and
 auto-selection passes the backend over. `CLIPPYSHOT_WARN_ON_INSECURE`
 does not waive this (gVisor tiers set it routinely for the container

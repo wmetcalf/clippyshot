@@ -60,7 +60,7 @@ def test_nsjail_argv_includes_seccomp_policy():
     """The nsjail argv must include --seccomp_policy with the deployed file."""
     sb = NsjailSandbox()
     # Seccomp policy is resolved at construction time; verify it found the file.
-    assert sb.seccomp_active, (
+    assert sb._seccomp_policy is not None, (  # noqa: SLF001
         "seccomp policy was not found; expected "
         "deploy/seccomp/clippyshot.seccomp.policy relative to repo root"
     )

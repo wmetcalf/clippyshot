@@ -8,7 +8,8 @@ block — stops the two backends from drifting.
 
 **Policy:** ``DEFAULT ALLOW`` + ``ERRNO(1)`` (return EPERM) on the dangerous syscalls below;
 any syscall made under a foreign ABI (i386 ``int 0x80``, x32) kills the process, as libseccomp
-and kafel both do for a native-only filter. **x86_64-only**, matching the nsjail policy.
+does for a native-only filter. (kafel kills a foreign AUDIT_ARCH but cannot see x32, which
+shares AUDIT_ARCH_X86_64, so the KAFEL policy denies each call's x32 number explicitly.) **x86_64-only**, matching the nsjail policy.
 
 **Why no libseccomp.** The program used to be built with the libseccomp Python bindings, which
 exist only as a distro package (``python3-seccomp``), never on PyPI. The shipped image installs

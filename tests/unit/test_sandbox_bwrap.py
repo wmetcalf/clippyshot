@@ -171,9 +171,9 @@ def test_bwrap_without_a_bpf_program_refuses_to_run(monkeypatch):
 
 @needs_bwrap
 def test_bwrap_seccomp_active_when_bpf_builds(monkeypatch):
-    """With a BPF program built, bwrap reports seccomp_active=True, seccomp_source=
-    "clippyshot-bwrap", and NO "seccomp_missing" reason before any run (the filter is attached
-    per-run via --seccomp <fd> and verified on the first run)."""
+    """With a BPF program built there is NO "seccomp_missing" reason, but seccomp_active stays
+    False until a probe has proven the filter (the first run); then it is
+    "clippyshot-bwrap"."""
     import clippyshot.sandbox.bwrap as bwrap_mod
     import clippyshot.sandbox.seccomp_denylist as denylist_mod
 
@@ -181,10 +181,14 @@ def test_bwrap_seccomp_active_when_bpf_builds(monkeypatch):
     monkeypatch.setattr(bwrap_mod.shutil, "which", lambda name: (
         "/usr/bin/aa-exec" if name == "aa-exec" else "/usr/bin/bwrap"
     ))
+    from clippyshot.sandbox.seccomp_check import SeccompVerdict
+
     sb = BwrapSandbox()
+    assert "seccomp_missing" not in sb.insecurity_reasons
+    assert sb.seccomp_active is False and sb.seccomp_source == "none"   # not proven yet
+    monkeypatch.setattr(sb, "_seccomp_verdict", SeccompVerdict(True, "test"))
     assert sb.seccomp_active is True
     assert sb.seccomp_source == "clippyshot-bwrap"
-    assert "seccomp_missing" not in sb.insecurity_reasons
 
 
 @needs_bwrap
