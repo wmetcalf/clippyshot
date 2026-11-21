@@ -53,6 +53,14 @@ MOUNT_API_NR: dict[str, int] = {
     "fchroot": 472,
 }
 CHROOT_NR = {"x86_64": 161, "aarch64": 51}
+# Every entry the KAFEL policy writes by number: the mount API above plus io_uring, which the
+# kafel bundled with nsjail 3.4 cannot name (one unknown name fails the whole policy).
+KAFEL_NUMBERED_NR: dict[str, int] = {
+    **MOUNT_API_NR,
+    "io_uring_setup": 425,
+    "io_uring_enter": 426,
+    "io_uring_register": 427,
+}
 NEW_DENIES = (*MOUNT_API_NR, "chroot")
 
 AUDIT_ARCH_X86_64 = 0xC000003E
@@ -77,7 +85,7 @@ def _kafel_errno1_names() -> set[str]:
             if m:
                 # A numbered entry must carry its name in the comment AND the right number.
                 name = comment.strip()
-                assert MOUNT_API_NR.get(name) == int(m.group(1)), (tok, name)
+                assert KAFEL_NUMBERED_NR.get(name) == int(m.group(1)), (tok, name)
                 names.add(name)
             elif tok.isidentifier():
                 names.add(tok)
@@ -108,25 +116,16 @@ def test_the_docker_profile_does_not_allow_the_new_mount_api() -> None:
     assert not (allowed & set(NEW_DENIES)), allowed & set(NEW_DENIES)
 
 
-def test_a_libseccomp_that_predates_a_name_gets_its_number_not_a_dropped_filter() -> None:
-    """Ubuntu 24.04's libseccomp 2.5.5 cannot resolve open_tree_attr (Linux 6.15). The builder is
-    fail-closed, so an unresolvable name would drop the WHOLE filter on that host; the known
-    number is used instead. An unknown name with no number still goes through as a name, so
-    add_rule raises and the build fails closed."""
-    from clippyshot.sandbox.seccomp_denylist import _syscall_ref
+def test_a_name_without_a_number_fails_the_whole_build_closed(monkeypatch) -> None:
+    """The builder never emits a partial denylist: one name it has no number for and there is
+    no program at all, so bwrap refuses to run instead of running with a hole."""
+    from clippyshot.sandbox import seccomp_denylist
 
-    class _Old:
-        class Arch:
-            NATIVE = 0
-
-        @staticmethod
-        def resolve_syscall(_arch: int, name: str) -> int:
-            return -1 if name in ("open_tree_attr", "no_such_call") else 1
-
-    for arch in ("x86_64", "aarch64"):
-        assert _syscall_ref(_Old, "open_tree_attr", arch) == 467
-        assert _syscall_ref(_Old, "mount", arch) == "mount"
-        assert _syscall_ref(_Old, "no_such_call", arch) == "no_such_call"
+    if platform.machine() not in ("x86_64", "amd64"):
+        pytest.skip("the bwrap denylist BPF is x86_64-only")
+    monkeypatch.setattr(seccomp_denylist, "DENY_ERRNO1",
+                        (*seccomp_denylist.DENY_ERRNO1, "no_such_call"))
+    assert seccomp_denylist.build_bpf_bytes() is None
 
 
 # --- layer 2: the BPF bytes ---------------------------------------------------------------
@@ -134,7 +133,7 @@ def test_a_libseccomp_that_predates_a_name_gets_its_number_not_a_dropped_filter(
 
 def _run_cbpf(prog: bytes, nr: int, arch: int, args: tuple[int, ...] = (0,) * 6) -> int:
     """Evaluate a classic-BPF seccomp program against one seccomp_data. Supports the opcode
-    subset libseccomp emits (LD/LDX/ST/STX, ALU, JMP, RET, TAX/TXA)."""
+    subset libseccomp and seccomp_denylist emit (LD/LDX/ST/STX, ALU, JMP, RET, TAX/TXA)."""
     data = struct.pack("<iIQ6Q", nr, arch, 0, *args)
     insns = [struct.unpack_from("<HBBI", prog, i) for i in range(0, len(prog), 8)]
     a = x = 0
@@ -195,13 +194,12 @@ def _run_cbpf(prog: bytes, nr: int, arch: int, args: tuple[int, ...] = (0,) * 6)
 
 @pytest.fixture(scope="module")
 def bpf() -> bytes:
-    pytest.importorskip("seccomp")
     if platform.machine() not in ("x86_64", "amd64"):
         pytest.skip("the bwrap denylist BPF is x86_64-only")
     from clippyshot.sandbox.seccomp_denylist import build_bpf_bytes
 
     prog = build_bpf_bytes()
-    assert prog is not None, "libseccomp is present but the denylist failed to build"
+    assert prog is not None, "the denylist failed to build"
     return prog
 
 
@@ -299,7 +297,6 @@ def _probe_request() -> SandboxRequest:
 
 @needs_bwrap_userns
 def test_inside_bwrap_the_new_mount_api_is_eperm() -> None:
-    pytest.importorskip("seccomp")
     from clippyshot.sandbox.bwrap import BwrapSandbox
 
     sb = BwrapSandbox()

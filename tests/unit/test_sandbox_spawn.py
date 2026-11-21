@@ -82,6 +82,8 @@ class TestBwrapPersistentSeccomp:
     passes, so `--seccomp` was silently absent (codex)."""
 
     def _spawn_argv(self, monkeypatch, *, bpf: bytes | None):
+        from clippyshot.sandbox.seccomp_check import SeccompVerdict
+
         seen = {}
 
         class FakePopen:
@@ -92,6 +94,9 @@ class TestBwrapPersistentSeccomp:
         monkeypatch.setattr(bwrap.shutil, "which", lambda _n: "/usr/bin/bwrap")
         sb = bwrap.BwrapSandbox()
         monkeypatch.setattr(sb, "_seccomp_bpf", bpf, raising=False)
+        if bpf is not None:
+            # Verified, as the first run() would have; spawn() then only builds the argv.
+            monkeypatch.setattr(sb, "_seccomp_verdict", SeccompVerdict(True, "test"))
         monkeypatch.setattr(bwrap.subprocess, "Popen", FakePopen)
         sb.spawn(_req())
         return seen
@@ -101,7 +106,9 @@ class TestBwrapPersistentSeccomp:
         assert "--seccomp" in seen["argv"], "the persistent helper runs unfiltered"
         assert seen["kwargs"]["pass_fds"], "the bpf fd was not passed to the child"
 
-    def test_without_a_policy_nothing_is_claimed(self, monkeypatch):
-        seen = self._spawn_argv(monkeypatch, bpf=None)
-        assert "--seccomp" not in seen["argv"]
-        assert seen["kwargs"]["pass_fds"] == ()
+    def test_without_a_policy_the_helper_is_refused(self, monkeypatch):
+        """No program -> no helper at all, not an unfiltered one."""
+        from clippyshot.sandbox.seccomp_check import SeccompNotEnforced
+
+        with pytest.raises(SeccompNotEnforced):
+            self._spawn_argv(monkeypatch, bpf=None)

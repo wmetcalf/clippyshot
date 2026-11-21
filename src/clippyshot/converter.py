@@ -642,12 +642,12 @@ class Converter:
         )
         # Where the seccomp filter applied to soffice comes from. Values:
         #   "clippyshot-nsjail"   — our KAFEL policy via nsjail --seccomp_policy
-        #   "clippyshot-bwrap"    — our libseccomp-built BPF via bwrap --seccomp
+        #   "clippyshot-bwrap"    — our denylist BPF via bwrap --seccomp
         #   "container-runtime"   — inherited from Docker's docker-default /
         #                           Kubernetes RuntimeDefault profile (the
         #                           container IS the sandbox)
-        #   "none"                — no filter at all (bare-host bwrap without
-        #                           libseccomp bindings, or an unknown setup)
+        #   "none"                — no filter at all (an unknown setup; the
+        #                           namespace backends refuse to run unfiltered)
         self._seccomp = seccomp
         # Retained for callers that still read the old field.
         self._apparmor_profile = self._runtime_apparmor_profile

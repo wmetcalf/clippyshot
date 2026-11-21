@@ -1,4 +1,5 @@
 from pathlib import Path
+import pytest
 
 
 from clippyshot.limits import Limits
@@ -143,33 +144,39 @@ def test_bwrap_apply_rlimits_includes_nofile():
 
 
 @needs_bwrap
-def test_bwrap_seccomp_insecure_without_libseccomp(monkeypatch):
-    """No libseccomp -> no BPF is built -> seccomp_active=False + a "seccomp_missing" reason.
-    Fail-safe: the gate must never mistake an UNFILTERED bwrap for secure just because the
-    module import might succeed. (This is where the deployed container/gVisor path stays the
-    preferred backend, and nsjail carries seccomp via KAFEL.)"""
+def test_bwrap_without_a_bpf_program_refuses_to_run(monkeypatch):
+    """No BPF program (a non-x86_64 host) -> seccomp_active=False, a "seccomp_missing" reason,
+    and run()/spawn() REFUSE rather than run unfiltered -- with or without
+    CLIPPYSHOT_WARN_ON_INSECURE, which gVisor tiers set routinely."""
     import clippyshot.sandbox.bwrap as bwrap_mod
+    import clippyshot.sandbox.seccomp_denylist as denylist_mod
+    from clippyshot.sandbox.seccomp_check import SeccompNotEnforced
 
-    monkeypatch.setattr(bwrap_mod, "_LIBSECCOMP_AVAILABLE", False)
+    monkeypatch.setattr(denylist_mod, "build_bpf_bytes", lambda: None)
     monkeypatch.setattr(bwrap_mod.shutil, "which", lambda name: (
         "/usr/bin/aa-exec" if name == "aa-exec" else "/usr/bin/bwrap"
     ))
+    monkeypatch.setenv("CLIPPYSHOT_WARN_ON_INSECURE", "1")
     sb = BwrapSandbox()
     assert sb.seccomp_active is False
     assert sb.seccomp_source == "none"
     assert "seccomp_missing" in sb.insecurity_reasons
-    assert sb.secure is False  # no syscall filter -> not fully secure
+    assert sb.secure is False
+    req = SandboxRequest(argv=["/bin/true"], attach_apparmor=False)
+    with pytest.raises(SeccompNotEnforced):
+        sb.run(req)
+    with pytest.raises(SeccompNotEnforced):
+        sb.spawn(req)
 
 
 @needs_bwrap
 def test_bwrap_seccomp_active_when_bpf_builds(monkeypatch):
-    """With libseccomp present and a BPF successfully built, bwrap reports seccomp_active=True,
-    seccomp_source="clippyshot-bwrap", and NO "seccomp_missing" reason — the filter is attached
-    per-run via --seccomp <fd>. (Builder mocked so this runs where python3-libseccomp is absent.)"""
+    """With a BPF program built, bwrap reports seccomp_active=True, seccomp_source=
+    "clippyshot-bwrap", and NO "seccomp_missing" reason before any run (the filter is attached
+    per-run via --seccomp <fd> and verified on the first run)."""
     import clippyshot.sandbox.bwrap as bwrap_mod
     import clippyshot.sandbox.seccomp_denylist as denylist_mod
 
-    monkeypatch.setattr(bwrap_mod, "_LIBSECCOMP_AVAILABLE", True)
     monkeypatch.setattr(denylist_mod, "build_bpf_bytes", lambda: b"\x00" * 16)
     monkeypatch.setattr(bwrap_mod.shutil, "which", lambda name: (
         "/usr/bin/aa-exec" if name == "aa-exec" else "/usr/bin/bwrap"

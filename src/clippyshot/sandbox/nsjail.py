@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from clippyshot.errors import SandboxError, SandboxUnavailable
+from clippyshot.sandbox import seccomp_check
 from clippyshot.sandbox.base import SandboxRequest
 from clippyshot.types import SandboxResult
 
@@ -131,6 +132,8 @@ class NsjailSandbox:
                 self._apparmor_profile,
             )
         self._insecurity_reasons: list[str] = []
+        # None until the first run proves (or disproves) the filter; see _require_seccomp.
+        self._seccomp_verdict: seccomp_check.SeccompVerdict | None = None
         if self._seccomp_policy is None:
             self._insecurity_reasons.append("seccomp_policy_missing")
         if not self._proc_apparmor_supported:
@@ -142,12 +145,51 @@ class NsjailSandbox:
 
     @property
     def seccomp_active(self) -> bool:
-        return self._seccomp_policy is not None
+        """A policy is configured and has not failed verification. Nothing runs before the
+        verdict (run/spawn verify first), so after any run this is the verified answer."""
+        return self._seccomp_policy is not None and (
+            self._seccomp_verdict is None or self._seccomp_verdict.ok)
 
     @property
     def seccomp_source(self) -> str:
         """Stable string identifying where the seccomp filter comes from."""
-        return "clippyshot-nsjail" if self._seccomp_policy is not None else "none"
+        return "clippyshot-nsjail" if self.seccomp_active else "none"
+
+    @property
+    def seccomp_verdict(self) -> seccomp_check.SeccompVerdict | None:
+        return self._seccomp_verdict
+
+    def _require_seccomp(self) -> None:
+        """Fail closed: refuse to run anything until a probe has shown the KAFEL policy is
+        enforced inside this jail.
+
+        A policy file on disk proves nothing -- the image's bundled kafel rejected
+        ``io_uring_setup``, so the policy never compiled. nsjail happened to exit 255 then,
+        but a filter that compiles and still lets the calls through would not, and neither
+        failure was reported as a seccomp problem. No CLIPPYSHOT_WARN_ON_INSECURE override:
+        see seccomp_check.
+        """
+        if self._seccomp_verdict is None:
+            if self._seccomp_policy is None:
+                verdict = seccomp_check.SeccompVerdict(
+                    False, "no KAFEL policy file (searched "
+                           f"{[str(p) for p in _SECCOMP_POLICY_CANDIDATES]})")
+            else:
+                try:
+                    digest = seccomp_check.filter_digest(self._seccomp_policy.read_bytes())
+                except OSError as exc:
+                    digest = f"unreadable:{exc}"
+                verdict = seccomp_check.verify(
+                    ("nsjail", self._nsjail, f"{self._seccomp_policy}:{digest}"), self._run)
+                if verdict.ok:
+                    _log.info("nsjail_seccomp_verified %s", verdict.detail)
+                else:
+                    _log.error("nsjail_seccomp_not_enforced %s", verdict.detail)
+                    self._insecurity_reasons.append("seccomp_not_enforced")
+            self._seccomp_verdict = verdict
+        if not self._seccomp_verdict.ok:
+            raise seccomp_check.SeccompNotEnforced(
+                f"nsjail refuses to run: its seccomp filter is not verified ({self._seccomp_verdict.detail})")
 
     @property
     def apparmor_profile(self) -> str:
@@ -165,6 +207,10 @@ class NsjailSandbox:
         return self.run(SandboxRequest(argv=["/bin/true"]))
 
     def run(self, request: SandboxRequest) -> SandboxResult:
+        self._require_seccomp()
+        return self._run(request)
+
+    def _run(self, request: SandboxRequest) -> SandboxResult:
         argv = self._build_argv(request)
         start = time.monotonic()
         killed = False
@@ -230,6 +276,7 @@ class NsjailSandbox:
         SIGKILLs a hung helper -- and killing this process kills the jailed one
         (verified on nsjail and bwrap: zero survivors).
         """
+        self._require_seccomp()
         return subprocess.Popen(self._build_argv(request, persistent=True), **popen_kwargs)
 
     def _build_argv(self, req: SandboxRequest, *, persistent: bool = False) -> list[str]:
@@ -291,9 +338,8 @@ class NsjailSandbox:
         if "PATH" not in req.env:
             argv += ["--env", "PATH=/usr/bin:/bin"]
 
-        # Seccomp policy (KAFEL DSL denylist of dangerous syscalls). Attached
-        # only if the policy file is present on disk; otherwise we already
-        # logged a WARN at construction time.
+        # Seccomp policy (KAFEL DSL denylist of dangerous syscalls). Without a policy file
+        # nothing reaches this point: run()/spawn() refuse first (_require_seccomp).
         if self._seccomp_policy is not None:
             argv += ["--seccomp_policy", str(self._seccomp_policy)]
 

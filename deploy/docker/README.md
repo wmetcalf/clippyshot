@@ -576,12 +576,11 @@ run bare metal.
 ### One-time host setup
 
 ```sh
-# 1. LibreOffice, pdftoppm, bubblewrap, nsjail, and libseccomp's Python
-#    bindings. The seccomp bindings ship as `python3-seccomp` on Ubuntu;
-#    they are not installable via pip.
+# 1. LibreOffice, pdftoppm, bubblewrap, nsjail. (bwrap's seccomp BPF is built
+#    in-process; no libseccomp Python bindings are needed.)
 sudo apt install -y \
     libreoffice libreoffice-writer libreoffice-calc libreoffice-impress libreoffice-draw \
-    poppler-utils bubblewrap python3-seccomp apparmor-utils
+    poppler-utils bubblewrap apparmor-utils
 # nsjail: Ubuntu 24.04 ships /usr/local/bin/nsjail via nsjail source or
 # you can grab a build from the ClippyShot Dockerfile. No apt package yet.
 
@@ -625,8 +624,9 @@ CLIPPYSHOT_SANDBOX=nsjail .venv/bin/clippyshot selftest
 
 A successful run ends with `selftest_passed` and `"secure": true,
 "insecurity_reasons": []`. If you see `insecurity_reasons` set,
-something is missing (AppArmor profile not loaded, libseccomp Python
-bindings missing, etc.).
+something is missing (AppArmor profile not loaded, etc.). A namespace
+backend whose seccomp filter cannot be verified is refused outright
+(`SeccompNotEnforced`), not selected as insecure.
 
 ### Force a specific backend
 
@@ -638,10 +638,10 @@ CLIPPYSHOT_SANDBOX=nsjail .venv/bin/clippyshot convert input.docx -o out/
 CLIPPYSHOT_SANDBOX=bwrap  .venv/bin/clippyshot convert input.docx -o out/
 ```
 
-`bwrap` applies **no seccomp syscall filter** (not implemented — it runs
-namespaces + cap-drop + AppArmor only), so it always reports insecure on the
-seccomp axis and needs `CLIPPYSHOT_WARN_ON_INSECURE=1` to activate. Prefer the
-`nsjail` backend, which enforces a real seccomp filter via its KAFEL policy.
+Both `nsjail` (KAFEL policy) and `bwrap` (BPF via `--seccomp`) apply the same
+seccomp denylist, and both refuse to run until a probe has shown it enforced
+(see `deploy/seccomp/README.md`). bwrap still reports insecure where the
+installed bubblewrap lacks `--cgroup-pids` (`pid_limit_missing`).
 
 ### Run the API server locally (nsjail backend)
 

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 from clippyshot.errors import SandboxError, SandboxUnavailable
-from clippyshot.sandbox import host_apparmor
+from clippyshot.sandbox import host_apparmor, seccomp_check
 from clippyshot.sandbox.base import SandboxRequest
 from clippyshot.types import SandboxResult
 
@@ -31,21 +31,6 @@ _DEFAULT_APPARMOR_PROFILE = "clippyshot-soffice"
 # successes are remembered: the probe runs once at startup on a healthy host, while a host
 # that is failing keeps being re-probed (and named) on every selection until it is fixed.
 _ATTACH_PROBE_OK: dict[tuple[str, str, str], host_apparmor.AaExecProbe] = {}
-
-
-# libseccomp Python bindings. NOT the `libseccomp` PyPI package — the real upstream bindings
-# ship as `seccomp` via the distro's `python3-libseccomp`. When present, the bwrap backend
-# builds a BPF denylist from it (seccomp_denylist.build_bpf_bytes) and installs it via
-# `bwrap --seccomp`; when ABSENT we proceed without an in-process filter and mark bwrap
-# insecure on the seccomp axis (the nsjail backend gets its seccomp from the KAFEL policy and
-# is the preferred production backend). _LIBSECCOMP_AVAILABLE is also the monkeypatch seam the
-# tests use to force the with/without-filter branches.
-try:  # pragma: no cover - import path depends on host
-    import seccomp as _libseccomp  # type: ignore[import-not-found]
-    _LIBSECCOMP_AVAILABLE = True
-except ImportError:  # pragma: no cover - exercised in the unit tests via monkeypatch
-    _libseccomp = None  # type: ignore[assignment]
-    _LIBSECCOMP_AVAILABLE = False
 
 
 def _probe_bwrap_cgroup_pids(bwrap_path: str) -> bool:
@@ -133,26 +118,21 @@ class BwrapSandbox:
                 "note=set_--pids-limit_256_in_docker_or_configure_k8s_pod_PID_limit"
             )
 
-        # Seccomp: bwrap installs a pre-built BPF program fed via --seccomp <fd>. Build a
-        # DEFAULT-ALLOW + ERRNO(1)-denylist BPF via libseccomp — the SAME denylist the nsjail
-        # backend applies as KAFEL (a parity test guards the two against drift) — and pass it
-        # per-run (see run() / _build_argv). The filter installs behind bwrap's PR_SET_NO_NEW_PRIVS
-        # (no privilege needed) and persists across the aa-exec execve, so it still covers soffice.
-        # Where python3-libseccomp is absent (it's a distro package, not on PyPI) build_bpf_bytes()
-        # returns None and we keep marking the seccomp axis insecure — fail-safe, so select_sandbox
-        # never mistakes an UNFILTERED bwrap for secure just because the module import succeeded.
-        from clippyshot.sandbox.seccomp_denylist import build_bpf_bytes
+        # Seccomp: bwrap installs a pre-built BPF program fed via --seccomp <fd>: the DEFAULT-ALLOW
+        # + ERRNO(1) denylist the nsjail backend applies as KAFEL (a parity test guards the two
+        # against drift), assembled in seccomp_denylist with no libseccomp dependency. It installs
+        # behind bwrap's PR_SET_NO_NEW_PRIVS and persists across the aa-exec execve, so it covers
+        # soffice. Nothing runs until a probe has shown the filter is enforced (_require_seccomp);
+        # without a program (a non-x86_64 host) bwrap refuses to run at all.
+        from clippyshot.sandbox import seccomp_denylist
 
-        # Gate on the module-level availability flag (the tests' monkeypatch seam) so
-        # _LIBSECCOMP_AVAILABLE=False deterministically forces the no-filter/insecure branch.
-        self._seccomp_bpf = build_bpf_bytes() if _LIBSECCOMP_AVAILABLE else None
-        self._seccomp_active = self._seccomp_bpf is not None
+        self._seccomp_bpf = seccomp_denylist.build_bpf_bytes()
+        self._seccomp_verdict: seccomp_check.SeccompVerdict | None = None
         self._insecurity_reasons: list[str] = []
-        if not self._seccomp_active:
+        if self._seccomp_bpf is None:
             _log.warning(
-                "bwrap_seccomp_unavailable impact=soffice_runs_without_syscall_filter "
-                "fix=install_python3-libseccomp_or_use_nsjail_backend_or_set_CLIPPYSHOT_WARN_ON_INSECURE "
-                "note=nsjail_backend_has_seccomp_via_KAFEL"
+                "bwrap_seccomp_unavailable impact=bwrap_refuses_to_run "
+                "reason=no_denylist_bpf_for_this_arch note=use_the_nsjail_or_container_backend"
             )
             self._insecurity_reasons.append("seccomp_missing")
         if not self._aa_exec:
@@ -166,12 +146,42 @@ class BwrapSandbox:
 
     @property
     def seccomp_active(self) -> bool:
-        return self._seccomp_active
+        """A program is configured and has not failed verification. Nothing runs before the
+        verdict (run/spawn verify first), so after any run this is the verified answer."""
+        return self._seccomp_bpf is not None and (
+            self._seccomp_verdict is None or self._seccomp_verdict.ok)
 
     @property
     def seccomp_source(self) -> str:
         """Stable string identifying where the seccomp filter comes from."""
-        return "clippyshot-bwrap" if self._seccomp_active else "none"
+        return "clippyshot-bwrap" if self.seccomp_active else "none"
+
+    @property
+    def seccomp_verdict(self) -> seccomp_check.SeccompVerdict | None:
+        return self._seccomp_verdict
+
+    def _require_seccomp(self) -> None:
+        """Fail closed: refuse to run anything until a probe has shown the BPF denylist is
+        enforced inside this sandbox. The image once shipped a bwrap with no filter at all
+        (its builder could not import libseccomp there) and still ran it. No
+        CLIPPYSHOT_WARN_ON_INSECURE override: see seccomp_check."""
+        if self._seccomp_verdict is None:
+            if self._seccomp_bpf is None:
+                verdict = seccomp_check.SeccompVerdict(
+                    False, "no seccomp BPF program for this host (the denylist is x86_64-only)")
+            else:
+                verdict = seccomp_check.verify(
+                    ("bwrap", self._bwrap, seccomp_check.filter_digest(self._seccomp_bpf)),
+                    self._run)
+                if verdict.ok:
+                    _log.info("bwrap_seccomp_verified %s", verdict.detail)
+                else:
+                    _log.error("bwrap_seccomp_not_enforced %s", verdict.detail)
+                    self._insecurity_reasons.append("seccomp_not_enforced")
+            self._seccomp_verdict = verdict
+        if not self._seccomp_verdict.ok:
+            raise seccomp_check.SeccompNotEnforced(
+                f"bwrap refuses to run: its seccomp filter is not verified ({self._seccomp_verdict.detail})")
 
     @property
     def apparmor_profile(self) -> str:
@@ -225,6 +235,10 @@ class BwrapSandbox:
         return self.run(SandboxRequest(argv=["/bin/true"]))
 
     def run(self, request: SandboxRequest) -> SandboxResult:
+        self._require_seccomp()
+        return self._run(request)
+
+    def _run(self, request: SandboxRequest) -> SandboxResult:
         # A FRESH memfd per run holds the BPF program bwrap reads via --seccomp <fd>. pass_fds
         # keeps it open + inheritable across the close_fds=True fork; the parent closes its copy
         # in the finally (the child already inherited it at fork time).
@@ -285,6 +299,7 @@ class BwrapSandbox:
         those bound a single moment, not a lifetime. Each request is bounded by the
         client.
         """
+        self._require_seccomp()
         # The seccomp memfd, exactly as `run()` builds it. Omitting it silently dropped
         # `--seccomp` and left the LONG-LIVED image parser without the syscall denylist --
         # a helper that lives for a whole slot is the last place to lose it (codex).

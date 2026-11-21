@@ -15,10 +15,11 @@
 // Loaded by src/clippyshot/sandbox/nsjail.py via --seccomp_policy.
 // Deployed into the runtime image at /etc/clippyshot/seccomp.policy.
 //
-// KAFEL caveats: not every Linux syscall name is a valid KAFEL identifier
-// (e.g. umount2, stime, _sysctl, pidfd_*, landlock_*). Only names the
-// KAFEL lexer accepts appear below. Others live in the Docker-format JSON
-// profile (deploy/seccomp/clippyshot.seccomp.json).
+// KAFEL caveats: the kafel bundled with nsjail knows only the syscalls up to
+// roughly Linux 4.x (its amd64 table stops before statx), and an unknown name
+// fails the WHOLE policy. Anything newer is written by number with its name in
+// a trailing comment: `SYSCALL[425],  // io_uring_setup`. The image build and
+// tests/docker/test_inner_seccomp.py compile this file with the shipped nsjail.
 //
 // Syntax reference: https://github.com/google/kafel
 
@@ -67,10 +68,12 @@ POLICY clippyshot_deny {
     bpf,
     perf_event_open,
 
-    // io_uring — prolific attack surface; LO doesn't use it
-    io_uring_setup,
-    io_uring_enter,
-    io_uring_register,
+    // io_uring — prolific attack surface; LO doesn't use it. By NUMBER: the kafel bundled
+    // with nsjail 3.4 has no io_uring names, and ONE unknown name fails the whole policy --
+    // nsjail then exits 255 ("Couldn't prepare sandboxing policy") on every run.
+    SYSCALL[425],  // io_uring_setup
+    SYSCALL[426],  // io_uring_enter
+    SYSCALL[427],  // io_uring_register
 
     // Userfaultfd (fault-injection primitives)
     userfaultfd,

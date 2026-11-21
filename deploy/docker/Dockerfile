@@ -113,7 +113,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         docker.io \
         python3 \
         python3-pip \
-        python3-seccomp \
         python3-venv \
         tesseract-ocr \
         tesseract-ocr-all \
@@ -168,6 +167,20 @@ RUN python3 -m venv /opt/clippyshot \
     && rm -rf /tmp/build
 
 ENV PATH=/opt/clippyshot/bin:$PATH
+
+# Fail the BUILD, not a later job, if either inner sandbox would ship without its seccomp
+# filter. Both once did, silently: the bundled kafel rejected `io_uring_setup` (nsjail then
+# exits 255 on every run), and the bwrap BPF came from libseccomp bindings this venv cannot
+# import (bwrap then had no filter). The BPF is now assembled without libseccomp; nsjail's
+# policy is compiled here with the very nsjail this image ships. At runtime each backend also
+# probes its filter before the first run and refuses to run if it is not enforced; the full
+# in-image proof is tests/docker/test_inner_seccomp.py.
+RUN python -c "from clippyshot.sandbox.seccomp_denylist import build_bpf_bytes; \
+assert build_bpf_bytes(), 'no bwrap seccomp BPF program'" \
+    && out="$(nsjail --really_quiet --mode o --seccomp_policy /etc/clippyshot/seccomp.policy \
+        -- /bin/true 2>&1 || true)" \
+    && if printf '%s' "$out" | grep -qi 'policy'; then \
+        echo "nsjail cannot compile /etc/clippyshot/seccomp.policy: $out" >&2; exit 1; fi
 
 USER clippy
 WORKDIR /var/lib/clippyshot
