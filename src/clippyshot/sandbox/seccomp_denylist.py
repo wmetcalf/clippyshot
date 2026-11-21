@@ -11,6 +11,14 @@ equals the KAFEL ``ERRNO(1)`` block — stops the two backends from drifting.
 ``python3-libseccomp`` is a *distro* package (not on PyPI); where it's absent the builder
 returns ``None`` and the bwrap backend keeps marking itself insecure on the seccomp axis
 (fail-safe — same as before this module existed).
+
+**Mount surface.** Besides ``mount``/``umount2``/``pivot_root`` the list denies ``chroot``/``fchroot``
+and the whole new mount API (``fsopen``/``fsconfig``/``fsmount``/``fspick``/``move_mount``/
+``open_tree``/``open_tree_attr``/``mount_setattr``). Without them a child that ever holds
+CAP_SYS_ADMIN in its namespace can build or reflag a mount without calling mount(2), for example
+clearing ``ro`` on one of the binds the backends rely on. The docker JSON profile
+(``deploy/seccomp/clippyshot.seccomp.json``) is an allowlist and denies them by omission. This
+mirrors blastbox's worker denylist (blastbox #216, released in 0.1.51).
 """
 from __future__ import annotations
 
@@ -31,7 +39,13 @@ DENY_ERRNO1: tuple[str, ...] = (
     # (`umount` resolves to a pseudo that never matches); the nsjail KAFEL policy names the same
     # syscall `umount` (KAFEL can't lex `umount2`). Same intent, backend-appropriate name — the
     # parity test normalizes it.
-    "mount", "umount2", "pivot_root",
+    "mount", "umount2", "pivot_root", "chroot", "fchroot",
+    # The new mount API (Linux 5.2+) builds and attaches mounts without mount(2): fsopen ->
+    # fsconfig -> fsmount -> move_mount; open_tree/open_tree_attr clone a subtree; fspick
+    # reconfigures an existing mount; mount_setattr flips a mount's flags (e.g. clears `ro`).
+    # The KAFEL policy names these by NUMBER (an older bundled kafel predates some names).
+    "fsopen", "fsconfig", "fsmount", "fspick", "move_mount",
+    "open_tree", "open_tree_attr", "mount_setattr",
     # Kernel exec / reboot
     "kexec_load", "kexec_file_load", "reboot",
     # Process inspection/control of others
@@ -62,6 +76,35 @@ DENY_ERRNO1: tuple[str, ...] = (
 )
 
 
+# Numbers for names a distro libseccomp may predate (2.5.5, Ubuntu 24.04's, has no
+# open_tree_attr, which is Linux 6.15, nor fchroot, 7.1). Without a fallback the fail-closed
+# builder below would drop the WHOLE filter on such a host. These calls sit in the unified
+# asm-generic range, so the number is the same on x86_64 and aarch64; keyed by arch anyway so a
+# port can't silently reuse an x86_64 number for an arch where it differs.
+_FALLBACK_NR: dict[str, dict[str, int]] = {
+    "open_tree": {"x86_64": 428, "aarch64": 428},
+    "move_mount": {"x86_64": 429, "aarch64": 429},
+    "fsopen": {"x86_64": 430, "aarch64": 430},
+    "fsconfig": {"x86_64": 431, "aarch64": 431},
+    "fsmount": {"x86_64": 432, "aarch64": 432},
+    "fspick": {"x86_64": 433, "aarch64": 433},
+    "mount_setattr": {"x86_64": 442, "aarch64": 442},
+    "open_tree_attr": {"x86_64": 467, "aarch64": 467},
+    "fchroot": {"x86_64": 472, "aarch64": 472},   # Linux 7.1; chroot by fd
+}
+
+
+def _syscall_ref(seccomp: object, name: str, arch: str) -> str | int:
+    """The name if this libseccomp resolves it, else its known number for ``arch``, else the
+    name (so add_rule raises and the builder fails closed)."""
+    try:
+        if seccomp.resolve_syscall(seccomp.Arch.NATIVE, name) >= 0:  # type: ignore[attr-defined]
+            return name
+    except Exception:  # noqa: BLE001
+        pass
+    return _FALLBACK_NR.get(name, {}).get(arch, name)
+
+
 def build_bpf_bytes() -> bytes | None:
     """Build a ``DEFAULT ALLOW`` + ``ERRNO(1)``-denylist BPF program via libseccomp and return
     its raw bytes (to feed ``bwrap --seccomp <fd>``).
@@ -81,11 +124,12 @@ def build_bpf_bytes() -> bytes | None:
         import seccomp  # type: ignore[import-not-found]
     except Exception:
         return None
+    arch = {"amd64": "x86_64"}.get(platform.machine(), platform.machine())
     try:
         f = seccomp.SyscallFilter(defaction=seccomp.ALLOW)
         for name in DENY_ERRNO1:
             try:
-                f.add_rule(seccomp.ERRNO(1), name)
+                f.add_rule(seccomp.ERRNO(1), _syscall_ref(seccomp, name, arch))
             except Exception as e:  # noqa: BLE001
                 _log.warning("seccomp: cannot add deny rule for %r (%s) — failing closed", name, e)
                 return None  # fail-closed: no partial denylist

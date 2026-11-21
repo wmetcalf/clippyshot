@@ -40,6 +40,9 @@ MUST_DENY = {
     "name_to_handle_at", "open_by_handle_at",
     "perf_event_open", "userfaultfd",
     "fanotify_init", "fanotify_mark",
+    # The new mount API + chroot (blastbox #216): mount(2) alone is not the mount surface.
+    "chroot", "fchroot", "fsopen", "fsconfig", "fsmount", "fspick", "move_mount",
+    "open_tree", "open_tree_attr", "mount_setattr",
 }
 
 # Syscalls that soffice needs — must NOT be in the deny block.
@@ -55,21 +58,30 @@ MUST_NOT_DENY = {
 }
 
 
+def _deny_token_list(body: str) -> list[str]:
+    """Syscall names in an ERRNO(1) block body, in order. A numbered entry
+    (``SYSCALL[428],  // open_tree``) names its syscall in the trailing comment."""
+    tokens: list[str] = []
+    for line in body.splitlines():
+        code, _, comment = line.partition("//")
+        for tok in code.split(","):
+            tok = tok.strip()
+            if tok and tok.isidentifier():
+                tokens.append(tok)
+            elif re.fullmatch(r"SYSCALL\[\d+\]", tok):
+                name = comment.strip()
+                assert name.isidentifier(), f"{tok} has no syscall name in its comment"
+                tokens.append(name)
+    return tokens
+
+
 def _extract_deny_tokens() -> set[str]:
     """Extract all syscall identifiers from the ERRNO(1) { ... } block."""
     text = POLICY.read_text()
     match = re.search(r"ERRNO\(1\)\s*\{([^}]*)\}", text, re.DOTALL)
     if not match:
         return set()
-    body = match.group(1)
-    tokens = set()
-    for line in body.splitlines():
-        line = line.split("//", 1)[0].strip()  # strip comments
-        for tok in line.split(","):
-            tok = tok.strip()
-            if tok and tok.isidentifier():
-                tokens.add(tok)
-    return tokens
+    return set(_deny_token_list(match.group(1)))
 
 
 def test_seccomp_policy_file_exists() -> None:
@@ -114,14 +126,7 @@ def test_no_duplicate_syscalls_in_deny_block() -> None:
     text = POLICY.read_text()
     match = re.search(r"ERRNO\(1\)\s*\{([^}]*)\}", text, re.DOTALL)
     assert match is not None, "no ERRNO(1) block found"
-    body = match.group(1)
-    tokens = []
-    for line in body.splitlines():
-        line = line.split("//", 1)[0].strip()
-        for tok in line.split(","):
-            tok = tok.strip()
-            if tok and tok.isidentifier():
-                tokens.append(tok)
+    tokens = _deny_token_list(match.group(1))
     dupes = [t for t in tokens if tokens.count(t) > 1]
     assert len(tokens) == len(set(tokens)), f"duplicates in DENY: {dupes}"
 
