@@ -641,7 +641,7 @@ class Converter:
             else "clippyshot-soffice"
         )
         # Where the seccomp filter applied to soffice comes from. Values:
-        #   "clippyshot-nsjail"   — our KAFEL policy via nsjail --seccomp_policy
+        #   "clippyshot-nsjail"   — our KAFEL policy via nsjail --seccomp_string
         #   "clippyshot-bwrap"    — our denylist BPF via bwrap --seccomp
         #   "container-runtime"   — inherited from Docker's docker-default /
         #                           Kubernetes RuntimeDefault profile (the

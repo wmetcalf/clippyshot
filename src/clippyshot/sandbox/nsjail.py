@@ -125,11 +125,18 @@ class NsjailSandbox:
         self._seccomp_policy_text: str | None = None
         if self._seccomp_policy is not None:
             try:
-                self._seccomp_policy_text = self._seccomp_policy.read_text()
+                self._seccomp_policy_text = self._seccomp_policy.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as exc:
                 _log.warning("nsjail_seccomp_policy_unreadable path=%s error=%s",
                              self._seccomp_policy, exc)
                 self._seccomp_policy = None
+            else:
+                # nsjail treats an empty --seccomp_string as UNSET and runs with no filter
+                # (an empty --seccomp_policy file was a compile error). Treat it as missing.
+                if not self._seccomp_policy_text.strip():
+                    _log.warning("nsjail_seccomp_policy_empty path=%s", self._seccomp_policy)
+                    self._seccomp_policy = None
+                    self._seccomp_policy_text = None
         self._proc_apparmor_supported = _probe_nsjail_proc_apparmor(self._nsjail)
         if self._seccomp_policy is None:
             _log.warning(

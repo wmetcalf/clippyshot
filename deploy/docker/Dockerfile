@@ -177,8 +177,9 @@ ENV PATH=/opt/clippyshot/bin:$PATH
 # in-image proof is tests/docker/test_inner_seccomp.py.
 RUN python -c "from clippyshot.sandbox.seccomp_denylist import build_bpf_bytes; \
 assert build_bpf_bytes(), 'no bwrap seccomp BPF program'" \
-    && out="$(nsjail --really_quiet --mode o --seccomp_policy /etc/clippyshot/seccomp.policy \
-        -- /bin/true 2>&1 || true)" \
+    && test -n "$(tr -d '[:space:]' < /etc/clippyshot/seccomp.policy)" \
+    && out="$(nsjail --really_quiet --mode o \
+        --seccomp_string "$(cat /etc/clippyshot/seccomp.policy)" -- /bin/true 2>&1 || true)" \
     && if printf '%s' "$out" | grep -qi 'policy'; then \
         echo "nsjail cannot compile /etc/clippyshot/seccomp.policy: $out" >&2; exit 1; fi
 

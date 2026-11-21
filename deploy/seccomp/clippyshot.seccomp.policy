@@ -12,7 +12,7 @@
 // LibreOffice version (or any new glibc) introduces a syscall we didn't
 // explicitly permit, causing silent SIGSYS at startup.
 //
-// Loaded by src/clippyshot/sandbox/nsjail.py via --seccomp_policy.
+// Loaded by src/clippyshot/sandbox/nsjail.py and passed inline via --seccomp_string.
 // Deployed into the runtime image at /etc/clippyshot/seccomp.policy.
 //
 // KAFEL caveats: the kafel bundled with nsjail knows only the syscalls up to

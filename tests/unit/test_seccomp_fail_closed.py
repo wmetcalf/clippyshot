@@ -422,3 +422,22 @@ def test_binary_id_follows_path_and_changes_on_replacement(tmp_path, monkeypatch
     new.chmod(0o755)
     new.replace(exe)                         # replaced at the same path
     assert seccomp_check.binary_id("nsjail") != a
+
+
+def test_an_empty_policy_file_is_missing_not_an_unfiltered_run(monkeypatch, tmp_path) -> None:
+    """nsjail treats `--seccomp_string ""` as unset -- no filter at all."""
+    from clippyshot.sandbox import nsjail
+
+    fake = tmp_path / "nsjail"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o755)
+    pol = tmp_path / "empty.policy"
+    pol.write_text("  \n")
+    monkeypatch.setattr(nsjail, "_probe_nsjail_proc_apparmor", lambda _p: False)
+    sb = nsjail.NsjailSandbox(str(fake), seccomp_policy=pol)
+    assert "seccomp_policy_missing" in sb.insecurity_reasons
+    from clippyshot.sandbox.base import SandboxRequest
+
+    assert "--seccomp_string" not in sb._build_argv(SandboxRequest(argv=["/bin/true"]))
+    with pytest.raises(SeccompNotEnforced):
+        sb.run(SandboxRequest(argv=["/bin/true"]))
