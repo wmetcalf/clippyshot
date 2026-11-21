@@ -176,7 +176,7 @@ class NsjailSandbox:
                 digest = seccomp_check.filter_digest(self._seccomp_policy.read_bytes())
             except OSError as exc:
                 digest = f"unreadable:{exc}"
-            key = ("nsjail", self._nsjail, f"{self._seccomp_policy}:{digest}")
+            key = ("nsjail", seccomp_check.binary_id(self._nsjail), f"{self._seccomp_policy}:{digest}")
         self._seccomp_gate.require(
             key=key,
             missing=("no KAFEL policy file (searched "

@@ -168,7 +168,7 @@ class BwrapSandbox:
         CLIPPYSHOT_WARN_ON_INSECURE override: see seccomp_check."""
         key = None
         if self._seccomp_bpf is not None:
-            key = ("bwrap", self._bwrap, seccomp_check.filter_digest(self._seccomp_bpf))
+            key = ("bwrap", seccomp_check.binary_id(self._bwrap), seccomp_check.filter_digest(self._seccomp_bpf))
         self._seccomp_gate.require(
             key=key,
             missing="no seccomp BPF program for this host (the denylist is x86_64-only)",

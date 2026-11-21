@@ -379,3 +379,29 @@ def test_concurrent_first_requests_run_one_probe(monkeypatch, tmp_path) -> None:
     for t in ts:
         t.join()
     assert not errors and len(probes) == 1
+
+
+def test_a_changed_policy_is_re_probed(monkeypatch, tmp_path) -> None:
+    """nsjail reads the policy file on every run; a pass for the old bytes must not vouch for
+    new ones."""
+    import json
+
+    sb = _nsjail(monkeypatch, tmp_path)
+    monkeypatch.setattr(seccomp_check, "outside_report", lambda: _report(UNFILTERED, 0))
+    probes: list[int] = []
+
+    def fake_run(req):
+        if req.argv[0] == seccomp_check.PROBE_PYTHON:
+            probes.append(1)
+            return _result(0, json.dumps(_report(ALL_EPERM, 1)).encode())
+        return _result(0)
+
+    monkeypatch.setattr(sb, "_run", fake_run)
+    from clippyshot.sandbox.base import SandboxRequest
+
+    sb.run(SandboxRequest(argv=["/bin/true"]))
+    sb.run(SandboxRequest(argv=["/bin/true"]))
+    assert len(probes) == 1
+    (tmp_path / "p.policy").write_text("POLICY q { } USE q DEFAULT ALLOW\n")
+    sb.run(SandboxRequest(argv=["/bin/true"]))
+    assert len(probes) == 2

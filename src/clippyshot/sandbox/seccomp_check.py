@@ -32,6 +32,7 @@ import errno
 import hashlib
 import json
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -179,6 +180,16 @@ def filter_digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def binary_id(path: str) -> str:
+    """The path plus identity of the binary at it, so a cached pass does not outlive a
+    replaced nsjail/bwrap."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return path
+    return f"{path}@{st.st_dev}:{st.st_ino}:{st.st_mtime_ns}:{st.st_size}"
+
+
 def verify(
     key: tuple[str, str, str],
     run_unchecked: Callable[[SandboxRequest], SandboxResult],
@@ -221,6 +232,7 @@ class SeccompGate:
         self.backend = backend
         self.verdict: SeccompVerdict | None = None
         self._failed_at: float | None = None
+        self._key: tuple[str, str, str] | None = None
         self._lock = threading.Lock()
 
     def require(
@@ -235,7 +247,9 @@ class SeccompGate:
         configured at all (``missing`` says why)."""
         with self._lock:
             v = self.verdict
-            due = v is None or (
+            # A pass is final only for the filter it proved: nsjail re-reads its policy file on
+            # every run, so new policy bytes (or a replaced binary) need a new probe.
+            due = v is None or key != self._key or (
                 not v.ok and (self._failed_at is None
                               or time.monotonic() - self._failed_at >= RETRY_AFTER_S))
             if due:
@@ -252,6 +266,7 @@ class SeccompGate:
                             reasons.append("seccomp_not_enforced")
                 self.verdict = v
                 self._failed_at = None if v.ok else time.monotonic()
+                self._key = key
         assert v is not None
         if not v.ok:
             raise SeccompNotEnforced(
