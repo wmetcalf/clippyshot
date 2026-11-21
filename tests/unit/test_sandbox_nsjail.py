@@ -57,7 +57,7 @@ def test_nsjail_mounts_input_readonly(tmp_path: Path):
 
 @needs_nsjail
 def test_nsjail_argv_includes_seccomp_policy():
-    """The nsjail argv must include --seccomp_policy with the deployed file."""
+    """The nsjail argv must carry the deployed policy (inline via --seccomp_string)."""
     sb = NsjailSandbox()
     # Seccomp policy is resolved at construction time; verify it found the file.
     assert sb._seccomp_policy is not None, (  # noqa: SLF001
@@ -66,9 +66,10 @@ def test_nsjail_argv_includes_seccomp_policy():
     )
     req = SandboxRequest(argv=["/bin/true"], limits=Limits())
     argv = sb._build_argv(req)  # noqa: SLF001
-    assert "--seccomp_policy" in argv
-    idx = argv.index("--seccomp_policy")
-    assert argv[idx + 1].endswith("clippyshot.seccomp.policy"), argv[idx + 1]
+    assert "--seccomp_string" in argv
+    idx = argv.index("--seccomp_string")
+    # The policy is passed INLINE, as read at construction: the probe proves these bytes.
+    assert argv[idx + 1] == sb._seccomp_policy.read_text()  # noqa: SLF001
 
 
 @needs_nsjail

@@ -33,6 +33,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -183,11 +184,16 @@ def filter_digest(data: bytes) -> str:
 def binary_id(path: str) -> str:
     """The path plus identity of the binary at it, so a cached pass does not outlive a
     replaced nsjail/bwrap."""
+    # Resolve a bare name the way the launch will (PATH), and follow symlinks: the identity
+    # that matters is the file actually executed. ctime too, since an in-place overwrite can
+    # preserve mtime and size.
+    resolved = os.path.realpath(shutil.which(path) or path)
     try:
-        st = os.stat(path)
+        st = os.stat(resolved)
     except OSError:
-        return path
-    return f"{path}@{st.st_dev}:{st.st_ino}:{st.st_mtime_ns}:{st.st_size}"
+        return resolved
+    return (f"{resolved}@{st.st_dev}:{st.st_ino}:{st.st_mtime_ns}:{st.st_ctime_ns}:"
+            f"{st.st_size}")
 
 
 def verify(

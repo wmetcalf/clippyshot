@@ -381,27 +381,44 @@ def test_concurrent_first_requests_run_one_probe(monkeypatch, tmp_path) -> None:
     assert not errors and len(probes) == 1
 
 
-def test_a_changed_policy_is_re_probed(monkeypatch, tmp_path) -> None:
-    """nsjail reads the policy file on every run; a pass for the old bytes must not vouch for
-    new ones."""
-    import json
+def test_a_policy_rewritten_after_the_probe_never_runs() -> None:
+    """The run must apply exactly the bytes the probe proved. nsjail re-read a policy PATH on
+    every run, so a file rewritten after verification ran unproven; the text is now read once
+    and passed inline."""
+    import tempfile
 
-    sb = _nsjail(monkeypatch, tmp_path)
-    monkeypatch.setattr(seccomp_check, "outside_report", lambda: _report(UNFILTERED, 0))
-    probes: list[int] = []
-
-    def fake_run(req):
-        if req.argv[0] == seccomp_check.PROBE_PYTHON:
-            probes.append(1)
-            return _result(0, json.dumps(_report(ALL_EPERM, 1)).encode())
-        return _result(0)
-
-    monkeypatch.setattr(sb, "_run", fake_run)
+    from clippyshot.sandbox import nsjail
     from clippyshot.sandbox.base import SandboxRequest
 
-    sb.run(SandboxRequest(argv=["/bin/true"]))
-    sb.run(SandboxRequest(argv=["/bin/true"]))
-    assert len(probes) == 1
-    (tmp_path / "p.policy").write_text("POLICY q { } USE q DEFAULT ALLOW\n")
-    sb.run(SandboxRequest(argv=["/bin/true"]))
-    assert len(probes) == 2
+    with tempfile.TemporaryDirectory() as d:
+        fake = Path(d) / "nsjail"
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(0o755)
+        pol = Path(d) / "p.policy"
+        pol.write_text("POLICY good { ERRNO(1) { mount } } USE good DEFAULT ALLOW\n")
+        orig = nsjail._probe_nsjail_proc_apparmor
+        nsjail._probe_nsjail_proc_apparmor = lambda _p: False
+        try:
+            sb = nsjail.NsjailSandbox(str(fake), seccomp_policy=pol)
+        finally:
+            nsjail._probe_nsjail_proc_apparmor = orig
+        before = sb._build_argv(SandboxRequest(argv=["/bin/true"]))
+        pol.write_text("POLICY bad { } USE bad DEFAULT ALLOW\n")
+        after = sb._build_argv(SandboxRequest(argv=["/bin/true"]))
+    assert "--seccomp_policy" not in after
+    assert after[after.index("--seccomp_string") + 1] == before[before.index("--seccomp_string") + 1]
+    assert "good" in after[after.index("--seccomp_string") + 1]
+
+
+def test_binary_id_follows_path_and_changes_on_replacement(tmp_path, monkeypatch) -> None:
+    exe = tmp_path / "nsjail"
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    a = seccomp_check.binary_id("nsjail")
+    assert str(exe) in a                     # a bare name resolves through PATH
+    new = tmp_path / "nsjail.new"
+    new.write_text("#!/bin/sh\n")
+    new.chmod(0o755)
+    new.replace(exe)                         # replaced at the same path
+    assert seccomp_check.binary_id("nsjail") != a

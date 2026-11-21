@@ -39,7 +39,9 @@ else is allowed (`DEFAULT ALLOW`).
    up the policy in these locations (first-match wins):
    - `/etc/clippyshot/seccomp.policy` (runtime image)
    - `<repo>/deploy/seccomp/clippyshot.seccomp.policy` (dev checkout)
-3. nsjail is invoked with `--seccomp_policy <path>`. The KAFEL parser
+3. nsjail is handed the policy text inline (`--seccomp_string`, read once
+   when the backend is built, so every run applies the bytes the probe
+   proved). The KAFEL parser
    compiles the rules into a BPF program at startup; malformed rules
    cause nsjail to exit 255 ("Couldn't prepare sandboxing policy") on
    every run. The kafel bundled with nsjail 3.4 knows no syscall newer

@@ -656,8 +656,8 @@ stack).
 Notes:
 
 - `nsjail` gives you user+mount+PID+IPC+UTS+cgroup+network namespaces,
-  rlimits, and KAFEL-based seccomp via `--seccomp_policy
-  /etc/clippyshot/seccomp.policy` (denylist-style — blocks only the
+  rlimits, and KAFEL-based seccomp from `/etc/clippyshot/seccomp.policy`, passed
+  inline via `--seccomp_string` (denylist-style — blocks only the
   dangerous syscalls, same philosophy as Docker's default).
 - `bwrap` gives you the same namespace model + cap-drop + AppArmor, but
   **no seccomp syscall filter** (not implemented). Slightly faster to spin up

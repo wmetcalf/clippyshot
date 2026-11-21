@@ -119,6 +119,17 @@ class NsjailSandbox:
         self._seccomp_policy: Path | None = (
             seccomp_policy if seccomp_policy is not None else _find_seccomp_policy()
         )
+        # The policy TEXT, read once and handed to nsjail inline (--seccomp_string), so the
+        # bytes the probe proves are exactly the bytes every later run applies. A path would
+        # be re-read by nsjail on each run, after the gate had vouched for earlier bytes.
+        self._seccomp_policy_text: str | None = None
+        if self._seccomp_policy is not None:
+            try:
+                self._seccomp_policy_text = self._seccomp_policy.read_text()
+            except (OSError, UnicodeDecodeError) as exc:
+                _log.warning("nsjail_seccomp_policy_unreadable path=%s error=%s",
+                             self._seccomp_policy, exc)
+                self._seccomp_policy = None
         self._proc_apparmor_supported = _probe_nsjail_proc_apparmor(self._nsjail)
         if self._seccomp_policy is None:
             _log.warning(
@@ -149,7 +160,8 @@ class NsjailSandbox:
         first; select_sandbox smoketests every candidate). Before that it is False, so nothing
         stamps an unproven filter into metadata."""
         v = self._seccomp_gate.verdict
-        return self._seccomp_policy is not None and v is not None and v.ok
+        return (self._seccomp_policy is not None and self._seccomp_policy_text is not None
+                and v is not None and v.ok)
 
     @property
     def seccomp_source(self) -> str:
@@ -171,12 +183,9 @@ class NsjailSandbox:
         see seccomp_check.
         """
         key = None
-        if self._seccomp_policy is not None:
-            try:
-                digest = seccomp_check.filter_digest(self._seccomp_policy.read_bytes())
-            except OSError as exc:
-                digest = f"unreadable:{exc}"
-            key = ("nsjail", seccomp_check.binary_id(self._nsjail), f"{self._seccomp_policy}:{digest}")
+        if self._seccomp_policy is not None and self._seccomp_policy_text is not None:
+            key = ("nsjail", seccomp_check.binary_id(self._nsjail),
+                   seccomp_check.filter_digest(self._seccomp_policy_text.encode()))
         self._seccomp_gate.require(
             key=key,
             missing=("no KAFEL policy file (searched "
@@ -334,8 +343,8 @@ class NsjailSandbox:
 
         # Seccomp policy (KAFEL DSL denylist of dangerous syscalls). Without a policy file
         # nothing reaches this point: run()/spawn() refuse first (_require_seccomp).
-        if self._seccomp_policy is not None:
-            argv += ["--seccomp_policy", str(self._seccomp_policy)]
+        if self._seccomp_policy is not None and self._seccomp_policy_text is not None:
+            argv += ["--seccomp_string", self._seccomp_policy_text]
 
         # Strict AppArmor profile for the child process. nsjail calls
         # aa_change_onexec() with this name before execve(), so the profile
