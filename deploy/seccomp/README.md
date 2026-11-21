@@ -20,6 +20,7 @@ config, glibc):
 | Modules | `init_module`, `finit_module`, `delete_module` |
 | Process inspect | `ptrace`, `process_vm_readv`, `process_vm_writev`, `kcmp` |
 | Mount / namespace | `mount`, `umount`, `umount2`, `pivot_root`, `swapon`, `swapoff`, `setns`, `unshare` |
+| New mount API / chroot | `fsopen`, `fsconfig`, `fsmount`, `fspick`, `move_mount`, `open_tree`, `open_tree_attr`, `mount_setattr`, `chroot`, `fchroot` (the mount-API calls and `fchroot` by number, `SYSCALL[n]`, so an older bundled kafel still compiles the policy) |
 | Host state | `reboot`, `settimeofday`, `clock_settime`, `clock_adjtime`, `sethostname`, `setdomainname` |
 | x86 IO / LDT | `iopl`, `ioperm`, `modify_ldt` |
 | fd-from-handle | `name_to_handle_at`, `open_by_handle_at` |
